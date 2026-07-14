@@ -126,7 +126,9 @@ if "mcpServers" in config:
 
 
 async def log_handler(message: LogMessage) -> None:
-    level = message.level.upper()
+    # MCP 日志级别本身是小写；之前 .upper() 会让下面所有小写 case 都匹配不到，
+    # 导致 warning/error 全被降级成 info。这里统一用小写。
+    level = message.level.lower()
     data = message.data
     match level:
         case "debug":

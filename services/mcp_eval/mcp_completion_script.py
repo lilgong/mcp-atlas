@@ -52,7 +52,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("completion_results/mcp_eval.log"),
+        logging.FileHandler("completion_results/mcp_eval.log", encoding="utf-8"),
     ],
 )
 
@@ -252,7 +252,7 @@ class AsyncMCPTrajectoryGenerator:
             "model": self.llm_model,
             "messages": messages,
             "enabledTools": enabled_tools,
-            "enableThinkingTokens": False,
+            "enableThinkingTokens": True,
             **({"extraBody": self.extra_body} if self.extra_body else {}),
         }
         headers = {"Content-Type": "application/json"}
@@ -262,7 +262,7 @@ class AsyncMCPTrajectoryGenerator:
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
                 async with self.session.post(
-                    url, json=payload, headers=headers, timeout=240
+                    url, json=payload, headers=headers, timeout=1800
                 ) as resp:
                     if resp.status == 200:
                         try:
@@ -299,7 +299,7 @@ class AsyncMCPTrajectoryGenerator:
                 os.path.exists(output_file) and os.path.getsize(output_file) > 0
             )
 
-            async with aiofiles.open(output_file, "a", newline="") as f:
+            async with aiofiles.open(output_file, "a", newline="", encoding='utf-8') as f:
                 writer = aiocsv.AsyncDictWriter(f, fieldnames=result_dict.keys())
                 if not file_exists:  # Write headers only if file is empty/doesn't exist
                     await writer.writeheader()
@@ -360,8 +360,10 @@ class AsyncMCPTrajectoryGenerator:
 
                     # Handle AgentOutput format: array of {type: 'message'|'error', data: ...} objects
                     for item in reversed(conversation):
-                        if item.get("type") == "message":
-                            msg = item.get("data", {})
+                        # 只看 message 类型；否则 msg 会是上一轮的残留值或未定义
+                        if item.get("type") != "message":
+                            continue
+                        msg = item.get("data", {})
                         if msg.get("role") == "assistant" and msg.get("content"):
                             result.script_model_response = msg["content"]
                             break
@@ -517,34 +519,6 @@ class AsyncMCPTrajectoryGenerator:
 
         return pd.DataFrame(valid_results)
 
-        """Parse claims from string format"""
-        if not claims_str or pd.isna(claims_str):
-            return []
-
-        try:
-            # Try parsing as JSON list
-            if claims_str.strip().startswith("["):
-                return json.loads(claims_str)
-            # Otherwise split by common delimiters
-            else:
-                # Split by semicolon or newline
-                claims = []
-                for delimiter in [";", "\n", ","]:
-                    if delimiter in claims_str:
-                        claims = [
-                            claim.strip()
-                            for claim in claims_str.split(delimiter)
-                            if claim.strip()
-                        ]
-                        break
-
-                if not claims:
-                    claims = [claims_str.strip()]
-
-                return claims
-        except:
-            return [claims_str.strip()] if claims_str.strip() else []
-
 
 def run_extract_script(input_csv_path: str) -> str:
     """Run the extract_mcp_servers_per_task.py script and return the output JSON path"""
@@ -671,6 +645,7 @@ def get_enabled_servers() -> List[str]:
     - New: {"servers": [["server1", "OK"], ["server2", "ERROR"]], "total": 2, ...}
     """
     mcp_server_url = os.getenv("MCP_SERVER_URL", "http://localhost:1984")
+    # mcp_server_url = "http://localhost:1985"
 
     try:
         response = requests.get(f"{mcp_server_url}/enabled-servers", timeout=10)
@@ -690,6 +665,12 @@ def get_enabled_servers() -> List[str]:
         logging.info(
             f"Retrieved {len(enabled_servers)} enabled servers from agent-environment service"
         )
+        # enabled_servers = ['airtable', 'alchemy', 'arxiv', 'calculator', 'cli-mcp-server',
+        #                    'clinicaltrialsgov-mcp-server', 'context7', 'ddg-search', 'desktop-commander', 'fetch',
+        #                    'filesystem', 'git', 'github', 'google-maps', 'mcp-code-executor',
+        #                    'mcp-server-code-runner', 'memory', 'met-museum', 'mongodb', 'national-parks', 'notion',
+        #                    'open-library', 'osm-mcp-server', 'pubmed', 'slack', 'twelvedata', 'weather',
+        #                    'weather-data', 'whois', 'wikipedia']
         return enabled_servers
 
     except requests.exceptions.RequestException as e:
@@ -707,7 +688,19 @@ def get_enabled_servers() -> List[str]:
         ) from e
 
 
-def parse_arguments():
+def parse_optional_int(value: str | None, default: int | None = None) -> int | None:
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
+
+
+def parse_int(value: str | None, default: int) -> int:
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
+
+
+def parse_arguments(model, input_path, output_path, num_task, concurrency):
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description="MCP Evaluation Script",
@@ -716,23 +709,34 @@ def parse_arguments():
 
     parser.add_argument(
         "--model",
-        required=True,
+        default=model,
         help='LLM model to use for evaluation (e.g., "openai/gpt-4o")',
     )
 
     # Input source: exactly one of --input or --input_huggingface required
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
-        "--input", help="Input CSV file path containing tasks to evaluate"
+    parser.add_argument(
+        "--input",
+        default=input_path,
+        help="Input CSV file path containing tasks to evaluate"
     )
-    input_group.add_argument(
+    parser.add_argument(
         "--input_huggingface",
         help='HuggingFace dataset name (e.g., "ScaleAI/mcp-eval")',
     )
+    # input_group = parser.add_mutually_exclusive_group(required=True)
+    # input_group.add_argument(
+    #     "--input",
+    #     default=input_path,
+    #     help="Input CSV file path containing tasks to evaluate"
+    # )
+    # input_group.add_argument(
+    #     "--input_huggingface",
+    #     help='HuggingFace dataset name (e.g., "ScaleAI/mcp-eval")',
+    # )
 
     parser.add_argument(
         "--output",
-        required=True,
+        default=output_path,
         help="Output CSV file name (will be saved to completion_results/ directory)",
     )
     parser.add_argument(
@@ -743,13 +747,13 @@ def parse_arguments():
     parser.add_argument(
         "--num-tasks",
         type=int,
-        default=None,
+        default=num_task,
         help="Limit to first N tasks (useful for testing). If not specified, processes all tasks.",
     )
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=10,
+        default=concurrency,
         help="Maximum concurrent API requests (default: 10, recommended range: 10-30)",
     )
     parser.add_argument(
@@ -763,10 +767,35 @@ def parse_arguments():
 
 
 async def main():
-    args = parse_arguments()
+    args = parse_arguments(
+        model=os.getenv("MCP_COMPLETION_MODEL", "pangu/92B-B005-stage2-9250-agent"),
+        input_path=os.getenv("MCP_COMPLETION_INPUT", "MCP-Atlas.csv"),
+        output_path=os.getenv("MCP_COMPLETION_OUTPUT", "MCP-Atlas-92B-B005-stage2-9250-new.csv"),
+        num_task=parse_optional_int(os.getenv("MCP_COMPLETION_NUM_TASKS"), None),
+        concurrency=parse_int(os.getenv("MCP_COMPLETION_CONCURRENCY"), 30),
+    )
 
     # Prepend completion_results/ to output path
     output_csv = os.path.join("completion_results", args.output)
+
+    # 提前解析 extra_body：和下面真正传给 generator 的是同一个变量，保证"打印=实际生效"
+    extra_body = json.loads(args.extra_body) if args.extra_body else {}
+
+    # ===== 打印实际生效的配置（不管值来自命令行 / .env / 写死默认）=====
+    input_source = args.input if args.input else f"{args.input_huggingface} (HuggingFace)"
+    logging.info("===== Resolved config (实际生效) =====")
+    logging.info(f"  model              = {args.model}")
+    logging.info(f"  input              = {input_source}")
+    logging.info(f"  output             = {output_csv}")
+    logging.info(f"  num_tasks          = {args.num_tasks if args.num_tasks else '全部'}")
+    logging.info(f"  concurrency        = {args.concurrency}")
+    logging.info(f"  filter_by_servers  = {not args.no_filter}")
+    logging.info(f"  extra_body         = {extra_body}")
+    logging.info(f"  completion_service = {SERVER_URL}")
+    logging.info(f"  mcp_servers_url    = {os.getenv('MCP_SERVER_URL', 'http://localhost:1984')}")
+    logging.info(f"  use_system_prompt  = {USE_SYSTEM_PROMPT}")
+    logging.info(f"  max_retry_attempts = {MAX_RETRY_ATTEMPTS}")
+    logging.info("======================================")
 
     # Load data from either CSV file or HuggingFace dataset
     if args.input:
@@ -776,7 +805,7 @@ async def main():
             sys.exit(1)
 
         logging.info(f"Loading data from '{csv_filename}'...")
-        df = pd.read_csv(csv_filename)
+        df = pd.read_csv(csv_filename, encoding="utf-8")
         if args.num_tasks:
             df = df.head(args.num_tasks)
     else:
@@ -822,7 +851,7 @@ async def main():
                 # Use HF dataset name as filename (e.g., "ScaleAI/mcp-eval" -> "ScaleAI-mcp-eval")
                 hf_name = args.input_huggingface.replace("/", "-")
                 csv_filename = f"completion_results/{hf_name}-dataset.csv"
-                df.to_csv(csv_filename, index=False)
+                df.to_csv(csv_filename, index=False, encoding="utf-8")
                 logging.info(f"Saved HuggingFace dataset to: {csv_filename}")
 
             # Run extract script to generate tool map
@@ -865,7 +894,7 @@ async def main():
     processed_ids = set()
     if os.path.exists(output_csv):
         try:
-            existing_df = pd.read_csv(output_csv, usecols=["TASK"])
+            existing_df = pd.read_csv(output_csv, usecols=["TASK"], encoding="utf-8")
             processed_ids = set(existing_df["TASK"].astype(str))
             logging.info(
                 f"Found {len(processed_ids)} already processed tasks. Skipping them."
@@ -873,9 +902,7 @@ async def main():
         except Exception as e:
             logging.warning(f"Warning: Could not read existing output: {e}")
 
-    # Run evaluation
-    import json as _json
-    extra_body = _json.loads(args.extra_body) if args.extra_body else {}
+    # Run evaluation（extra_body 已在上方解析，这里复用同一变量）
     async with AsyncMCPTrajectoryGenerator(args.model, extra_body=extra_body) as generator:
         results_df = await generator.evaluate_dataset_async(
             df, output_csv, processed_ids, args.concurrency

@@ -51,7 +51,8 @@ def extract_unique_tools_from_csv(csv_file_path):
         raise FileNotFoundError(f"CSV file '{csv_file_path}' not found.")
 
     # Increase field size limit to handle large fields
-    csv.field_size_limit(sys.maxsize)
+    # csv.field_size_limit(sys.maxsize)
+    csv.field_size_limit(1073741824)
 
     task_tools = defaultdict(set)  # Use set to automatically handle uniqueness
 
@@ -151,3 +152,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # extract_unique_tools_from_csv("C:/Users/yuanj/Desktop/mcp_atlas/task_generation/tasks_p3.csv")
+    # extract_unique_tools_from_csv("sample_tasks.csv")

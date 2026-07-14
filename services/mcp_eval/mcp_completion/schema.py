@@ -40,6 +40,7 @@ class AssistantMessage(BaseModel):
     role: Literal["assistant"]
     original_message: MessageType
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
 
 

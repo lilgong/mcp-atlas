@@ -18,13 +18,13 @@ import asyncio
 import os
 import json
 import ast
-import json
 import logging
 import argparse
 from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import dataclass
 from enum import Enum
-from datetime import datetime
+# from datetime import datetime
+import datetime
 from collections import defaultdict, Counter
 from abc import ABC, abstractmethod
 
@@ -45,8 +45,12 @@ nest_asyncio.apply()
 
 # Configure LiteLLM - suppress verbose logging
 litellm.set_verbose = False
+litellm.ssl_verify = False
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
+os.environ["HTTP_PROXY"] = ""
+os.environ["HTTPS_PROXY"] = ""
+os.environ["NO_PROXY"] = "*"
 
 # =========================================================================
 # 1. CONFIGURATION AND SETUP
@@ -88,6 +92,25 @@ def get_litellm_config():
     api_base = os.getenv("EVAL_LLM_BASE_URL", "")
     return api_key, api_base
 
+def month_log_root(base_root_path: str) -> str:
+    leaf = os.path.basename(os.path.normpath(base_root_path))
+    try:
+        datetime.datetime.strptime(leaf, "%Y-%m")
+        return base_root_path
+    except ValueError:
+        return os.path.join(base_root_path, datetime.date.today().strftime("%Y-%m"))
+
+
+def build_token_log_path(api_key: str, env_name: str = "EVAL_TOKEN_LOG_DIR") -> str:
+    base_root_path = os.getenv(env_name) or os.getenv("TOKEN_LOG_DIR", "token_usage_log")
+    root_path = month_log_root(base_root_path)
+    key_suffix = api_key[-8:] if api_key else "no-key"
+    log_file_name = f"eval_token_usage_{key_suffix}_{str(datetime.date.today()).replace('-', '')}.jsonl"
+    os.makedirs(root_path, exist_ok=True)
+    return os.path.join(root_path, log_file_name)
+
+
+TOKEN_LOG_PATH = build_token_log_path(get_litellm_config()[0])
 
 # =========================================================================
 # 2. CORE EVALUATION FRAMEWORK (SCORING) - GEMINI VERSION
@@ -320,7 +343,11 @@ class AsyncLLMClient(ABC):
 
     @abstractmethod
     async def generate_structured_content(
-        self, prompt: str, response_schema: Dict, temperature: float = 0.0
+        self,
+        prompt: str,
+        response_schema: Dict,
+        temperature: float = 0.0,
+        context: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Generate structured content with retry logic."""
         pass
@@ -353,9 +380,17 @@ class AsyncLiteLLMClient(AsyncLLMClient):
         reraise=True,
     )
     async def generate_structured_content(
-        self, prompt: str, response_schema: Dict, temperature: float = 0.0
+        self,
+        prompt: str,
+        response_schema: Dict,
+        temperature: float = 0.0,
+        context: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Generate structured content using LiteLLM with retry logic."""
+        context = context or {}
+        task_id = context.get("task_id", "unknown")
+        claim_index = context.get("claim_index", "unknown")
+        claim_count = context.get("claim_count", "unknown")
         async with self.semaphore:
             try:
                 self.request_count += 1
@@ -370,8 +405,10 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                         "response_schema": response_schema,
                     },
                     temperature=(
-                        1 if self.config.evaluator_model == "gpt-5" else temperature
-                    ),  # gpt-5 only supports temperature=1
+                        1
+                        if self.config.evaluator_model.split("/", 1)[-1].startswith("gpt-5")
+                        else temperature
+                    ),  # gpt-5 models only support temperature=1
                     api_key=litellm.api_key,
                     api_base=(
                         litellm.api_base
@@ -383,13 +420,49 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 # Rate limiting delay
                 await asyncio.sleep(self.config.request_delay)
 
-                # Parse JSON response
-                content = response.choices[0].message.content
-                return json.loads(content)
+                # Parse JSON response. Keep diagnostics metadata-only: no prompt, claim, response, or key.
+                choice = response.choices[0] if response.choices else None
+                message = getattr(choice, "message", None) if choice else None
+                content = getattr(message, "content", None) if message else None
+                finish_reason = getattr(choice, "finish_reason", None) if choice else None
+                content_len = len(content) if isinstance(content, str) else 0
+                try:
+                    parsed_content = json.loads(content or "")
+                except json.JSONDecodeError as e:
+                    self.logger.error(
+                        "LiteLLM JSON parse failed: "
+                        f"task_id={task_id} claim={claim_index}/{claim_count} "
+                        f"model={self.config.evaluator_model} content_len={content_len} "
+                        f"finish_reason={finish_reason} error={e}"
+                    )
+                    raise
 
+                # 统计token使用
+                token_usage = {
+                    "model": self.config.evaluator_model,
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                    "prompt": prompt,
+                    "answer": content,
+                }
+                os.makedirs(os.path.dirname(TOKEN_LOG_PATH) or ".", exist_ok=True)
+                with open(TOKEN_LOG_PATH, 'a+', encoding="utf-8") as log_out:
+                    log_out.write(json.dumps(token_usage, ensure_ascii=False) + "\n")
+
+                return parsed_content
+
+            except json.JSONDecodeError:
+                self.error_count += 1
+                raise
             except Exception as e:
                 self.error_count += 1
-                self.logger.error(f"LiteLLM API error: {e}")
+                self.logger.error(
+                    "LiteLLM request failed: "
+                    f"task_id={task_id} claim={claim_index}/{claim_count} "
+                    f"model={self.config.evaluator_model} "
+                    f"error_type={type(e).__name__} error={e}"
+                )
                 raise
 
     def get_stats(self) -> Dict[str, int]:
@@ -415,8 +488,22 @@ class CoverageEvaluator:
         self.config = config
         self.logger = logging.getLogger(__name__)
 
+    @staticmethod
+    def _coerce_confidence(value: Any, default: float = 0.5) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _get_single_claim_evaluation_prompt(self, claim: str, response: str) -> str:
         """Generate prompt for evaluating a single claim"""
+        output_format = """{
+"claim_text": "The claim being evaluated",
+"confidence_level": 0.8,
+"coverage_outcome": "fulfilled",
+"justification": "A brief reason for the decision"
+}"""
+
         return f"""You are evaluating how well a model's response addresses a specific expert-defined claim.
 SCORING CRITERIA:
 - fulfilled: Claim is completely and accurately addressed. The response covers all key details.
@@ -446,9 +533,26 @@ INSTRUCTIONS:
 4. Provide specific justification referencing what was/wasn't covered
    - When numbers differ slightly, note if they're within acceptable range
 5. Provide a confidence level (0.0-1.0) for your assessment
-Be rigorous but fair in your assessment. Focus on whether the response conveys the same information as the claim, not on exact numerical precision unless precision is critical to the claim's meaning."""
+Be rigorous but fair in your assessment. Focus on whether the response conveys the same information as the claim, not on exact numerical precision unless precision is critical to the claim's meaning.
+FINAL OUTPUT FORMAT
+- Output only one JSON
+- Must be parseable by json.loads()
+- Must not contain any explanations/comments/extra text
+- Final output must follow this format:
+{output_format}
 
-    async def evaluate_single_claim(self, claim: str, response: str) -> Dict[str, Any]:
+IMPORTANT: DO NOT wrap JSON in ```json or ``` markdown blocks.
+ONLY output RAW JSON string directly. No any other text. No formatting. No code blocks.
+"""
+
+    async def evaluate_single_claim(
+        self,
+        claim: str,
+        response: str,
+        task_id: str = "unknown",
+        claim_index: int = 0,
+        claim_count: int = 0,
+    ) -> Dict[str, Any]:
         """Evaluate a single claim against the response"""
         prompt = self._get_single_claim_evaluation_prompt(claim, response)
 
@@ -457,10 +561,18 @@ Be rigorous but fair in your assessment. Focus on whether the response conveys t
                 prompt=prompt,
                 response_schema=get_single_claim_evaluation_schema(),
                 temperature=0.0,
+                context={
+                    "task_id": task_id,
+                    "claim_index": claim_index,
+                    "claim_count": claim_count,
+                },
             )
             return result
         except Exception as e:
-            self.logger.warning(f"Single claim evaluation failed: {e}")
+            self.logger.warning(
+                f"Single claim evaluation failed: task_id={task_id} "
+                f"claim={claim_index}/{claim_count} error={e}"
+            )
             return {
                 "claim_text": claim,
                 "coverage_outcome": "not_fulfilled",
@@ -468,7 +580,9 @@ Be rigorous but fair in your assessment. Focus on whether the response conveys t
                 "confidence_level": 0.1,
             }
 
-    async def evaluate(self, claims: List[str], response: str) -> Dict[str, Any]:
+    async def evaluate(
+        self, claims: List[str], response: str, task_id: str = "unknown"
+    ) -> Dict[str, Any]:
         """Evaluate all claims by making individual API calls for each claim"""
         if not claims:
             return {
@@ -486,7 +600,11 @@ Be rigorous but fair in your assessment. Focus on whether the response conveys t
         }
 
         # Evaluate each claim individually
-        tasks = [self.evaluate_single_claim(claim, response) for claim in claims]
+        claim_count = len(claims)
+        tasks = [
+            self.evaluate_single_claim(claim, response, task_id, i, claim_count)
+            for i, claim in enumerate(claims, start=1)
+        ]
         claim_results = await asyncio.gather(*tasks)
 
         # Aggregate results
@@ -500,7 +618,9 @@ Be rigorous but fair in your assessment. Focus on whether the response conveys t
             coverage_outcome = result.get("coverage_outcome", "not_fulfilled")
             score = coverage_to_score.get(coverage_outcome, 0.0)
             total_score += score
-            total_confidence += result.get("confidence_level", 0.5)
+            total_confidence += self._coerce_confidence(
+                result.get("confidence_level", 0.5)
+            )
 
             if score >= 1.0:
                 fulfilled_count += 1
@@ -575,7 +695,8 @@ async def evaluate_dataframe_async(
                 None,
             )
             response = row.get(response_col, "") if response_col else ""
-            result = await evaluator.evaluate(claims, response)
+            task_id = str(row.get("TASK", row_idx))
+            result = await evaluator.evaluate(claims, response, task_id=task_id)
             return row_idx, result
         except Exception as e:
             logger.error(f"Error processing row {row_idx}: {e}")
@@ -732,6 +853,27 @@ async def main(args):
     # Define file path for scored results
     scored_path = os.path.join(output_dir, f"scored_{args.model_label}.csv")
 
+    # ===== 打印实际生效的配置（密钥脱敏）=====
+    _eval_key, _eval_base = get_litellm_config()
+    if not _eval_key:
+        _key_disp = "MISSING"
+    elif len(_eval_key) <= 8:
+        _key_disp = "set"
+    else:
+        _key_disp = f"set ({_eval_key[:4]}...{_eval_key[-4:]})"  # 首4…尾4，中间脱敏
+    logger.info("===== Resolved config (实际生效) =====")
+    logger.info(f"  evaluator_model = {args.evaluator_model}")
+    logger.info(f"  input_file      = {args.input_file}")
+    logger.info(f"  model_label     = {args.model_label}")
+    logger.info(f"  output_dir      = {output_dir}")
+    logger.info(f"  scored_output   = {scored_path}")
+    logger.info(f"  concurrency     = {args.concurrency}")
+    logger.info(f"  num_tasks       = {args.num_tasks if args.num_tasks else '全部'}")
+    logger.info(f"  pass_threshold  = {args.pass_threshold}")
+    logger.info(f"  eval_base_url   = {_eval_base or '(litellm 默认/官方)'}")
+    logger.info(f"  eval_api_key    = {_key_disp}")
+    logger.info("======================================")
+
     try:
         # --- Create Evaluator Configuration ---
         logger.info(f"Using evaluator model: {args.evaluator_model}")
@@ -774,7 +916,10 @@ async def main(args):
 
         logger.info(f"✅ Saved scored file to '{scored_path}'")
         valid_scores = df_scored["coverage_score"].dropna()
-        logger.info(f"Evaluation complete. Average coverage: {valid_scores.mean():.3f}")
+        if len(valid_scores) > 0:
+            logger.info(f"Evaluation complete. Average coverage: {valid_scores.mean():.3f}")
+        else:
+            logger.warning("Evaluation produced no valid coverage scores.")
 
         # 3. Generate statistics and plots
         generate_statistics_and_plots(
@@ -789,11 +934,16 @@ async def main(args):
 
     except (FileNotFoundError, KeyError) as e:
         logger.error(f"Pipeline stopped due to an error: {e}")
+        raise
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        raise
 
 
-if __name__ == "__main__":
+def get_parser(input_path=None, model_label=None):
+    default_input_file = input_path or os.getenv("EVAL_INPUT_FILE", "")
+    default_model_label = model_label or os.getenv("EVAL_MODEL_LABEL", "")
+
     parser = argparse.ArgumentParser(
         description="Run model evaluation pipeline with coverage scoring."
     )
@@ -801,13 +951,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--input-file",
         type=str,
-        required=True,
+        default=default_input_file,
+        required=not bool(default_input_file),
         help="Path to the completion results CSV file containing both ground truth and model outputs.",
     )
     parser.add_argument(
         "--model-label",
         type=str,
-        required=True,
+        default=default_model_label,
+        required=not bool(default_model_label),
         help="Short identifier for the model being evaluated (e.g., 'gpt51'). Used in output filenames.",
     )
     parser.add_argument(
@@ -825,7 +977,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=5,
+        default=20,
         help="Number of concurrent requests to the LLM API.",
     )
     parser.add_argument(
@@ -842,6 +994,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    return args
+
+if __name__ == "__main__":
+    args = get_parser()
 
     # Run the main async function
     asyncio.run(main(args))

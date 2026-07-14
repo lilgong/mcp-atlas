@@ -101,10 +101,20 @@ async def run_mcp_eval(
                     logger.error(
                         f"Tool call failed: {error}, tool: {tool_call.function['name']}"
                     )
-                    # Re-raise tool execution errors as server errors
-                    raise Exception(
-                        f"Tool execution failed - tool: {tool_call.function['name']}, error: {error}"
+                    # 不再因单个工具失败而中断整条轨迹：把错误作为 tool result
+                    # 回灌给模型，让它有机会换工具/换参数恢复。
+                    tool_call_message = ToolCallOutputMessage(
+                        role="tool",
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=f"Tool execution failed - tool: {tool_call.function['name']}, error: {error}",
+                            )
+                        ],
+                        tool_call_id=tool_call.id,
                     )
+                    all_messages.append(tool_call_message)
+                    yield AgentOutput("message", tool_call_message.model_dump())
         else:
             # No more tool calls, agent is done
             break

@@ -26,9 +26,9 @@
       ]
     },
     "brave-search": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "@modelcontextprotocol/server-brave-search@0.6.2"
+        "/mnt/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"
       ],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}"
@@ -91,9 +91,9 @@
       }
     },
     "exa": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "exa-mcp-server@0.3.10"
+        "/mnt/node_modules/exa-mcp-server/build/index.js"
       ],
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}"
@@ -210,7 +210,9 @@
     "notion": {
       "command": "npx",
       "args": [
-        "@notionhq/notion-mcp-server@1.8.1"
+        "@notionhq/notion-mcp-server@1.8.1",
+        "--page-id",
+        "${NOTION_PAGE_ID}"
       ],
       "env": {
         "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ${NOTION_TOKEN}\", \"Notion-Version\": \"2022-06-28\" }"
@@ -229,13 +231,12 @@
       ]
     },
     "oxylabs": {
-      "command": "uvx",
-      "args": [
-        "oxylabs-mcp==0.4.1"
-      ],
+      "command": "/agent-environment/.venv/bin/oxylabs-mcp",
+      "args": [],
       "env": {
         "OXYLABS_USERNAME": "${OXYLABS_USERNAME}",
-        "OXYLABS_PASSWORD": "${OXYLABS_PASSWORD}"
+        "OXYLABS_PASSWORD": "${OXYLABS_PASSWORD}",
+        "OXYLABS_SCRAPER_URL": "${OXYLABS_SCRAPER_URL}"
       }
     },
     "pubmed": {
@@ -251,7 +252,7 @@
     "slack": {
       "command": "npx",
       "args": [
-        "slack-mcp-server@1.1.23",
+        "/mnt/node_modules/slack-mcp-server/bin/index.js",
         "--transport",
         "stdio"
       ],

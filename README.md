@@ -48,6 +48,7 @@ Edit `.env` and set:
 - `EVAL_LLM_API_KEY` - Your LLM API key for evaluation scoring. Default model is `gemini/gemini-2.5-pro`, so use a Gemini API key. You can change `EVAL_LLM_MODEL` and use the corresponding provider's key.
 - `LLM_BASE_URL` - **Optional**, leave empty to use official provider APIs. Set if using a custom endpoint (e.g., LiteLLM proxy, Azure OpenAI, or self-hosted models).
 - `EVAL_LLM_MODEL` - **Optional**, defaults to `gemini/gemini-2.5-pro`. Examples: `gpt-5.1`, `claude-3-5-sonnet-20241022`
+- `VERIFY_LLM_API_KEY` / `VERIFY_LLM_BASE_URL` / `VERIFY_LLM_MODEL` - **Optional**, only for the verified re-scoring step (6b). Each falls back to the `EVAL_LLM_*` then `LLM_*` value if left blank.
 
 We use [LiteLLM](https://docs.litellm.ai/) to support 100+ LLMs via a unified API. Our examples use `openai/gpt-5.1`, but most other models should work. Ensure that LLM_API_KEY matches the model you're using.
 
@@ -70,6 +71,21 @@ make build && make run-docker
 ```
 
 This starts the agent-environment service on port 1984 (takes 1+ minute to initialize). Before continuing, please wait for this to finish, you'll see log "Uvicorn running on http://0.0.0.0:1984". 
+
+> **Alternative: `make run-docker-host` (host networking on a custom port).** Use this when (a) port 1984 is
+> already taken by another instance on the same host, and/or (b) an MCP server must reach a host-local service
+> that only listens on `127.0.0.1` (e.g. a system MongoDB) — a bridge container reaches the host via the gateway
+> IP and cannot connect to a loopback-only service, whereas with `--network host` the container's `localhost`
+> *is* the host's loopback. Default internal port is `2984` (override with `MCP_PORT=`). It runs against the same
+> existing image (no rebuild). Equivalent command:
+> ```bash
+> docker run --rm --network host --add-host=host.docker.internal:host-gateway --env-file .env \
+>   agent-environment:latest \
+>   uv run python -m uvicorn agent_environment.main:app --host 0.0.0.0 --port 2984
+> ```
+> When using this, point clients at the chosen port via `MCP_SERVER_URL=http://localhost:2984` in `.env`, and for
+> a host-local MongoDB use `MONGODB_CONNECTION_STRING=mongodb://localhost:27017` (not `host.docker.internal`).
+> Verify on the same port, e.g. `curl -s http://localhost:2984/enabled-servers | jq -c`.
 
 By default, [20 servers](services/agent-environment/src/agent_environment/mcp_client.py#L23) that don't require API keys are enabled. Servers requiring API keys are auto-enabled only if you've set their keys in `.env`.
 
@@ -171,6 +187,25 @@ Outputs saved to `evaluation_results/`:
 - `scored_gpt51.csv` - Coverage scores for each task. On Mac, "Numbers" app works better to open CSV files with multi-line rows.
 - `coverage_stats_gpt51.csv` - Summary statistics
 - `coverage_histogram_gpt51.png` - Score distribution plot
+
+### 6b. (Optional) Verified re-scoring — exclude environment-caused failures
+
+`atlas-verified/altas-verfied.py` re-examines the **failed** tasks from step 6 (those with `coverage_score` below the threshold) and asks a judge model to attribute each failure to an **environment error** (API quota/timeout, "Failed to call tool", empty search results, etc.), a **model error**, or a **format error**. It then reports an adjusted pass rate that drops environment-caused failures, so infrastructure problems don't count against the model.
+
+Set the judge model in `.env` (`VERIFY_LLM_API_KEY` / `VERIFY_LLM_BASE_URL` / `VERIFY_LLM_MODEL`; each falls back to the `EVAL_LLM_*` then `LLM_*` value if blank). It uses the OpenAI SDK against an OpenAI-compatible endpoint.
+
+```bash
+uv run python atlas-verified/altas-verfied.py \
+  --input-file="evaluation_results/scored_gpt51.csv"
+```
+
+Options:
+- `--input-file` - [required] The `scored_*.csv` produced in step 6 (or set `VERIFY_INPUT_FILE`)
+- `--output` - Output JSONL path (default: input path with `.csv` replaced by `_result.jsonl`)
+- `--concurrency` - Judge threads (default: `VERIFY_CONCURRENCY` or 20)
+- `--pass-threshold` - Tasks below this `coverage_score` are re-checked (default: 0.75)
+
+On startup it prints a `Resolved config` banner (the API key is masked). Output: `scored_gpt51_result.jsonl` — per-task error attribution — plus original / adjusted pass rates printed to stdout.
 
 ### 7. Add more API keys (strongly recommended)
 

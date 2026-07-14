@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -33,7 +34,9 @@ TEMPLATE_PATH = (
     REPO_ROOT / "services/agent-environment/src/agent_environment/mcp_server_template.json"
 )
 ENV_PATH = REPO_ROOT / ".env"
-BASE_URL = "http://localhost:1984/call-tool"
+DEFAULT_MCP_SERVER_URL = "http://localhost:1984"
+# 在 __main__ 里按 --base-url / .env 的 MCP_SERVER_URL / 默认 重新赋值
+BASE_URL = f"{DEFAULT_MCP_SERVER_URL}/call-tool"
 
 
 # ── Parse .env ───────────────────────────────────────────────────────────────
@@ -50,6 +53,22 @@ def load_env_keys(env_path: Path) -> set[str]:
         if value.strip():
             keys.add(name.strip())
     return keys
+
+
+def read_env_value(env_path: Path, name: str) -> str | None:
+    """取变量值：优先进程环境变量，其次 .env 里非空的同名项，否则 None。"""
+    if os.getenv(name):
+        return os.getenv(name)
+    if not env_path.exists():
+        return None
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == name and v.strip():
+            return v.strip()
+    return None
 
 
 # ── Load server list from template ───────────────────────────────────────────
@@ -107,7 +126,7 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
     ),
     "fetch": (
         "fetch_fetch",
-        {"url": "https://httpbin.org/get"},
+        {"url": "https://example.com"},
     ),
     "filesystem": (
         "filesystem_list_allowed_directories",
@@ -340,11 +359,11 @@ async def main(timeout: float, concurrency: int, only_server: str | None) -> Non
             icon = "✅" if r.ok else "❌"
             timing = f"{r.elapsed:.1f}s"
             if r.ok:
-                detail = r.preview[:58]
+                detail = r.preview[:]
             elif r.missing_keys:
                 detail = f"not set in .env: {', '.join(r.missing_keys)}"
             else:
-                detail = (r.error or r.preview)[:58]
+                detail = (r.error or r.preview)[:]
             print(f"  {icon}  {r.server:<30}  {timing:>6}  {detail}")
 
     render_group("No API key required", no_key)
@@ -377,6 +396,12 @@ if __name__ == "__main__":
                         help="Max parallel requests (default: 8)")
     parser.add_argument("--server", metavar="NAME",
                         help="Test only this server (e.g. --server github)")
+    parser.add_argument("--base-url", default=None,
+                        help="MCP 服务地址（默认取 .env 的 MCP_SERVER_URL，否则 http://localhost:1984）")
     args = parser.parse_args()
+
+    mcp_url = args.base_url or read_env_value(ENV_PATH, "MCP_SERVER_URL") or DEFAULT_MCP_SERVER_URL
+    BASE_URL = mcp_url.rstrip("/") + "/call-tool"
+    print(f"Testing against MCP service: {BASE_URL}")
 
     asyncio.run(main(args.timeout, args.concurrency, args.server))
