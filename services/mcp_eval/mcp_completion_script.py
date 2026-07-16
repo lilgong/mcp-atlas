@@ -60,12 +60,12 @@ logging.basicConfig(
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:3000")
 
 # Retry configuration
-MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
+MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "20"))
 
 
 def get_retry_delay(attempt: int) -> float:
     """Calculate exponential backoff delay with jitter. Base: 5s, 10s, 20s..."""
-    delay = 5 * (2**attempt)
+    delay = 10 * attempt
     jitter = delay * random.uniform(0, 0.5)
     return delay + jitter
 

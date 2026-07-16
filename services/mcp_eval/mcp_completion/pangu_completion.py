@@ -110,11 +110,11 @@ def generate_pangu(model, messages, tools):
             response = requests.post(api_url, headers=headers, json=payload, timeout=PANGU_TIMEOUT)
             if response.status_code == 200:
                 result = response.json()
-                # 修正"思考过程里调用工具导致提前终止"的回复；异常则回退到原始响应
-                try:
-                    result = pangu_response_refiner(result)
-                except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                    pass
+                # refiner 已禁用：与 hzp 版本对齐，不回收"思考过程里的工具调用"，保留原始响应
+                # try:
+                #     result = pangu_response_refiner(result)
+                # except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                #     pass
                 with open(get_pangu_log_path(), 'a+', encoding='utf-8') as out_file:
                     out_file.write(json.dumps({"messages": messages, "response": result}, ensure_ascii=False) + '\n')
                 return result

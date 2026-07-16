@@ -405,7 +405,8 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                         "response_schema": response_schema,
                     },
                     temperature=(
-                        1
+                        # 1
+                        0
                         if self.config.evaluator_model.split("/", 1)[-1].startswith("gpt-5")
                         else temperature
                     ),  # gpt-5 models only support temperature=1
@@ -498,10 +499,10 @@ class CoverageEvaluator:
     def _get_single_claim_evaluation_prompt(self, claim: str, response: str) -> str:
         """Generate prompt for evaluating a single claim"""
         output_format = """{
-"claim_text": "The claim being evaluated",
-"confidence_level": 0.8,
-"coverage_outcome": "fulfilled",
-"justification": "A brief reason for the decision"
+"claim_text": "str type",
+"confidence_level": "float type",
+"coverage_outcome": "should be one of ['fulfilled', 'partially_fulfilled', 'not_fulfilled']",
+"justification": "str type",
 }"""
 
         return f"""You are evaluating how well a model's response addresses a specific expert-defined claim.
