@@ -405,11 +405,10 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                         "response_schema": response_schema,
                     },
                     temperature=(
-                        # 1
-                        0
+                        1
                         if self.config.evaluator_model.split("/", 1)[-1].startswith("gpt-5")
                         else temperature
-                    ),  # gpt-5 models only support temperature=1
+                    ),  # gpt-5 models only support temperature=1,实测 yibu 的可以temp=0但是不起效，参数基本无用，且实验后 temp 误差在 1 分以内可接受
                     api_key=litellm.api_key,
                     api_base=(
                         litellm.api_base
