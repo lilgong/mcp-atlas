@@ -191,7 +191,11 @@ async def probe_slack(call) -> str:
     recommendation'、'@mcpdumle sent 4 messages' 这类按名字判定的断言。导入 Slack
     时若把用户整个排除掉，名字会解析不出来，这些任务就白跑了 —— 正确的导入选项是
     "请勿导入这些用户，但仅导入其消息"（保留名字、不发邀请、不占席位）。"""
-    csv = _texts(await call("slack_channels_list", {"channel_types": "public_channel"}))
+    # 两种都查：导出里 6 个频道都在 channels.json（无 groups.json）所以本该是公共频道，
+    # 但导入时若选了「创建新的私人频道」就会变私有。GT 里模型也是两种一起查的。
+    csv = _texts(await call(
+        "slack_channels_list", {"channel_types": "public_channel, private_channel"}
+    ))
     chan_id = None
     for line in csv.splitlines()[1:]:
         parts = line.split(",")

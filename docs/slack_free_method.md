@@ -117,7 +117,31 @@ scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_shifted.zip 
 1. 浏览器打开 `https://<你的workspace>.slack.com/services/import`
 2. 选择 **Slack** 导入方式，上传 `slack_mcp_eval_export_shifted.zip`
 
-### 3.3 用户映射：选「**请勿导入这些用户，但仅导入其消息**」
+### 3.3 频道导入方式：选「**创建同样隐私设置的新频道**」
+
+| 选项 | 选它吗 | 原因 |
+|---|:---:|---|
+| **创建同样隐私设置的新频道** | ✅ **选这个** | 忠实还原导出的原始设置，不会有意外 |
+| 创建新的公共频道 | 🟡 可接受 | 结果和上面一样（6 个频道本来就都是公共的），但不如上面来得"照原样" |
+| 创建新的私人频道 | ❌ | 会偏离导出的原始状态；私人频道还要求 token 对应的用户是成员才看得见 |
+| 将频道与现有 Slack 频道合并 | ❌ **危险** | 见下 |
+
+**这 6 个频道本来就都是公共的**：Slack 导出把私人频道放在 `groups.json`、公共频道放在 `channels.json`，
+而这份导出**只有 `channels.json`、没有 `groups.json`**，6 个频道全在里面。
+
+> GT 有条 claim 写着 "in the #movie-suggestions **private** Slack channel" —— 那是**标注员写得不准**，
+> 以数据为准，它是公共频道。不要因为这句话去选「创建新的私人频道」。
+
+**为什么绝不能选「合并」**：评测和验证脚本都是**按频道名查**的（`#movie-suggestions`、`#social`）。
+合并会把消息塞进**已有频道并沿用已有的名字**，你的 workspace 现在是 `#所有-travel` / `#社交` / `#新频道`
+这套中文默认频道，合并后：
+
+- `social` → 并进 `#社交`，频道名变成"社交"，按 `#social` 查就查不到了
+- `all-dumle-servers` 的 `is_general=True`（它是源 workspace 的 #general），极可能被并进你的 `#所有-travel`
+
+结果就是消息导进去了、名字对不上，任务照样拿不到分。
+
+### 3.4 用户映射：选「**请勿导入这些用户，但仅导入其消息**」
 
 导入过程中 Slack 会让你决定导出里的 20 个用户怎么处理。**选「请勿导入这些用户，但仅导入其消息」**
 （Don't import these users, but import their messages）。
@@ -144,7 +168,7 @@ mcpdumle@gmail.com、hiphopluvr1989@proton.me、shinsplints7070@proton.me ...
 
 > 选没选对不用猜：第 4 节的验证脚本会**专门断言用户名可解析**，选错会直接报出来。
 
-### 3.4 导入后
+### 3.5 导入后
 
 如果改过 `.env`（比如换了 token），**重启 MCP 容器**——`--env-file` 只在容器启动时读一次：
 
@@ -173,7 +197,7 @@ uv run test_server_v1.py --server slack --base-url http://localhost:1984
 
 1. `slack_channels_list` 里能找到 **`#movie-suggestions`** 频道 → 频道导进来了
 2. 该频道的 `slack_conversations_history` 里含 GT 的消息文本 **`Akira`** → 消息可见（没被 90 天窗口挡掉）
-3. 同一条消息的发送者能解析出 **`hiphopluvr1989` / `Omari West`** → 用户映射选对了（见 3.3）
+3. 同一条消息的发送者能解析出 **`hiphopluvr1989` / `Omari West`** → 用户映射选对了（见 3.4）
 
 **断言的全是频道名、消息文本、用户名，不含任何时间戳**，所以平移时间戳后**不需要改这个脚本**。
 
@@ -189,7 +213,7 @@ uv run test_server_v1.py --data-only --base-url http://localhost:1984
 |---|---|
 | `❌ DATA BAD ... 没找到 #movie-suggestions 频道` | zip 没导入，或导到了别的 workspace |
 | `❌ DATA BAD ... 返回里找不到 'Akira'` | 频道建出来了但消息不可见 → 多半是**时间戳超期**，重跑第 2 节的平移脚本 |
-| `❌ DATA BAD ... 发送者名字解析不出来` | 导入时**用户映射选错了**（把用户整个排除了）→ 见 3.3，应选「请勿导入这些用户，但仅导入其消息」 |
+| `❌ DATA BAD ... 发送者名字解析不出来` | 导入时**用户映射选错了**（把用户整个排除了）→ 见 3.4，应选「请勿导入这些用户，但仅导入其消息」 |
 | `💥 API FAIL ... channel_not_found` | 同上，或 token 指向了别的 workspace |
 | `💥 API FAIL` 且 token 刚换过 | **忘了重启容器** |
 
