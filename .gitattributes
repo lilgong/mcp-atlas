@@ -1,1 +1,20 @@
 * text=auto
+
+# Force LF on files whose CRLF silently breaks the build or runtime. A Windows
+# checkout or a tar round-trip reintroduces CRLF otherwise, and the failures are
+# invisible: the submodule CSV clones every repo into "<name>\r", entrypoint.sh
+# dies on a "/bin/bash\r" shebang, and the shell/dockerignore files misparse.
+*.sh              text eol=lf
+*.py              text eol=lf
+*.json            text eol=lf
+*.toml            text eol=lf
+*.ini             text eol=lf
+*.lock            text eol=lf
+.dockerignore     text eol=lf
+.gitmodules       text eol=lf
+Dockerfile        text eol=lf
+git_submodule_info.csv text eol=lf
+
+# Data files are content read by the eval, not parsed as structure — leave their
+# bytes exactly as shipped (some cells may legitimately contain CR).
+services/agent-environment/data/**  -text

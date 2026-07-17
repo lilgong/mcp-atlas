@@ -32,6 +32,8 @@ Create an Airtable account, and visit [https://airtable.com/appIF9byLfQwdHqE2/sh
 ### Google Calendar (google-workspace)
 Unzip `calendar_mcp_eval_export.zip` which contains a `.ics` file, login to your google account (preferably a new account since it will import calendar events), import the data by going to [https://calendar.google.com/calendar/u/0/r/settings/export](https://calendar.google.com/calendar/u/0/r/settings/export) (make sure it's using the correct google account) and importing the `.ics` file. To get the necessary `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` for the `google-workspace` MCP server, see "Prerequesites" and "Setup Instructions" at [https://github.com/epaproditus/google-workspace-mcp-server](https://github.com/epaproditus/google-workspace-mcp-server?tab=readme-ov-file#prerequisites)
 
+https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?project=mcp-official 打开权限
+
 ### Notion
 Create a Notion account, then go into Settings > Import, and import `mcp-atlas-notion-data.zip`. This should take maximum a few minutes, and upload 6 tables and 1 page. Confirm that all 6 tables have data after a few minutes (Notion will load the data async). If any table is empty, delete the page, and re-upload the individual CSV. Next, go to [https://www.notion.so/profile/integrations](https://www.notion.so/profile/integrations) and add a new integration (type is Internal) and get the `Internal Integration Secret` and save it as `NOTION_TOKEN` in `.env`
 
