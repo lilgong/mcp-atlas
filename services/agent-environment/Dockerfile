@@ -10,9 +10,26 @@ RUN apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 COPY dev_scripts/install_mcp_packages.sh /
 RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
 
+# mcp_server_template.json launches the node servers from /mnt/node_modules, but
+# `npm install -g` above puts them under npm's prefix (/usr/lib/node_modules), and
+# nothing else creates /mnt. Point one at the other so the template's paths resolve
+# — brave-search, exa and slack otherwise fail with "Cannot find module" and never
+# come online, while the API keys and everything else look perfectly fine.
+RUN ln -s /usr/lib/node_modules /mnt/node_modules
+
 # Copy project files and set up workspace
 WORKDIR /agent-environment
 COPY . .
+
+# Don't trust the checkout to have survived intact. COPY carries the build host's
+# file modes and bytes, and a tar-extracted or Windows tree hands us entrypoint.sh
+# stripped of its +x bit and/or with CRLF endings. Neither is visible in git:
+# core.fileMode=false hides the mode, and .gitattributes only normalises endings
+# on checkout, which a tar bypasses. Both faults build cleanly and then kill the
+# container at startup — CRLF especially, since the shebang becomes "/bin/bash\r"
+# and exec reports "no such file or directory" for a file that plainly exists.
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
+
 RUN uv venv --python 3.12
 
 # Move /agent-environment/data to /data
@@ -37,6 +54,12 @@ RUN rm -rf /agent-environment/dev_scripts
 
 # Sync project dependencies (requires pyproject.toml and uv.lock from COPY)
 RUN uv sync
+
+# Same mismatch on the python side: the template runs oxylabs from
+# /agent-environment/.venv/bin/, but install_mcp_packages.sh installs it with
+# `uv tool install`, which keeps its own venv under /root/.local/share/uv/tools/.
+RUN ln -sf /root/.local/share/uv/tools/oxylabs-mcp/bin/oxylabs-mcp \
+           /agent-environment/.venv/bin/oxylabs-mcp
 
 EXPOSE 1984
 
