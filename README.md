@@ -1,5 +1,8 @@
 # MCP-Atlas: A Large-Scale Benchmark for Tool-Use Competency with Real MCP Servers
 
+配套私有数据合成管线的跨机器部署说明见
+[`lilgong/atlas-data-synthesis` 的 `DEPLOYMENT.md`](https://github.com/lilgong/atlas-data-synthesis/blob/main/DEPLOYMENT.md)。
+
 MCP-Atlas is a comprehensive benchmark for evaluating AI models' tool-use capabilities across 36 Model Context Protocol (MCP) servers. It provides a standardized environment for running agent completions and evaluating performance with LLM-as-judge methodology.
 
 - Paper: [https://static.scale.com/uploads/674f4cc7a74e35bcaae1c29a/MCP_Atlas.pdf](https://static.scale.com/uploads/674f4cc7a74e35bcaae1c29a/MCP_Atlas.pdf) or ([local copy](assets/MCP_Atlas.pdf))
