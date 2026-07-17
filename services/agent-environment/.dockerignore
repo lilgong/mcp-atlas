@@ -32,3 +32,12 @@ htmlcov/
 .env
 .env.*
 
+# MCP servers' runtime caches. slack-mcp-server writes its channel/user list to
+# these in its working directory; if you've run it here they sit in the build
+# context and COPY . . bakes them into the image. Every container then starts
+# with a frozen channel list from whatever workspace was cached at build time,
+# and slack_channels_list serves that instead of querying Slack — so freshly
+# imported channels are invisible and every slack task silently scores zero.
+.channels_cache_v2.json
+.users_cache.json
+
