@@ -10,12 +10,13 @@ RUN apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 COPY dev_scripts/install_mcp_packages.sh /
 RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
 
-# mcp_server_template.json launches the node servers from /mnt/node_modules, but
-# `npm install -g` above puts them under npm's prefix (/usr/lib/node_modules), and
-# nothing else creates /mnt. Point one at the other so the template's paths resolve
-# — brave-search, exa and slack otherwise fail with "Cannot find module" and never
-# come online, while the API keys and everything else look perfectly fine.
-RUN ln -s /usr/lib/node_modules /mnt/node_modules
+# /mnt/node_modules is deliberately NOT created here. mcp_server_template.json runs
+# the node servers from that path, and it must be bind-mounted at runtime with the
+# packages that have been hand-patched to talk to the third-party API gateway —
+# brave-search and exa have their endpoints and auth headers rewritten in place.
+# Symlinking npm's own /usr/lib/node_modules here looks like it fixes the missing
+# path: every server starts and reports healthy. It just quietly sends the gateway's
+# keys to the vendors' real endpoints, which answer 401/422. Mount the patched tree.
 
 # Copy project files and set up workspace
 WORKDIR /agent-environment
@@ -55,11 +56,10 @@ RUN rm -rf /agent-environment/dev_scripts
 # Sync project dependencies (requires pyproject.toml and uv.lock from COPY)
 RUN uv sync
 
-# Same mismatch on the python side: the template runs oxylabs from
-# /agent-environment/.venv/bin/, but install_mcp_packages.sh installs it with
-# `uv tool install`, which keeps its own venv under /root/.local/share/uv/tools/.
-RUN ln -sf /root/.local/share/uv/tools/oxylabs-mcp/bin/oxylabs-mcp \
-           /agent-environment/.venv/bin/oxylabs-mcp
+# Same story for oxylabs: the template runs it from /agent-environment/.venv/bin/,
+# and the copy that belongs there is patched for the gateway too. `uv tool install`
+# in install_mcp_packages.sh only ever produces the stock package, so don't link
+# that in — it would reach realtime.oxylabs.io instead of the gateway.
 
 EXPOSE 1984
 
