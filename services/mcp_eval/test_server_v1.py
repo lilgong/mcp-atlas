@@ -184,7 +184,13 @@ async def probe_notion(call) -> str:
 
 async def probe_slack(call) -> str:
     """GT task 689bd255c0422b257e7dfcc4：#movie-suggestions 频道的历史消息。
-    channel_id 因重建 workspace 而变，先按频道名发现。"""
+    channel_id 因重建 workspace 而变，先按频道名发现。
+
+    除消息文本外还断言用户名能解析出来：conversations_history 返回
+    UserID,UserName,RealName,...，而 GT claims 里有 'The user "mcpdumple" made a
+    recommendation'、'@mcpdumle sent 4 messages' 这类按名字判定的断言。导入 Slack
+    时若把用户整个排除掉，名字会解析不出来，这些任务就白跑了 —— 正确的导入选项是
+    "请勿导入这些用户，但仅导入其消息"（保留名字、不发邀请、不占席位）。"""
     csv = _texts(await call("slack_channels_list", {"channel_types": "public_channel"}))
     chan_id = None
     for line in csv.splitlines()[1:]:
@@ -197,7 +203,12 @@ async def probe_slack(call) -> str:
         raise DataMismatch(f"没找到 #movie-suggestions 频道（Slack 导出未导入？）；现有: {found}")
     hist = _texts(await call("slack_conversations_history", {"channel_id": chan_id}))
     _need(hist, "Akira", "#movie-suggestions 应含 GT 的历史消息")
-    return f"#movie-suggestions({chan_id}) 历史消息在位"
+    if "Omari West" not in hist and "hiphopluvr1989" not in hist:
+        raise DataMismatch(
+            "消息在，但发送者名字解析不出来（GT 里这条是 hiphopluvr1989 / Omari West）。"
+            "导入时应选『请勿导入这些用户，但仅导入其消息』，不要整个排除用户"
+        )
+    return f"#movie-suggestions({chan_id}) 历史消息在位，且用户名可解析"
 
 
 async def probe_google_workspace(call) -> str:

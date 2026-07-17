@@ -86,19 +86,67 @@ uv run prepare_slack_import.py --fix-claims
 
 **Slack 没有 workspace 导入 API**，`/services/import` 是管理员浏览器流程，无法脚本化。
 
+### 3.1 清理旧消息（**重复导入前必做**）
+
+**首次导入可跳过这一步**（workspace 里本来就没有 eval 数据）。
+
+但每 3 个月刷新时**必须先清理**：Slack 导入是**追加**语义，同一批消息导两次就会**出现两份**，
+`@mcpdumle sent 4 messages` 这类计数型 claim 会直接算错（变成 8 条）。
+
+清理方式：**删掉这 6 个 eval 频道**（删频道会连同其中的消息一起删除），然后重新导入即可重建：
+
+```
+all-dumle-servers   social   new-channel   gaming-suggestions   tv-show-suggestions   movie-suggestions
+```
+
+操作：进频道 → 频道名称 → **设置 / Settings** → **删除频道 / Delete channel**（需 workspace 管理员权限）。
+
+> - 这 6 个都是导入时创建的普通频道，可以删。workspace 自带的默认频道（`#所有-xxx` / `#general`）
+>   删不掉，但那不是 eval 频道，不用管。
+> - **更省事的替代**：直接新建一个 workspace 从头导。代价是要重新取 `SLACK_MCP_XOXC_TOKEN` /
+>   `SLACK_MCP_XOXD_TOKEN` 并更新 `.env`（还要重启容器）。
+> - 逐条删 160 条消息不现实，不要考虑。
+
+### 3.2 上传
+
 ```bash
-# 1) 把 zip 下载到你本地（导入是浏览器上传）
+# 把 zip 下载到你本地（导入是浏览器上传）
 scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_shifted.zip .
 ```
 
-2) 浏览器打开 `https://<你的workspace>.slack.com/services/import`
-3) 选择 **Slack** 导入方式，上传 `slack_mcp_eval_export_shifted.zip`
-4) 按提示完成频道/用户映射，等待导入结束
+1. 浏览器打开 `https://<你的workspace>.slack.com/services/import`
+2. 选择 **Slack** 导入方式，上传 `slack_mcp_eval_export_shifted.zip`
 
-> ⚠️ **重复导入会产生重复消息**。如果之前导过（无论旧数据还是上一轮平移的数据），
-> **先把频道里的旧消息清掉再导**，否则 "@某人发了 4 条消息" 这类计数型 claim 会算错。
+### 3.3 用户映射：选「**请勿导入这些用户，但仅导入其消息**」
 
-导入后如果改过 `.env`，**重启 MCP 容器**——`--env-file` 只在容器启动时读一次：
+导入过程中 Slack 会让你决定导出里的 20 个用户怎么处理。**选「请勿导入这些用户，但仅导入其消息」**
+（Don't import these users, but import their messages）。
+
+**为什么不能选「邀请为新成员」**：导出里这 20 个用户带的是**真实邮箱**（gmail / proton / yahoo），
+是 ScaleAI 那边真人的地址：
+
+```
+mcpdumle@gmail.com、hiphopluvr1989@proton.me、shinsplints7070@proton.me ...
+```
+
+选邀请就会**给 20 个陌生人发邀请邮件**，而且白占席位。
+
+**为什么也不能整个排除用户**：评测**依赖用户名能被解析出来**。`slack_conversations_history`
+返回的是 `UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor`，而 GT claims 里有：
+
+```
+'The user "mcpdumple" made a recommendation in the #movie-suggestions private Slack channel.'
+'@mcpdumle sent 4 messages on ...'
+```
+
+用户被整个排除掉的话，名字解析不出来，这些按名字判定的 claim 就全废了。
+「请勿导入但导入消息」这个选项会把消息归属到**保留了用户名的停用账号**——不发邀请、不占席位、名字还在，正好是我们要的。
+
+> 选没选对不用猜：第 4 节的验证脚本会**专门断言用户名可解析**，选错会直接报出来。
+
+### 3.4 导入后
+
+如果改过 `.env`（比如换了 token），**重启 MCP 容器**——`--env-file` 只在容器启动时读一次：
 
 ```bash
 make run-docker          # 或 make run-docker-host
@@ -118,12 +166,16 @@ uv run test_server_v1.py --server slack --base-url http://localhost:1984
 ```
 ✅ DATA OK   slack                0.7s
        └─ 验的是: Slack 导出的频道/消息是否已导入
-       └─ #movie-suggestions(C...) 历史消息在位
+       └─ #movie-suggestions(C...) 历史消息在位，且用户名可解析
 ```
 
-它做的事：`slack_channels_list` 找到 `#movie-suggestions` 频道 → `slack_conversations_history` 断言里面含 GT 的消息文本 `Akira`。
+它依次断言三件事：
 
-**断言的是频道名和消息文本，不含时间戳**，所以平移时间戳后**不需要改这个脚本**。
+1. `slack_channels_list` 里能找到 **`#movie-suggestions`** 频道 → 频道导进来了
+2. 该频道的 `slack_conversations_history` 里含 GT 的消息文本 **`Akira`** → 消息可见（没被 90 天窗口挡掉）
+3. 同一条消息的发送者能解析出 **`hiphopluvr1989` / `Omari West`** → 用户映射选对了（见 3.3）
+
+**断言的全是频道名、消息文本、用户名，不含任何时间戳**，所以平移时间戳后**不需要改这个脚本**。
 
 顺带把 5 个有状态服务一起验：
 
@@ -136,7 +188,8 @@ uv run test_server_v1.py --data-only --base-url http://localhost:1984
 | 现象 | 原因 |
 |---|---|
 | `❌ DATA BAD ... 没找到 #movie-suggestions 频道` | zip 没导入，或导到了别的 workspace |
-| `❌ DATA BAD ... 返回里找不到 'Akira'` | 频道建出来了但消息不可见 → 多半是**时间戳超期**，重跑平移脚本 |
+| `❌ DATA BAD ... 返回里找不到 'Akira'` | 频道建出来了但消息不可见 → 多半是**时间戳超期**，重跑第 2 节的平移脚本 |
+| `❌ DATA BAD ... 发送者名字解析不出来` | 导入时**用户映射选错了**（把用户整个排除了）→ 见 3.3，应选「请勿导入这些用户，但仅导入其消息」 |
 | `💥 API FAIL ... channel_not_found` | 同上，或 token 指向了别的 workspace |
 | `💥 API FAIL` 且 token 刚换过 | **忘了重启容器** |
 
