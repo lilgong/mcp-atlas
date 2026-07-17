@@ -66,6 +66,21 @@ uv run prepare_slack_import.py --fix-claims
 | `--days-ago N` | 让最新消息落到 N 天前（默认 3） |
 | `--src` / `--out` / `--csv` | 覆盖默认路径 |
 
+### 原版只读，每次全新派生（幂等）
+
+两个输入都是**官方原版、只读、永不修改**，每次运行都从它们重新派生出目标文件：
+
+```
+data_exports/slack_mcp_eval_export.zip   →  _shifted.zip      （平移时间戳 + 改邮箱）
+services/mcp_eval/MCP-Atlas.origin.csv   →  MCP-Atlas.csv     （平移 claim 日期）
+```
+
+**不在上一轮的结果上叠加**，所以重复运行是幂等的：跑几次 md5 都一样，不会二次平移。
+偏移量也始终是官方那次的 **+161 天**（脚本用微秒指纹从原版推导，不写死）。
+
+> `MCP-Atlas.origin.csv` 是这条链的基准，**别动它**。md5 应为 `28edad761f29`。
+> 它丢了的话，`--fix-claims` 会跳过 claim 处理并提示。
+
 ### ⚠️ `--fix-claims` 会改动基准数据集
 
 - `MCP-Atlas.csv` **不在 git 里**（53MB 未跟踪），所以**改动不会随 git 同步**
@@ -158,32 +173,80 @@ scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_shifted.zip 
 > Slack 很可能**默认建议把它合并进你的 `#所有-travel`**。它本身无关紧要、合并了也不掉分，
 > 但别让这个默认值把你带偏、顺手把其他几个也合并了。稳妥起见 6 个统一选「创建新的公共频道」。
 
-### 3.4 用户映射：选「**请勿导入这些用户，但仅导入其消息**」
+### 3.4 用户映射：选「**导入为已注销账户**」
 
-导入过程中 Slack 会让你决定导出里的 20 个用户怎么处理。**选「请勿导入这些用户，但仅导入其消息」**
-（Don't import these users, but import their messages）。
+导入过程中 Slack 会让你决定导出里的 20 个用户怎么处理。**选「导入为已注销账户」**
+（import as deactivated accounts）。它会建立**真实成员记录**（有 user ID、标记已注销），
+**不发邀请邮件、不占席位**，正是我们要的。
 
-**为什么不能选「邀请为新成员」**：导出里这 20 个用户带的是**真实邮箱**（gmail / proton / yahoo），
+| 选项 | 选它吗 | 后果 |
+|---|:---:|---|
+| **导入为已注销账户** | ✅ **选这个** | 有真实 user ID、不发邀请、不占席位、名字可解析 |
+| 邀请为新成员 | ❌ | **给 20 个陌生人发邮件**（见下），还白占席位 |
+| 请勿导入这些用户，但仅导入其消息 | ❌ **有毒** | 消息全变 `bot_message`，见下 |
+| 合并到现有成员 | 🟡 | 仅当该用户已经是你 workspace 成员时才用（见 3.4.1）|
+
+**为什么绝不能选「邀请为新成员」**：导出里这 20 个用户带的是**真实邮箱**（gmail / proton / yahoo），
 是 ScaleAI 那边真人的地址：
 
 ```
 mcpdumle@gmail.com、hiphopluvr1989@proton.me、shinsplints7070@proton.me ...
 ```
 
-选邀请就会**给 20 个陌生人发邀请邮件**，而且白占席位。
+**为什么「请勿导入这些用户，但仅导入其消息」是个陷阱**
 
-**为什么也不能整个排除用户**：评测**依赖用户名能被解析出来**。`slack_conversations_history`
-返回的是 `UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor`，而 GT claims 里有：
+它听起来正合需求（不发邀请、还导消息），实际后果是**灾难性的**，而且症状极具迷惑性。
+用户在 workspace 里不存在，Slack 只好把消息归给 bot：
 
+```json
+{
+  "subtype": "bot_message",                       ← 被 MCP 默认当 activity 消息过滤掉
+  "text": "I always liked the anime movie Akira",
+  "username": "Omari West",                       ← 名字只是个字符串
+  "ts": "1784046986.026929"
+}                                                 ← 没有 "user" 字段，没有 ID
 ```
-'The user "mcpdumple" made a recommendation in the #movie-suggestions private Slack channel.'
-'@mcpdumle sent 4 messages on ...'
-```
 
-用户被整个排除掉的话，名字解析不出来，这些按名字判定的 claim 就全废了。
-「请勿导入但导入消息」这个选项会把消息归属到**保留了用户名的停用账号**——不发邀请、不占席位、名字还在，正好是我们要的。
+于是：
+
+- **UI 里一切正常**——你能看到每条消息、每个人的名字（因为 `username` 字段在），
+  Slack 也显示"导入完成"
+- **API 里几乎什么都没有**——`slack_conversations_history` 默认过滤 `bot_message`，
+  28 条消息只返回 1 条（唯一那条真实成员发的）
+- **就算绕过过滤**（`include_activity_messages=true` 能拿到全部），**用户归属也丢了**
+  （`user: None`），`@mcpdumle sent 4 messages` 这类按名字判定的 claim 照样全废
+
+「导入为已注销账户」建立的是真实成员记录，消息带 `user: Uxxxx`、没有 `bot_message`
+子类型，MCP 默认就能返回，名字也解析得出来（已注销用户仍在 `users.list` 里，带 `deleted:true`）。
 
 > 选没选对不用猜：第 4 节的验证脚本会**专门断言用户名可解析**，选错会直接报出来。
+
+#### 3.4.1 邮箱冲突：用 `--rewrite-emails`
+
+如果 Slack 提示某些用户的邮箱**已对应现有账号**，就不再让你选「导入为已注销账户」，只给合并。
+常见原因：**上一次导入被撤销后，它创建的账号会残留**（撤销只删消息和频道，不删账号）。
+
+合并也能用（有真实 ID），但残留账号的 `real_name` 会**退化成用户名**
+（`lucas.t.medina1994` 而不是 `Lucas Medina`），而有 claim 是按真名判定的。
+
+干净的做法是给这些用户换个不冲突的邮箱，让 Slack 当新用户、以已注销账户导入：
+
+```bash
+uv run prepare_slack_import.py --fix-claims \
+  --rewrite-emails ivansalazar0003,lucas.t.medina1994
+```
+
+它只改 `profile.email`（→ `<用户名>@example.com`），**`name` 和 `real_name` 一个字不动**。
+
+**改邮箱不影响评测**（已全量核查）：
+
+- 33 条 slack 任务的题面和 claims 里，**出现字面邮箱 0 处**
+- slack 的三个工具（`channels_list` / `conversations_history` / `search_messages`）
+  **没有一个读 email 字段**——邮箱只是 Slack 导入时的账户匹配钥匙
+- 唯一那条靠邮箱推用户名的任务（`6888e207a34beb25cfedda70`），邮箱取自 **Notion**
+  的 `get-users`，不是这里；它需要的只是 slack 里存在用户名 `mcpdumle`
+
+代价：workspace 里会多出几个孤儿已注销账号（不占席位、无影响）。
 
 ### 3.5 导入后
 
