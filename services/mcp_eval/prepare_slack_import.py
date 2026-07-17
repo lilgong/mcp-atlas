@@ -16,15 +16,22 @@
 
 --fix-claims 就是补上官方漏掉的那一步：把绑定 slack 消息日期的 claim 一起平移。
 只改能对上导出消息的日期，git commit 日期、电影上映日期等一律不碰。
-⚠️ 它会修改 MCP-Atlas.csv（自动备份）：改完就和官方基准分叉了，两台机器要同步同一份。
+⚠️ 它会改动基准：MCP-Atlas.csv 不在 git 里，改完要手动同步到另一份，否则两边跑分不可比。
+
+两个输入都是官方原版、只读、永不修改，每次运行都从它们重新派生：
+
+    data_exports/slack_mcp_eval_export.zip  →  ..._<MMDD>.zip  （平移时间戳）
+    services/mcp_eval/MCP-Atlas.origin.csv  →  MCP-Atlas.csv   （平移 claim 日期）
+
+不在上一轮结果上叠加，所以重复运行幂等：跑几次 md5 都一样，不会二次平移。
 
 导入这一步没法自动化：Slack 的 workspace 导入是管理员浏览器流程，没有公开 API。
 脚本打好包后会打印手动导入指引。
 
 Usage:
-    uv run prepare_slack_import.py                      # 只平移导出，产出 zip（dry-run 显示 claim 改动）
-    uv run prepare_slack_import.py --fix-claims         # 同时修正 MCP-Atlas.csv 里的日期 claim
-    uv run prepare_slack_import.py --days-ago 3         # 让最新消息落到 3 天前（默认 3）
+    uv run prepare_slack_import.py                 # dry-run：产出 zip，只打印 claim 会怎么改
+    uv run prepare_slack_import.py --fix-claims    # 同时把 MCP-Atlas.csv 从原版派生出来
+    uv run prepare_slack_import.py --days-ago 3    # 让最新消息落到 3 天前（默认 3）
 """
 
 from __future__ import annotations
@@ -42,7 +49,8 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 SRC_ZIP = REPO_ROOT / "data_exports/slack_mcp_eval_export.zip"
-OUT_ZIP = REPO_ROOT / "data_exports/slack_mcp_eval_export_shifted.zip"
+# 产出带当天日期（MMDD），这样一眼看出手里/传上去的是哪一轮生成的
+OUT_ZIP = REPO_ROOT / f"data_exports/slack_mcp_eval_export_{dt.date.today():%m%d}.zip"
 # 和 zip 同样的路数：原版只读，每次从它派生出目标文件，绝不在改过的结果上再叠加。
 # 这样重复运行是幂等的 —— 偏移量始终是官方那次的 +161，不会累积、不会二次平移。
 ORIGIN_CSV = SCRIPT_DIR / "MCP-Atlas.origin.csv"
@@ -126,40 +134,6 @@ def shift_export(files: dict, secs: int) -> dict[str, list]:
     return out
 
 
-def rewrite_emails(files: dict, usernames: list[str]) -> list[tuple[str, str, str]]:
-    """把指定用户的 profile.email 改写成 <用户名>@example.com，就地修改 users.json。
-
-    为什么需要：Slack 导入时若某个导出用户的邮箱已对应 workspace 里的现有账号（包括
-    上次导入撤销后残留的已注销账号），就不再允许「导入为已注销账户」，只能选合并 —— 而
-    合并会沿用残留账号退化后的 real_name（变成用户名），把按真名判定的 claim 弄挂。
-    换个不冲突的邮箱，Slack 就会当新用户、以已注销账户导入，real_name 也是对的。
-
-    改邮箱不影响评测：33 条 slack 任务的题面和 claims 里没有任何字面邮箱，slack 的三个
-    工具（channels_list / conversations_history / search_messages）也都不读 email。
-    唯一那条靠邮箱推用户名的任务，邮箱取自 Notion 而非这里。name/real_name 不动即可。
-    """
-    changed: list[tuple[str, str, str]] = []
-    want = {u.strip() for u in usernames if u.strip()}
-    for name, content in files.items():
-        if Path(name).name != "users.json" or not isinstance(content, list):
-            continue
-        for u in content:
-            if not isinstance(u, dict) or u.get("name") not in want:
-                continue
-            profile = u.get("profile")
-            if not isinstance(profile, dict):
-                continue
-            old = profile.get("email")
-            new = f"{u['name']}@example.com"
-            if old != new:
-                profile["email"] = new
-                changed.append((u["name"], old or "(无)", new))
-    missing = want - {c[0] for c in changed}
-    for m in sorted(missing):
-        print(f"  ⚠️ users.json 里没有用户 {m!r}，已跳过")
-    return changed
-
-
 def write_zip(files: dict, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -169,12 +143,11 @@ def write_zip(files: dict, out_path: Path) -> None:
 
 # ── 推导官方那次平移的偏移量 ──────────────────────────────────────────────────
 def derive_legacy_offset(csv_path: Path, msg_files: dict) -> int | None:
-    """推导 claim 里的日期与导出消息日期之间差多少天，用"微秒指纹"把两边对上。
+    """推导原版 claim 的日期与导出消息日期之间差多少天，用"微秒指纹"把两边对上。
 
-    首次运行时这就是官方那次平移量（+161 天：claims 停留在 2025-06-27，而发布的导出
-    已是 2025-12-05）。跑过一次 --fix-claims 之后，claims 已被改成上一轮的目标日期，
-    这个值会变成负数 —— 那也是对的：它始终表示"claim → 导出"的偏移，加上本轮平移量后
-    正好把 claim 映射到新日期，所以重复运行不会二次平移。不写死，让数据自己说话。"""
+    这就是官方那次平移量（+161 天）：claims 停留在 2025-06-27，而发布的导出里同一条
+    消息已是 2025-12-05，时分秒和微秒分毫不差。因为永远读原版，这个值恒定，不写死，
+    让数据自己说话。"""
     fingerprints = {}  # (H,M,S,micros) -> 导出里那条消息的日期
     for msgs in msg_files.values():
         for m in msgs:
@@ -272,9 +245,6 @@ def main() -> int:
                     help="让最新一条消息落到几天前（默认 3，尽量吃满 90 天窗口）")
     ap.add_argument("--fix-claims", action="store_true",
                     help="同步修正 MCP-Atlas.csv 里绑定 slack 日期的 claim（会改基准，自动备份）")
-    ap.add_argument("--rewrite-emails", default="",
-                    help="逗号分隔的用户名，把其 profile.email 改写成 <用户名>@example.com，"
-                         "绕开 Slack 导入的邮箱冲突。name/real_name 不动，不影响评测")
     ap.add_argument("--src", type=Path, default=SRC_ZIP, help="官方原版导出 zip（只读）")
     ap.add_argument("--out", type=Path, default=OUT_ZIP, help="产出的 zip，用它导入 Slack")
     ap.add_argument("--origin", type=Path, default=ORIGIN_CSV,
@@ -335,13 +305,6 @@ def main() -> int:
             print("\n没有需要修正的 claim（原版里没有绑定 slack 消息日期的）")
     elif a.fix_claims:
         print("\n⚠️ 无法推导偏移量，跳过 claim 修正（--fix-claims 未生效）")
-
-    if a.rewrite_emails:
-        mails = rewrite_emails(files, a.rewrite_emails.split(","))
-        if mails:
-            print(f"\n已改写邮箱: {len(mails)} 个（name / real_name 未改动）")
-            for who, old, new in mails:
-                print(f"  {who}: {old} -> {new}")
 
     shifted = shift_export(files, secs)
     write_zip(shifted, a.out)

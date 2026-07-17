@@ -54,7 +54,7 @@ uv run prepare_slack_import.py --fix-claims
 1. 读 `data_exports/slack_mcp_eval_export.zip`
 2. 自动算平移量：让**最新一条消息落到今天前 3 天**（吃满 90 天窗口）
 3. 平移所有 `ts` / `edited.ts` / `files[].created|timestamp`，并把按日期命名的 JSON 改名到新日期
-4. 产出 → **`data_exports/slack_mcp_eval_export_shifted.zip`**
+4. 产出 → **`data_exports/slack_mcp_eval_export_<MMDD>.zip`**
 5. `--fix-claims`：修正 `MCP-Atlas.csv` 里绑定 slack 日期的 claim（**自动备份为 `MCP-Atlas.csv.bak`**）
 6. 打印**下次到期日**
 
@@ -71,7 +71,7 @@ uv run prepare_slack_import.py --fix-claims
 两个输入都是**官方原版、只读、永不修改**，每次运行都从它们重新派生出目标文件：
 
 ```
-data_exports/slack_mcp_eval_export.zip   →  _shifted.zip      （平移时间戳 + 改邮箱）
+data_exports/slack_mcp_eval_export.zip   →  ..._<MMDD>.zip  （平移时间戳）
 services/mcp_eval/MCP-Atlas.origin.csv   →  MCP-Atlas.csv     （平移 claim 日期）
 ```
 
@@ -126,11 +126,11 @@ all-dumle-servers   social   new-channel   gaming-suggestions   tv-show-suggesti
 
 ```bash
 # 把 zip 下载到你本地（导入是浏览器上传）
-scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_shifted.zip .
+scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_0717.zip .   # 换成实际日期
 ```
 
 1. 浏览器打开 `https://<你的workspace>.slack.com/services/import`
-2. 选择 **Slack** 导入方式，上传 `slack_mcp_eval_export_shifted.zip`
+2. 选择 **Slack** 导入方式，上传 `slack_mcp_eval_export_<MMDD>.zip`
 
 ### 3.3 频道导入方式：选「**创建同样隐私设置的新频道**」
 
@@ -184,7 +184,7 @@ scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_shifted.zip 
 | **导入为已注销账户** | ✅ **选这个** | 有真实 user ID、不发邀请、不占席位、名字可解析 |
 | 邀请为新成员 | ❌ | **给 20 个陌生人发邮件**（见下），还白占席位 |
 | 请勿导入这些用户，但仅导入其消息 | ❌ **有毒** | 消息全变 `bot_message`，见下 |
-| 合并到现有成员 | 🟡 | 仅当该用户已经是你 workspace 成员时才用（见 3.4.1）|
+| 合并到现有成员 | 🟡 | Slack 只给这个选项时才用（残留账号，见 3.4.1）—— 代价极小 |
 
 **为什么绝不能选「邀请为新成员」**：导出里这 20 个用户带的是**真实邮箱**（gmail / proton / yahoo），
 是 ScaleAI 那边真人的地址：
@@ -221,32 +221,33 @@ mcpdumle@gmail.com、hiphopluvr1989@proton.me、shinsplints7070@proton.me ...
 
 > 选没选对不用猜：第 4 节的验证脚本会**专门断言用户名可解析**，选错会直接报出来。
 
-#### 3.4.1 邮箱冲突：用 `--rewrite-emails`
+#### 3.4.1 有些用户只能选「合并」——顺着它就好
 
-如果 Slack 提示某些用户的邮箱**已对应现有账号**，就不再让你选「导入为已注销账户」，只给合并。
-常见原因：**上一次导入被撤销后，它创建的账号会残留**（撤销只删消息和频道，不删账号）。
+Slack 可能对某几个用户提示「已有用户使用此电子邮件」，于是不给你「导入为已注销账户」，只剩合并。
 
-合并也能用（有真实 ID），但残留账号的 `real_name` 会**退化成用户名**
-（`lucas.t.medina1994` 而不是 `Lucas Medina`），而有 claim 是按真名判定的。
+原因：**撤销导入只删消息和频道，不删它创建的账号**。上一轮导入残留的已注销账号还在
+workspace 里，Slack 认出了它们。
 
-干净的做法是给这些用户换个不冲突的邮箱，让 Slack 当新用户、以已注销账户导入：
+**实测结论：Slack 不是按邮箱匹配的。** 我们把导出里的邮箱改成 `@example.com` 重新上传，
+Slack 依然报同一个 `@gmail.com` 被占用——而那个地址只存在于残留账号上，新 zip 里根本没有。
+它按用户名（或导出里的原始 user ID）匹配，把**残留账号的**邮箱显示给你看。所以**改邮箱绕不开**，
+别在这上面浪费时间。
 
-```bash
-uv run prepare_slack_import.py --fix-claims \
-  --rewrite-emails ivansalazar0003,lucas.t.medina1994
-```
+**直接合并，代价极小**：合并会沿用残留账号的 `real_name`，而它退化成了用户名
+（`lucas.t.medina1994` 而不是 `Lucas Medina`）。全量核查后，这只可能影响 1 条任务
+（`689af4e653c3905e7b5b2581`，3 条 claim 里有 1 条是 `Lucas Medina recommended the game
+"This War of Mine"`）：
 
-它只改 `profile.email`（→ `<用户名>@example.com`），**`name` 和 `real_name` 一个字不动**。
+- 题面只说 "the game **Lucas** recommended"，模型看到 `lucas.t.medina1994` 照样能锁定人
+- 裁判大概率认得出 `lucas.t.medina1994` 就是 `Lucas Medina`，判 fulfilled 或 partial
+- 即便只给 partial：coverage = (2+0.5)/3 = **0.833 > 0.75，仍然通过**
+- 最坏情况（判 0）才丢这 1 条 = **0.2%**
 
-**改邮箱不影响评测**（已全量核查）：
+为这 0.2% 去跟 Slack 的账号残留搏斗（联系支持、或新建 workspace 从零来过）不划算。
 
-- 33 条 slack 任务的题面和 claims 里，**出现字面邮箱 0 处**
-- slack 的三个工具（`channels_list` / `conversations_history` / `search_messages`）
-  **没有一个读 email 字段**——邮箱只是 Slack 导入时的账户匹配钥匙
-- 唯一那条靠邮箱推用户名的任务（`6888e207a34beb25cfedda70`），邮箱取自 **Notion**
-  的 `get-users`，不是这里；它需要的只是 slack 里存在用户名 `mcpdumle`
-
-代价：workspace 里会多出几个孤儿已注销账号（不占席位、无影响）。
+> **消息导入不受影响**：用户映射和消息解析是两回事。消息按 `ts` 索引，平移后是全新时间戳
+> = Slack 眼里的全新消息，一定会导进去。所以 3 个月后重导同样可行——那时这些账号仍会提示
+> 合并，顺着选即可。
 
 ### 3.5 导入后
 
@@ -329,7 +330,7 @@ cd services/mcp_eval
 cp MCP-Atlas.csv.bak MCP-Atlas.csv
 ```
 
-平移产生的 `slack_mcp_eval_export_shifted.zip` 是**新文件**，原始的 `slack_mcp_eval_export.zip` 从不被修改，可随时重新生成。
+平移产生的 `slack_mcp_eval_export_<MMDD>.zip` 是**新文件**，原始的 `slack_mcp_eval_export.zip` 从不被修改，可随时重新生成。
 
 ---
 
@@ -338,7 +339,7 @@ cp MCP-Atlas.csv.bak MCP-Atlas.csv
 | 路径 | 作用 |
 |---|---|
 | `data_exports/slack_mcp_eval_export.zip` | 官方原始导出（只读，不修改） |
-| `data_exports/slack_mcp_eval_export_shifted.zip` | 脚本产出，用它导入 |
+| `data_exports/slack_mcp_eval_export_<MMDD>.zip` | 脚本产出，用它导入 |
 | `services/mcp_eval/prepare_slack_import.py` | 平移 + 修 claims |
 | `services/mcp_eval/test_server_v1.py` | 验证数据是否真的导入了 |
 | `services/mcp_eval/MCP-Atlas.csv` | 基准数据集（未跟踪，需手动同步） |
