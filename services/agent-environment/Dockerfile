@@ -10,13 +10,18 @@ RUN apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 COPY dev_scripts/install_mcp_packages.sh /
 RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
 
-# /mnt/node_modules is deliberately NOT created here. mcp_server_template.json runs
-# the node servers from that path, and it must be bind-mounted at runtime with the
-# packages that have been hand-patched to talk to the third-party API gateway —
-# brave-search and exa have their endpoints and auth headers rewritten in place.
-# Symlinking npm's own /usr/lib/node_modules here looks like it fixes the missing
-# path: every server starts and reports healthy. It just quietly sends the gateway's
-# keys to the vendors' real endpoints, which answer 401/422. Mount the patched tree.
+# mcp_server_template.json runs the node servers from /mnt/node_modules, which npm's
+# global prefix (/usr/lib/node_modules) doesn't provide. Copy rather than symlink:
+# the next step overwrites files in here, and a symlink would corrupt the npm tree.
+RUN cp -r /usr/lib/node_modules /mnt/node_modules
+
+# Our LLM traffic goes through a third-party gateway, and three of the node servers
+# hard-code their vendor's endpoint and auth header. vendor/yibu-patched holds the
+# handful of files with those rewritten (api.search.brave.com -> the gateway,
+# X-Subscription-Token -> Authorization: Bearer, and the same for exa). Without them
+# the servers start and report healthy while sending gateway keys to the vendors'
+# real endpoints, which answer 401/422 — reads exactly like an expired key.
+COPY vendor/yibu-patched/node_modules/ /mnt/node_modules/
 
 # Copy project files and set up workspace
 WORKDIR /agent-environment
@@ -38,8 +43,13 @@ RUN mkdir -p /data
 RUN mv /agent-environment/data/* /data/ 2>/dev/null || true
 RUN rm -rf /agent-environment/data
 
-# Install git submodules from CSV to specified directories
-RUN while IFS=',' read -r url sha path; do \
+# Install git submodules from CSV to specified directories.
+# The CSV arrives CRLF from a Windows-authored tree, and `read` hands the trailing
+# \r to git clone, so every repo lands in "<name>\r". ls prints it as the name you
+# expect — the \r is invisible — while anything that opens the real path gets
+# NoSuchPath, which is how git_git_status fails on a directory you can plainly see.
+RUN sed -i 's/\r$//' /data/repos/git_submodule_info.csv && \
+    while IFS=',' read -r url sha path; do \
     echo "Installing $url at $sha to $path"; \
     rm -rf "$path" 2>/dev/null || true; \
     git clone "$url" "$path"; \
@@ -56,10 +66,22 @@ RUN rm -rf /agent-environment/dev_scripts
 # Sync project dependencies (requires pyproject.toml and uv.lock from COPY)
 RUN uv sync
 
-# Same story for oxylabs: the template runs it from /agent-environment/.venv/bin/,
-# and the copy that belongs there is patched for the gateway too. `uv tool install`
-# in install_mcp_packages.sh only ever produces the stock package, so don't link
-# that in — it would reach realtime.oxylabs.io instead of the gateway.
+# oxylabs goes in this venv, not the isolated one `uv tool install` builds: the
+# template runs it from /agent-environment/.venv/bin/, and out of the tool venv it
+# registers no tools at all — the server comes up "healthy" serving nothing, and
+# calls come back "Unknown tool". Pin ai-studio for the same reason as in
+# install_mcp_packages.sh, then point config.py at the gateway.
+# The five html deps are pinned for the same reason as ai-studio: left to float they
+# resolve a notch newer than the working image had, and oxylabs then registers no
+# tools at all — /enabled-servers still reports it OK, it just serves nothing, and
+# calls come back "Unknown tool" with no error anywhere to explain it.
+RUN uv pip install oxylabs-mcp==0.4.1 oxylabs-ai-studio==0.2.20 \
+      beautifulsoup4==4.14.3 lxml==6.1.0 lxml-html-clean==0.4.4 \
+      markdownify==1.2.2 soupsieve==2.8.3
+COPY vendor/yibu-patched/oxylabs_mcp/ /tmp/oxylabs_patch/
+RUN cp /tmp/oxylabs_patch/*.py \
+       "$(dirname "$(find /agent-environment/.venv -path '*/oxylabs_mcp/config.py')")/" \
+    && rm -rf /tmp/oxylabs_patch
 
 EXPOSE 1984
 
