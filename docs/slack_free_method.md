@@ -2,7 +2,7 @@
 
 官方 Slack 导出的时间戳早已超出免费版的 90 天可见期。本文说明**每次**要跑什么、怎么导入、怎么验证。
 
-> 一句话：跑 `prepare_slack_import.py` → 浏览器手动导入生成的 zip → 跑 `test_server_v1.py --server slack` 验收。
+> 一句话：跑 `uv run prepare_slack_import.py --fix-claims` → 浏览器手动导入生成的 zip → 跑 `test_server_v1.py --server slack` 验收。
 > 免费版下每 ~3 个月要重复一次。
 
 ---
@@ -132,14 +132,31 @@ scp <server>:/home/lny/mcp-atlas/data_exports/slack_mcp_eval_export_shifted.zip 
 > GT 有条 claim 写着 "in the #movie-suggestions **private** Slack channel" —— 那是**标注员写得不准**，
 > 以数据为准，它是公共频道。不要因为这句话去选「创建新的私人频道」。
 
-**为什么绝不能选「合并」**：评测和验证脚本都是**按频道名查**的（`#movie-suggestions`、`#social`）。
-合并会把消息塞进**已有频道并沿用已有的名字**，你的 workspace 现在是 `#所有-travel` / `#社交` / `#新频道`
-这套中文默认频道，合并后：
+**为什么绝不能选「合并」**：评测和验证脚本都是**按频道名查**的。合并会把消息塞进**已有频道、
+并沿用已有的名字** —— 你的 workspace 现在是 `#所有-travel` / `#社交` / `#新频道` 这套中文默认频道，
+一合并，消息是进去了、名字对不上，任务照样零分，而且这种失败很难排查。
 
-- `social` → 并进 `#社交`，频道名变成"社交"，按 `#social` 查就查不到了
-- `all-dumle-servers` 的 `is_general=True`（它是源 workspace 的 #general），极可能被并进你的 `#所有-travel`
+#### 选完顶层，下面每个频道还能单独选 —— 全部保持「创建新的公共频道」
 
-结果就是消息导进去了、名字对不上，任务照样拿不到分。
+顶层选项只是默认值，列表里 6 个频道**每个都能单独覆盖**成公共/私人/合并。**一个都别改，尤其别选合并。**
+
+评测实际只用到其中 **3 个**（GT 轨迹里按 channel_id 查询的次数）：
+
+| 频道 | GT 查询次数 | 要紧吗 |
+|---|:---:|---|
+| `movie-suggestions` | 15 | 🔴 **关键** |
+| `gaming-suggestions` | 9 | 🔴 **关键** |
+| `tv-show-suggestions` | 3 | 🔴 **关键** |
+| `all-dumle-servers` | 0 | 无所谓 |
+| `new-channel` | 0 | 无所谓 |
+| `social` | 0 | 无所谓 |
+
+- 上面 3 个 **suggestions 频道承载了全部 27 条任务**，必须新建、绝不能合并
+- 下面 3 个从未被任何 GT 轨迹查询过，理论上怎么选都不影响跑分
+
+> ⚠️ **注意 `all-dumle-servers`**：它 `is_general=True`（是源 workspace 的 #general），
+> Slack 很可能**默认建议把它合并进你的 `#所有-travel`**。它本身无关紧要、合并了也不掉分，
+> 但别让这个默认值把你带偏、顺手把其他几个也合并了。稳妥起见 6 个统一选「创建新的公共频道」。
 
 ### 3.4 用户映射：选「**请勿导入这些用户，但仅导入其消息**」
 
