@@ -55,21 +55,50 @@ class DataMismatch(RuntimeError):
     """API 通，但返回的数据和 GT 对不上。"""
 
 
+# 只对"瞬时"错误重试：限流、超时、网关抖动、连接问题。白名单式判断——不认识的一律
+# 当永久错误立即报，免得把 401 / Unknown tool 之类的配置问题也反复重试掩盖掉。
+_TRANSIENT = ("429", "too many requests", "timeout", "timed out",
+              "502", "503", "504", "connection", "reset", "temporarily")
+
+
+def _is_transient(msg: str) -> bool:
+    m = msg.lower()
+    # "quota"/"exceeded" 是硬额度耗尽（如 lara 的翻译字符配额），重试也不会好，排除掉
+    if "quota" in m or "exceeded" in m:
+        return False
+    return any(k in m for k in _TRANSIENT)
+
+
 # ── 调用封装 ──────────────────────────────────────────────────────────────────
-def make_caller(client: httpx.AsyncClient, base_url: str, timeout: float):
+def make_caller(client: httpx.AsyncClient, base_url: str, timeout: float,
+                retries: int = 0):
     async def call(tool: str, args: dict[str, Any]) -> str:
-        try:
-            resp = await client.post(
-                base_url, json={"tool_name": tool, "tool_args": args}, timeout=timeout
-            )
-        except Exception as exc:
-            raise ApiError(f"{tool}: {exc}") from exc
-        body = resp.text
-        if resp.status_code >= 300:
-            raise ApiError(f"{tool}: HTTP {resp.status_code}: {_flat(body)[:150]}")
-        if _tool_errored(body):
-            raise ApiError(f"{tool}: {_flat(body)[:150]}")
-        return body
+        attempt = 0
+        while True:
+            try:
+                resp = await client.post(
+                    base_url, json={"tool_name": tool, "tool_args": args}, timeout=timeout
+                )
+                body = resp.text
+                if resp.status_code >= 300:
+                    raise ApiError(f"{tool}: HTTP {resp.status_code}: {_flat(body)[:150]}")
+                if _tool_errored(body):
+                    raise ApiError(f"{tool}: {_flat(body)[:150]}")
+                return body
+            except ApiError as exc:
+                # 只有瞬时错误、且还有重试次数时才退避重试；DataMismatch 不经过这里
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))  # 2s, 4s, ...
+                    attempt += 1
+                    continue
+                raise
+            except Exception as exc:  # httpx 超时/连接异常等
+                wrapped = ApiError(f"{tool}: {exc}")
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise wrapped from exc
 
     return call
 
@@ -275,7 +304,8 @@ async def run_smoke(call, server: str, tool: str, args: dict) -> Result:
 
 
 async def main(base_url: str, timeout: float, concurrency: int,
-               only: str | None, data_only: bool, smoke_only: bool) -> None:
+               only: str | None, data_only: bool, smoke_only: bool,
+               retries: int = 0) -> None:
     servers, required_vars = load_servers()
     env_keys = load_env_keys(ENV_PATH)
 
@@ -309,7 +339,7 @@ async def main(base_url: str, timeout: float, concurrency: int,
     sem = asyncio.Semaphore(concurrency)
 
     async with httpx.AsyncClient() as client:
-        call = make_caller(client, base_url, timeout)
+        call = make_caller(client, base_url, timeout, retries)
 
         async def guard(coro_fn, *a):
             async with sem:
@@ -359,9 +389,11 @@ if __name__ == "__main__":
     p.add_argument("--server", default=None, help="只测某一个服务")
     p.add_argument("--data-only", action="store_true", help="只跑 5 个有状态服务的数据校验")
     p.add_argument("--smoke-only", action="store_true", help="只跑连通性冒烟")
+    p.add_argument("--retries", type=int, default=2,
+                   help="瞬时错误(429/超时/5xx/连接)的重试次数，带退避；数据不符和永久错误不重试（默认 2）")
     a = p.parse_args()
 
     mcp_url = a.base_url or read_env_value(ENV_PATH, "MCP_SERVER_URL") or DEFAULT_MCP_SERVER_URL
     print(f"MCP 服务: {mcp_url.rstrip('/')}/call-tool")
     asyncio.run(main(f"{mcp_url.rstrip('/')}/call-tool", a.timeout, a.concurrency,
-                     a.server, a.data_only, a.smoke_only))
+                     a.server, a.data_only, a.smoke_only, a.retries))
