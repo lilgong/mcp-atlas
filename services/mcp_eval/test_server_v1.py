@@ -165,9 +165,61 @@ async def probe_mongodb(call) -> str:
     return "video_game_store 已恢复，Delivery Logistics 文档数与 GT 一致"
 
 
+async def _airtable_membership() -> str:
+    """会员失效探针：Airtable 免费版每 base 只保留 1000 条记录，超出的（按 base 内创建
+    顺序排在 1000 名之后）会被隐藏。Customer Feedback 表有 3350 条，最后一条的
+    Customer ID=6NbOYtn9 稳落在 1000 之后（Copy base 会原样保留这个字段值）。够得到它
+    → 会员有效；够不到 → base 已被截到 1000，会员失效。
+
+    走直连 Airtable API 而非 MCP：felores 的 list_records 没有过滤参数，够到第 3350 条得
+    翻 34 页必然限流；filterByFormula 一次调用就定位。token 取自 .env 的 AIRTABLE_API_KEY，
+    没配则跳过（不误报）。"""
+    token = read_env_value(ENV_PATH, "AIRTABLE_API_KEY")
+    if not token:
+        return "会员检测跳过（.env 无 AIRTABLE_API_KEY）"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async def _get(client, url, **kw):
+        # 只对普通速率 429 退避重试；BILLING_LIMIT 是月度配额，退避没用，立即返回
+        for attempt in range(3):
+            resp = await client.get(url, headers=headers, **kw)
+            if resp.status_code != 429 or "BILLING" in resp.text.upper():
+                return resp
+            await asyncio.sleep(2 * (attempt + 1))
+        return resp
+
+    def _check(resp, what):
+        if resp.status_code == 200:
+            return
+        if "BILLING" in resp.text.upper():
+            raise ApiError(f"membership: 触发套餐级 API 用量限制(PUBLIC_API_BILLING_LIMIT_EXCEEDED) "
+                           f"—— 按账号套餐限 API 调用量，非每秒速率限流；评测负载顶爆阈值时间歇出现，"
+                           f"降并发或升级套餐可缓解")
+        raise ApiError(f"membership: {what} HTTP {resp.status_code}: {_flat(resp.text)[:110]}")
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await _get(c, "https://api.airtable.com/v0/meta/bases")
+        _check(r, "列 base 失败")
+        base = next((b for b in r.json().get("bases", []) if b.get("name") == "Car Dealership"), None)
+        if base is None:
+            raise DataMismatch(".env token 的账号里没有 Car Dealership base（token 和数据账号不一致？）")
+        r2 = await _get(
+            c, f"https://api.airtable.com/v0/{base['id']}/Customer Feedback",
+            params={"filterByFormula": "{Customer ID}='6NbOYtn9'", "maxRecords": 1},
+        )
+        _check(r2, "查深层记录失败")
+        if not r2.json().get("records"):
+            raise DataMismatch(
+                "⚠️ 会员疑似已失效：够不到 Customer Feedback 第 3350 条 (Customer ID=6NbOYtn9)，"
+                "免费版每 base 截到 1000 条、深层记录被隐藏"
+            )
+    return "会员有效（够到第 3350 条深层记录）"
+
+
 async def probe_airtable(call) -> str:
     """GT task 689bd255c0422b257e7dfcf4：Car Dealership base 的 Digital Analytics 表。
-    base_id 因 Copy base 而变，先按 base 名发现。"""
+    base_id 因 Copy base 而变，先按 base 名发现。另外查一条超出免费版 1000 上限的深层
+    记录，顺带检测会员是否失效。"""
     bases = json.loads(_texts(await call("airtable_list_bases", {})))
     base = next((b for b in bases if b.get("name") == "Car Dealership"), None)
     if base is None:
@@ -182,7 +234,9 @@ async def probe_airtable(call) -> str:
     hit = any(r.get("fields", {}).get("Page Name") == "Inventory" for r in recs)
     if not hit:
         raise DataMismatch(f"Digital Analytics 有 {len(recs)} 条记录，但找不到 Page Name='Inventory' 的行")
-    return f"Car Dealership({base['id']}) 的 Digital Analytics 有 {len(recs)} 条记录，含 GT 的 Inventory 行"
+    membership = await _airtable_membership()
+    return (f"Car Dealership({base['id']}) 的 Digital Analytics 含 GT 的 Inventory 行；"
+            f"{membership}")
 
 
 async def probe_notion(call) -> str:
