@@ -58,14 +58,20 @@ class DataMismatch(RuntimeError):
 # 只对"瞬时"错误重试：限流、超时、网关抖动、连接问题。白名单式判断——不认识的一律
 # 当永久错误立即报，免得把 401 / Unknown tool 之类的配置问题也反复重试掩盖掉。
 _TRANSIENT = ("429", "too many requests", "timeout", "timed out",
-              "502", "503", "504", "connection", "reset", "temporarily")
+              "502", "503", "504", "connection", "reset", "temporarily",
+              "billing_limit", "billing plan limit")
+# 明确永久：认证/权限/工具没注册——重试永远同样结果
+_PERMANENT = ("401", "403", "unauthorized", "invalid_auth", "invalid api key",
+              "unknown tool")
 
 
 def _is_transient(msg: str) -> bool:
     m = msg.lower()
-    # "quota"/"exceeded" 是硬额度耗尽（如 lara 的翻译字符配额），重试也不会好，排除掉
-    if "quota" in m or "exceeded" in m:
+    if any(k in m for k in _PERMANENT):
         return False
+    # 429/限流类一律可重试——包括 airtable 的 BILLING_LIMIT_EXCEEDED：实测它是间歇的、
+    # 负载一降就恢复，退避重试确实能救回。lara 那种 "HTTP 500 ... exceeded quota" 是硬
+    # 月度字符额度、不含 429 也不在下列关键词里，自然不会被重试。
     return any(k in m for k in _TRANSIENT)
 
 
@@ -180,21 +186,22 @@ async def _airtable_membership() -> str:
     headers = {"Authorization": f"Bearer {token}"}
 
     async def _get(client, url, **kw):
-        # 只对普通速率 429 退避重试；BILLING_LIMIT 是月度配额，退避没用，立即返回
-        for attempt in range(3):
+        # 所有 429 都退避重试（含 airtable BILLING_LIMIT——实测间歇性、负载一降就恢复）。
+        # 多试几次、退避到 ~30s，尽量熬过突发峰值。
+        for attempt in range(5):
             resp = await client.get(url, headers=headers, **kw)
-            if resp.status_code != 429 or "BILLING" in resp.text.upper():
+            if resp.status_code != 429:
                 return resp
-            await asyncio.sleep(2 * (attempt + 1))
+            await asyncio.sleep(2 * (attempt + 1))  # 2,4,6,8,10
         return resp
 
     def _check(resp, what):
         if resp.status_code == 200:
             return
         if "BILLING" in resp.text.upper():
-            raise ApiError(f"membership: 触发套餐级 API 用量限制(PUBLIC_API_BILLING_LIMIT_EXCEEDED) "
-                           f"—— 按账号套餐限 API 调用量，非每秒速率限流；评测负载顶爆阈值时间歇出现，"
-                           f"降并发或升级套餐可缓解")
+            raise ApiError(f"membership: 重试多次仍触发套餐级 API 用量限制"
+                           f"(PUBLIC_API_BILLING_LIMIT_EXCEEDED) —— 按账号套餐限 API 调用量，"
+                           f"非每秒速率限流；降并发或升级套餐可缓解")
         raise ApiError(f"membership: {what} HTTP {resp.status_code}: {_flat(resp.text)[:110]}")
 
     async with httpx.AsyncClient(timeout=30) as c:
