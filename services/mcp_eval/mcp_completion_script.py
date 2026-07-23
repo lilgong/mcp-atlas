@@ -252,6 +252,7 @@ class AsyncMCPTrajectoryGenerator:
             "model": self.llm_model,
             "messages": messages,
             "enabledTools": enabled_tools,
+            "taskId": str(taskId) if taskId is not None else uuid14(),
             "enableThinkingTokens": True,
             **({"extraBody": self.extra_body} if self.extra_body else {}),
         }

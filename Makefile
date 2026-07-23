@@ -7,8 +7,9 @@ MCP_HOST_PORT ?= 1984
 MCP_STATUS_HOST_PORT ?= 1985
 # Internal/host port used by run-docker-host (host networking). Override: make run-docker-host MCP_PORT=2984
 MCP_PORT ?= 2984
+TASK_MONGO_IMAGE ?= mcp-atlas-task-mongo:1.0
 
-.PHONY: build run run-docker run-docker-host shell test run-mcp-completion push
+.PHONY: build build-task-mongo run run-docker run-docker-host shell test test-completion run-mcp-completion check-task-isolation cleanup-task-sandboxes push
 
 run-docker: # run docker container for mcp servers (agent-environment service)
 	docker run --rm -p $(MCP_HOST_PORT):1984 -p $(MCP_STATUS_HOST_PORT):1985 --add-host=host.docker.internal:host-gateway --env-file .env $(IMAGE_NAME):latest
@@ -22,6 +23,9 @@ build: # builds agent-environment
 	cd services/agent-environment && docker buildx build --platform linux/amd64 -t $(IMAGE_NAME) .
 	docker tag $(IMAGE_NAME):latest $(IMAGE_NAME):$(VERSION)
 
+build-task-mongo: # build disposable per-task Mongo fixture; does not modify agent-environment:latest
+	docker build -f services/task-sandbox/mongo/Dockerfile -t $(TASK_MONGO_IMAGE) .
+
 shell: # shell for agent-environment
 	docker run -it --rm --env-file .env $(IMAGE_NAME):latest bash
 
@@ -32,6 +36,15 @@ shell: # shell for agent-environment
 # Note: This runs agent completions (not evaluation/scoring). For scoring, see mcp_evals_scores.py
 run-mcp-completion: 
 	cd services/mcp_eval && uv run python -m mcp_completion.main
+
+check-task-isolation:
+	cd services/mcp_eval && uv run python scripts/check_task_isolation.py
+
+cleanup-task-sandboxes:
+	cd services/mcp_eval && uv run python scripts/cleanup_task_sandboxes.py
+
+test-completion:
+	cd services/mcp_eval && uv run python -m unittest discover -s tests -v
 
 # Build and push multi-arch image to ghcr.io
 # Requires Docker, and may not work with Rancher Desktop

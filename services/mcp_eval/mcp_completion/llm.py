@@ -5,6 +5,8 @@ import logging
 from typing import Any, Dict, List, Optional
 import os
 import datetime
+import time
+import uuid
 
 import httpx
 import litellm
@@ -13,6 +15,7 @@ from pydantic import BaseModel
 from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .pangu_completion import generate_pangu_async
+from .runtime_log import jsonable, write_runtime_event
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,8 @@ async def create_completion(
         messages: List[Message],
         tools: List[ToolCallSchema],
         extra_body: Optional[Dict[str, Any]] = None,
+        task_id: str = "unknown",
+        turn: int = 0,
 ) -> LLMResponse:
     """Create a completion using LiteLLM."""
 
@@ -110,16 +115,35 @@ async def create_completion(
     else:
         proxy_model = model
 
-    try:
-        # 慢思考模式：复制一份再改，避免就地修改调用方传入的 dict
-        extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
-        extra_body["thinking"] = {**extra_body.get("thinking", {}), "type": "enabled"}
+    # 慢思考模式：复制一份再改，避免就地修改调用方传入的 dict
+    extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
+    extra_body["thinking"] = {**extra_body.get("thinking", {}), "type": "enabled"}
+    call_id = uuid.uuid4().hex
+    started = time.monotonic()
+    write_runtime_event(
+        "model_calls",
+        "model_call_started",
+        task_id=task_id,
+        turn=turn,
+        call_id=call_id,
+        model=proxy_model,
+        base_url=config.LLM_BASE_URL,
+        request={
+            "messages": litellm_messages,
+            "tools": litellm_tools,
+            "extra_body": extra_body,
+        },
+    )
 
+    try:
         if "pangu" in proxy_model:
             response = await generate_pangu_async(
                 model=proxy_model,
                 messages=litellm_messages,
-                tools=litellm_tools
+                tools=litellm_tools,
+                task_id=task_id,
+                turn=turn,
+                call_id=call_id,
             )
         else:
             response = await litellm.acompletion(
@@ -131,6 +155,23 @@ async def create_completion(
                 timeout=config.DEFAULT_TIMEOUT,
                 **({"extra_body": extra_body} if extra_body else {}),
             )
+
+        usage = None
+        if not isinstance(response, dict):
+            usage = jsonable(getattr(response, "usage", None))
+        elif isinstance(response.get("usage"), dict):
+            usage = response.get("usage")
+        write_runtime_event(
+            "model_calls",
+            "model_call_completed",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            duration_seconds=round(time.monotonic() - started, 3),
+            usage=usage,
+            response=jsonable(response),
+        )
 
         # Convert response back to our format
         # Handle tool_calls conversion from OpenAI format to our format
@@ -186,6 +227,9 @@ async def create_completion(
             pass
         else:  # 开源接口返回的是ModelResponse格式
             token_usage = {
+                "task_id": task_id,
+                "turn": turn,
+                "call_id": call_id,
                 "model": proxy_model,
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
@@ -225,6 +269,17 @@ async def create_completion(
 
     except Exception as error:
         logger.error(f"LiteLLM completion failed: {error}")
+        write_runtime_event(
+            "model_calls",
+            "model_call_failed",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            duration_seconds=round(time.monotonic() - started, 3),
+            error_type=type(error).__name__,
+            error=str(error),
+        )
         raise
 
 

@@ -14,9 +14,21 @@
 | **completion 服务** | 连接 LLM 与 MCP server，跑 agentic loop | `PORT`（默认 3000） |
 | **评测脚本** | 生成轨迹 / 打分 / 验收（`services/mcp_eval/`） | — |
 
-数据流：`mcp_completion_script.py` → completion 服务(`SERVER_URL`) → agent-environment(`MCP_SERVER_URL`) → 各 MCP server。
+数据流：`mcp_completion_script.py` → completion 服务(`SERVER_URL`) → 隔离路由 → 共享云端只读容器 / 按任务一次性容器 → 各 MCP server。
 
-依赖：`docker`、`uv`、`jq`、`python3.10+`。给 docker 至少 8GB 内存（10GB+ 更稳）。有状态任务还需本机 **MongoDB**。
+依赖：`docker`、`uv`、`jq`、`python3.10+`。completion 服务运行用户必须有 Docker 权限。给 docker 至少 8GB 内存（并发 20 建议更多）。
+
+### 0.1 当前隔离边界
+
+- `1984` 的常驻 `agent-environment` 只承载云端/公开读取工具，保留现有 Yibu 适配和云端凭证。
+- filesystem、Git、Memory、CLI、Desktop Commander、代码执行和 MongoDB 按任务启动一次性容器；不向这些容器传入 `.env` 或云端凭证，而且容器使用 `network=none`。
+- Arxiv/PubMed 有本地下载缓存且需要联网，使用另一类无云凭证的按任务容器。
+- Airtable、GitHub、Google Workspace、Lara Memory、Notion、Slack 的云端写工具在工具展示和实际调用两层都被拒绝；这些服务的读取工具仍开放。
+- 宿主机通过 `docker exec` 访问只监听容器 loopback 的本地 MCP 服务；Mongo 走仅挂载给该题两个容器的私有 volume 内 Unix socket，不需要给代码容器开放 Docker bridge。
+- 每题结束后容器、匿名数据层和私有 Mongo socket volume 都会销毁。服务异常退出留下的同 owner 容器和 volume 会在下次启动时回收。
+- 模型每轮请求/响应/失败/token、工具调用、容器生命周期和容器 stdout/stderr 都写到 `MCP_RUNTIME_LOG_DIR`。
+
+这不是把 36 个 server 全复制进一个带凭证的任务容器。那样 CLI/代码执行可以直接读取云端 token，不构成安全隔离。
 
 ---
 
@@ -54,6 +66,9 @@ scp <老机器>:/path/to/mcp-atlas/.env ./.env
 | `PORT` / `SERVER_URL` | completion 服务端口；改了 `PORT` 必须同步改 `SERVER_URL` |
 | `OXYLABS_SCRAPER_URL` | **必填**，见下方警告 |
 | `EVAL_LLM_MODEL` | 打分用的裁判模型（如 `openai/gpt-5.4`） |
+| `MCP_TASK_AGENT_IMAGE` | 按任务容器复用的既有镜像，默认 `agent-environment:latest`；运行时不会 build/tag 它 |
+| `MCP_TASK_MONGO_IMAGE` | 一次性 Mongo fixture 镜像，默认 `mcp-atlas-task-mongo:1.0` |
+| `MCP_RUNTIME_LOG_DIR` | 完整模型调用与隔离运行日志目录；跨机器部署时可设绝对路径 |
 
 > ⚠️ **`OXYLABS_SCRAPER_URL` 必须设**（如 `https://yibuapi.com/oxylabs/v1/queries`）。
 > 模板会把它透传给 oxylabs server；**留空**会让 `envsubst` 写入空值、覆盖掉包里的默认地址，
@@ -155,8 +170,28 @@ curl -s http://localhost:1984/enabled-servers | jq -c   # 期望 online 数 = en
 
 ## 5. 起 completion 服务（新终端）
 
+第一次启用 Mongo 任务前，单独构建它的一次性 fixture 镜像。这个命令**不会修改或覆盖** `agent-environment:latest`：
+
+```bash
+make build-task-mongo
+```
+
+completion 服务本身运行在宿主机上，通过 Docker CLI按题创建和销毁一次性容器：
+
 ```bash
 make run-mcp-completion        # 监听 .env 的 PORT
+```
+
+启动时会清理由相同 `MCP_SANDBOX_OWNER`（默认 hostname + PORT）遗留的孤儿任务容器。手工清理命令：
+
+```bash
+make cleanup-task-sandboxes
+```
+
+隔离验收会检查全部本地/下载型 MCP 能启动、云端写工具不可见/不可调用、本地文件与 Mongo 写入不会跨题泄漏、本地容器没有云端凭证且 `network=none`，以及 20 个任务容器并发启动：
+
+```bash
+make check-task-isolation
 ```
 
 冒烟测试（期望答案 `Customer`）：
@@ -209,6 +244,19 @@ uv run python mcp_completion_script.py \
 ```
 
 结果写入 `completion_results/`。脚本会自动跳过输出文件里已有的行；要重跑先删/改名。
+
+每个请求现在会把 `TASK` 作为 `taskId` 传给 completion 服务。完整日志默认位于：
+
+```text
+completion_results/runtime_logs/<YYYY-MM>/
+├── model_calls_<YYYYMMDD>.jsonl
+├── tools_<YYYYMMDD>.jsonl
+├── sandbox_<YYYYMMDD>.jsonl
+├── service_<YYYYMMDD>.jsonl
+└── containers/<task-id>/*.log
+```
+
+其中 `model_call_started` 在实际请求模型前落盘，因此即使上游超时或进程被杀，也能看到该次调用。配置中的 token/key/secret/password 会在 JSONL 中替换为 `<redacted>`。
 
 ---
 

@@ -24,7 +24,8 @@ wheels/
 
 # Data and generated files
 data.zip
-data_exports/
+data_exports/*
+!data_exports/mongo_dump_video_game_store-UNZIP-FIRST.zip
 completion_results/
 evaluation_results/
 *.log

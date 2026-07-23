@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import uvicorn
@@ -13,6 +14,8 @@ from .agent_eval import handle_run_mcp_eval
 from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
+from .runtime_log import write_runtime_event
+from .task_sandbox import reap_owned_task_sandboxes
 
 # Configure logging
 logging.basicConfig(
@@ -20,10 +23,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    isolation_enabled = (
+        os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+        not in {"0", "false", "no"}
+    )
+    if isolation_enabled:
+        await reap_owned_task_sandboxes()
+    write_runtime_event(
+        "service",
+        "completion_service_started",
+        host=config.HOST,
+        port=config.PORT,
+        shared_mcp_url=config.MCP_SERVER_URL,
+        task_isolation_enabled=isolation_enabled,
+        task_agent_image=os.getenv(
+            "MCP_TASK_AGENT_IMAGE", "agent-environment:latest"
+        ),
+    )
+    try:
+        yield
+    finally:
+        write_runtime_event(
+            "service",
+            "completion_service_stopped",
+            host=config.HOST,
+            port=config.PORT,
+        )
+
+
 app = FastAPI(
     title="MCP Eval",
     description="Standalone MCP evaluation environment",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -52,7 +86,14 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "task_isolation_enabled": (
+            os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+            not in {"0", "false", "no"}
+        ),
+        "shared_mcp_url": config.MCP_SERVER_URL,
+    }
 
 
 @app.post("/v2/mcp_eval/run_agent")
@@ -63,7 +104,11 @@ async def run_agent(
     """
     MCP evaluation endpoint. The main entrypoint. For simplicity, no authentication or rate limiting is used.
     """
-    logger.info(f"v2 API /run_agent called with model: {body.model}")
+    logger.info(
+        "v2 API /run_agent called with model=%s task_id=%s",
+        body.model,
+        body.task_id or "generated",
+    )
 
     try:
         # Process agent outputs and return results

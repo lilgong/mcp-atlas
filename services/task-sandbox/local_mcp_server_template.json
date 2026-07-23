@@ -1,0 +1,67 @@
+{
+  "mcpServers": {
+    "cli-mcp-server": {
+      "command": "/root/.local/share/uv/tools/cli-mcp-server/bin/cli-mcp-server",
+      "args": [],
+      "env": {
+        "ALLOWED_DIR": "/data",
+        "ALLOWED_COMMANDS": "ls,cat,find",
+        "ALLOWED_FLAGS": "",
+        "MAX_COMMAND_LENGTH": "1024",
+        "COMMAND_TIMEOUT": "30",
+        "ALLOW_SHELL_OPERATORS": "false"
+      }
+    },
+    "desktop-commander": {
+      "command": "node",
+      "args": [
+        "/mnt/node_modules/@wonderwhy-er/desktop-commander/dist/index.js"
+      ]
+    },
+    "filesystem": {
+      "command": "node",
+      "args": [
+        "/mnt/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/data"
+      ]
+    },
+    "git": {
+      "command": "/root/.local/share/uv/tools/mcp-server-git/bin/mcp-server-git",
+      "args": []
+    },
+    "mcp-code-executor": {
+      "command": "node",
+      "args": [
+        "/mnt/node_modules/@geobio/code_execution_server/build/index.js"
+      ],
+      "env": {
+        "CODE_STORAGE_DIR": "/data/repos/mcp_code_executor_workspace",
+        "ENV_TYPE": "venv-uv",
+        "UV_VENV_PATH": "/data/repos/mcp_code_executor_workspace/.venv"
+      }
+    },
+    "mcp-server-code-runner": {
+      "command": "node",
+      "args": [
+        "/mnt/node_modules/mcp-server-code-runner/dist/cli.js"
+      ]
+    },
+    "memory": {
+      "command": "node",
+      "args": [
+        "/mnt/node_modules/@modelcontextprotocol/server-memory/dist/index.js"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "/data/repos/memory_mcp_server/memories-for-mcp.json"
+      }
+    },
+    "mongodb": {
+      "command": "node",
+      "args": [
+        "/mnt/node_modules/mongodb-mcp-server/dist/index.js",
+        "--connectionString",
+        "${MONGODB_CONNECTION_STRING}"
+      ]
+    }
+  }
+}

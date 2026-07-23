@@ -2,9 +2,10 @@
 
 import json
 import logging
+import uuid
 from typing import AsyncGenerator, Dict, List, Union, Any, Optional
 
-from .mcp_client import MCPClient, SandboxMCPClient
+from .mcp_client import IsolatedMCPClient, MCPClient
 from .llm import create_completion, _transform_tool_calls
 from .schema import (
     RunAgentAPIRequestBody,
@@ -39,6 +40,7 @@ async def run_mcp_eval(
     messages: List[Message],
     max_turns: int,
     extra_body: Optional[Dict[str, Any]] = None,
+    task_id: str = "unknown",
 ) -> AsyncGenerator[AgentOutput, None]:
     """
     Simple MCP evaluation loop that keeps calling tools until the model decides there are no more tools to call.
@@ -59,6 +61,8 @@ async def run_mcp_eval(
                 messages=all_messages,
                 tools=transformed_tools,
                 extra_body=extra_body,
+                task_id=task_id,
+                turn=i + 1,
             )
 
             assistant_message = result.message
@@ -132,18 +136,20 @@ async def handle_run_mcp_eval(
             Yields:
         AgentOutput: Generator that yields either successful messages or errors during MCP eval execution
     """
-    mcp_client = None
-
-    mcp_client = SandboxMCPClient(
-        sandbox_url=config.MCP_SERVER_URL,
+    task_id = body.task_id or f"request-{uuid.uuid4().hex[:14]}"
+    mcp_client = IsolatedMCPClient(
+        task_id=task_id,
+        shared_url=config.MCP_SERVER_URL,
         enabled_tools=body.enabled_tools,
     )
 
-    async for output in run_mcp_eval(
-        mcp_client=mcp_client,
-        model=body.model,
-        messages=body.messages,
-        max_turns=body.max_turns,
-        extra_body=body.extra_body,
-    ):
-        yield output
+    async with mcp_client:
+        async for output in run_mcp_eval(
+            mcp_client=mcp_client,
+            model=body.model,
+            messages=body.messages,
+            max_turns=body.max_turns,
+            extra_body=body.extra_body,
+            task_id=task_id,
+        ):
+            yield output
