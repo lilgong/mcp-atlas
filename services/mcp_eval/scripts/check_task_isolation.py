@@ -191,8 +191,8 @@ async def _mongo_write_then_destroy(shared_url: str, marker: str) -> None:
         before = await client.call_tool(
             "mongodb_count",
             {
-                "database": "video_game_store",
-                "collection": "Inventory",
+                "database": "store",
+                "collection": "_mcp_atlas_isolation_probe",
                 "query": query,
             },
         )
@@ -201,8 +201,8 @@ async def _mongo_write_then_destroy(shared_url: str, marker: str) -> None:
         inserted = await client.call_tool(
             "mongodb_insert-many",
             {
-                "database": "video_game_store",
-                "collection": "Inventory",
+                "database": "store",
+                "collection": "_mcp_atlas_isolation_probe",
                 "documents": [{"_mcp_atlas_isolation_marker": marker}],
             },
         )
@@ -211,8 +211,8 @@ async def _mongo_write_then_destroy(shared_url: str, marker: str) -> None:
         after = await client.call_tool(
             "mongodb_count",
             {
-                "database": "video_game_store",
-                "collection": "Inventory",
+                "database": "store",
+                "collection": "_mcp_atlas_isolation_probe",
                 "query": query,
             },
         )
@@ -229,8 +229,8 @@ async def _verify_fresh_mongo(shared_url: str, marker: str) -> None:
         result = await client.call_tool(
             "mongodb_count",
             {
-                "database": "video_game_store",
-                "collection": "Inventory",
+                "database": "store",
+                "collection": "_mcp_atlas_isolation_probe",
                 "query": {"_mcp_atlas_isolation_marker": marker},
             },
         )

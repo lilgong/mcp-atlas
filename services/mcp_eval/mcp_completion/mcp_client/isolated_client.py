@@ -14,6 +14,7 @@ from ..runtime_log import jsonable, write_runtime_event
 from ..schema import CallToolResponse, ToolDefinition
 from ..task_sandbox import TaskSandbox
 from ..tool_policy import (
+    TASK_MONGODB_DATABASE,
     ToolRoute,
     partition_tools,
     route_for_tool,
@@ -64,7 +65,7 @@ class IsolatedMCPClient(MCPClient):
         self._route_tools = partition_tools(requested)
         self.blocked_tools = set(
             self._route_tools[ToolRoute.BLOCKED_CLOUD_WRITE]
-        )
+        ) | set(self._route_tools[ToolRoute.BLOCKED_UNSUPPORTED])
         self.allowed_tools = set(requested) - self.blocked_tools
 
         if self.blocked_tools:
@@ -195,9 +196,18 @@ class IsolatedMCPClient(MCPClient):
     async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
         if tool_name in self.blocked_tools or route_for_tool(
             tool_name
-        ) == ToolRoute.BLOCKED_CLOUD_WRITE:
+        ) in {
+            ToolRoute.BLOCKED_CLOUD_WRITE,
+            ToolRoute.BLOCKED_UNSUPPORTED,
+        }:
+            route = route_for_tool(tool_name)
+            reason = (
+                "Cloud account write tool is disabled"
+                if route == ToolRoute.BLOCKED_CLOUD_WRITE
+                else "Tool is unavailable in the deterministic offline runtime"
+            )
             raise ToolPolicyError(
-                f"Cloud account write tool is disabled: {tool_name}"
+                f"{reason}: {tool_name}"
             )
         if tool_name not in self.allowed_tools:
             raise ToolPolicyError(
@@ -210,6 +220,12 @@ class IsolatedMCPClient(MCPClient):
             raise ToolPolicyError(
                 f"No {route.value} backend is available for tool {tool_name}"
             )
+        if (
+            server_for_tool(tool_name) == "mongodb"
+            and isinstance(args, dict)
+            and "database" in args
+        ):
+            args = {**args, "database": TASK_MONGODB_DATABASE}
 
         call_id = uuid.uuid4().hex
         started = time.monotonic()

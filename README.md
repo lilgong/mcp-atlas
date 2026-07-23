@@ -10,7 +10,7 @@
 
 | 组件 | 说明 | 端口 |
 | --- | --- | --- |
-| **agent-environment** | 跑 36 个 MCP server 的容器（docker） | 1984 |
+| **agent-environment** | 跑共享 MCP server 的常驻容器（docker） | `MCP_SHARED_PORT`（默认 1984） |
 | **completion 服务** | 连接 LLM 与 MCP server，跑 agentic loop | `PORT`（默认 3000） |
 | **评测脚本** | 生成轨迹 / 打分 / 验收（`services/mcp_eval/`） | — |
 
@@ -62,12 +62,13 @@ scp <老机器>:/path/to/mcp-atlas/.env ./.env
 | --- | --- |
 | `PANGU_API_URL` / `LLM_BASE_URL` | 模型推理端点，新机器必须**能连通**（先 `curl` 测） |
 | `MONGODB_CONNECTION_STRING` | 本机 mongo 用 `mongodb://localhost:27017`（配合 host 网络，见 §4） |
-| `MCP_SERVER_URL` | agent-environment 地址；host 网络起在 1984 就填 `http://localhost:1984` |
+| `MCP_SHARED_HOST` / `MCP_SHARED_PORT` | 常驻 agent-environment 的监听地址和宿主端口 |
+| `MCP_SERVER_URL` | completion 访问常驻 agent-environment 的地址；应与上面的端口一致 |
 | `PORT` / `SERVER_URL` | completion 服务端口；改了 `PORT` 必须同步改 `SERVER_URL` |
 | `OXYLABS_SCRAPER_URL` | **必填**，见下方警告 |
 | `EVAL_LLM_MODEL` | 打分用的裁判模型（如 `openai/gpt-5.4`） |
 | `MCP_TASK_AGENT_IMAGE` | 按任务容器复用的既有镜像，默认 `agent-environment:latest`；运行时不会 build/tag 它 |
-| `MCP_TASK_MONGO_IMAGE` | 一次性 Mongo fixture 镜像，默认 `mcp-atlas-task-mongo:1.0` |
+| `MCP_TASK_MONGO_IMAGE` | 一次性 synthetic Mongo fixture 镜像；Mongo 任务必填，不配置时 fail closed |
 | `MCP_RUNTIME_LOG_DIR` | 完整模型调用与隔离运行日志目录；跨机器部署时可设绝对路径 |
 
 > ⚠️ **`OXYLABS_SCRAPER_URL` 必须设**（如 `https://yibuapi.com/oxylabs/v1/queries`）。
@@ -150,13 +151,13 @@ docker tag ghcr.io/scaleapi/mcp-atlas:1.2.5 agent-environment:latest
 **再起容器——用 host 网络：**
 
 ```bash
-make run-docker-host MCP_PORT=1984
+make run-docker-host
 ```
 
-等约 1 分钟，日志出现 `Uvicorn running on http://0.0.0.0:1984`，然后：
+端口直接读取 `.env` 的 `MCP_SHARED_PORT`。等约 1 分钟，日志出现对应端口后：
 
 ```bash
-curl -s http://localhost:1984/enabled-servers | jq -c   # 期望 online 数 = enabled 数
+curl -s http://localhost:<MCP_SHARED_PORT>/enabled-servers | jq -c
 ```
 
 > ⚠️ **为什么用 `run-docker-host` 而不是 `run-docker`**：`.env` 里 mongo 是 `localhost:27017`，
@@ -170,11 +171,32 @@ curl -s http://localhost:1984/enabled-servers | jq -c   # 期望 online 数 = en
 
 ## 5. 起 completion 服务（新终端）
 
-第一次启用 Mongo 任务前，单独构建它的一次性 fixture 镜像。这个命令**不会修改或覆盖** `agent-environment:latest`：
+第一次启用 Mongo 任务前，从自己的 synthetic mongodump 构建一次性 fixture
+镜像。源数据库名可以任意指定，构建器会统一规范化为任务内的 `store`。这个命令
+**不会修改或覆盖** `agent-environment:latest`：
 
 ```bash
-make build-task-mongo
+make build-task-mongo \
+  MONGO_FIXTURE_DUMP=/path/to/mongodump \
+  MONGO_FIXTURE_DB=my_seed_database \
+  MONGO_FIXTURE_ID=my-synthetic-v1 \
+  TASK_MONGO_IMAGE=mcp-task-mongo:my-synthetic-v1
 ```
+
+随后在 `.env` 设置
+`MCP_TASK_MONGO_IMAGE=mcp-task-mongo:my-synthetic-v1`；data-synthesis 必须设置
+同一个 image tag。未设置时 Mongo 工具不会退回官方 fixture，而是在创建任务时
+明确失败。
+
+这里的 `27017` 只是每题 Mongo 容器内部的固定端口，不会发布到宿主机，也不是
+常驻服务：有 Mongo 工具的任务开始时创建容器、恢复 fixture，任务结束就删除。
+`MONGO_FIXTURE_DB` 可以选择 mongodump 中任意源数据库；运行时统一恢复为
+`store`，并把模型传入的 `database` 强制改写为 `store`。这样可以换自种数据，
+但不能让模型借数据库名越过任务边界。
+
+宿主机真正需要协调的常驻端口只有 `.env` 中的 `MCP_SHARED_PORT`（共享 MCP）
+和 `PORT`（completion）。network 任务容器的宿主端口由 Docker 临时分配；
+local/Mongo 任务不发布宿主端口，因此这些内部端口不需要、也不应该配置。
 
 completion 服务本身运行在宿主机上，通过 Docker CLI按题创建和销毁一次性容器：
 
@@ -281,7 +303,7 @@ uv run mcp_evals_scores.py \
 ## 9. 启动顺序小结
 
 ```
-① make run-docker-host   (1984，常驻)      —— 先起
+① make run-docker-host   (MCP_SHARED_PORT，常驻) —— 先起
 ② make run-mcp-completion (PORT，常驻)      —— 再起
 ③ uv run test_server_v1.py                 —— 验收
 ④ uv run mcp_completion_script.py          —— 生成轨迹

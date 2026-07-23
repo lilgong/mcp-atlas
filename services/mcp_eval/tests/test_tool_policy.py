@@ -61,6 +61,18 @@ class ToolPolicyTests(unittest.TestCase):
                 route_for_tool(name), ToolRoute.BLOCKED_CLOUD_WRITE, name
             )
 
+    def test_offline_dependency_install_is_not_advertised(self):
+        self.assertEqual(
+            route_for_tool("mcp-code-executor_install_dependencies"),
+            ToolRoute.BLOCKED_UNSUPPORTED,
+        )
+
+    def test_e2b_is_blocked_until_determinism_gate_exists(self):
+        self.assertEqual(
+            route_for_tool("e2b-server_run_code"),
+            ToolRoute.BLOCKED_UNSUPPORTED,
+        )
+
     def test_longest_server_prefix_and_legacy_mongo(self):
         self.assertEqual(
             server_for_tool("mcp-server-code-runner_run-code"),

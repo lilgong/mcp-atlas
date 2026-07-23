@@ -79,6 +79,43 @@ async def _run(
     return stdout, stderr, process.returncode
 
 
+async def inspect_mongo_fixture_image(image: str) -> dict[str, str]:
+    stdout, _, _ = await _run(
+        "docker",
+        "image",
+        "inspect",
+        image,
+        "--format",
+        "{{.Id}}\n{{json .Config.Labels}}",
+        timeout=30,
+    )
+    image_id, _, labels_text = stdout.partition("\n")
+    labels = json.loads(labels_text or "{}") or {}
+    fixture_id = str(labels.get("mcp-atlas.fixture-id") or "")
+    logical_database = str(
+        labels.get("mcp-atlas.logical-database") or ""
+    )
+    content_sha256 = str(
+        labels.get("mcp-atlas.fixture-sha256") or ""
+    )
+    if (
+        not fixture_id
+        or logical_database != "store"
+        or not re.fullmatch(r"[0-9a-f]{64}", content_sha256)
+    ):
+        raise TaskSandboxError(
+            f"Mongo fixture image {image!r} does not implement the synthetic "
+            "store fixture contract"
+        )
+    return {
+        "image": image,
+        "image_id": image_id,
+        "fixture_id": fixture_id,
+        "logical_database": logical_database,
+        "content_sha256": content_sha256,
+    }
+
+
 @dataclass
 class ManagedContainer:
     kind: str
@@ -100,6 +137,7 @@ class TaskSandbox:
     cpu_limit: str
     owner: str = field(default_factory=_owner_label)
     mongo_socket_volume: Optional[str] = None
+    mongo_fixture: Optional[dict[str, str]] = None
     containers: list[ManagedContainer] = field(default_factory=list)
     _started_at: float = field(default_factory=time.monotonic)
     _closed: bool = False
@@ -119,9 +157,7 @@ class TaskSandbox:
             agent_image=os.getenv(
                 "MCP_TASK_AGENT_IMAGE", "agent-environment:latest"
             ),
-            mongo_image=os.getenv(
-                "MCP_TASK_MONGO_IMAGE", "mcp-atlas-task-mongo:1.0"
-            ),
+            mongo_image=(os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip(),
             startup_timeout=float(
                 os.getenv("MCP_TASK_SANDBOX_STARTUP_TIMEOUT", "180")
             ),
@@ -195,6 +231,14 @@ class TaskSandbox:
     async def _start_local_stack(self) -> None:
         extra_env: dict[str, str] = {}
         if "mongodb" in self.local_servers:
+            if not self.mongo_image:
+                raise TaskSandboxError(
+                    "MCP_TASK_MONGO_IMAGE is required for MongoDB tasks; "
+                    "build a synthetic fixture image first"
+                )
+            self.mongo_fixture = await inspect_mongo_fixture_image(
+                self.mongo_image
+            )
             await self._create_mongo_socket_volume()
             await self._start_mongo()
             extra_env["MONGODB_CONNECTION_STRING"] = (
@@ -309,6 +353,30 @@ class TaskSandbox:
             image=self.mongo_image,
         )
         await self._wait_for_mongo(name)
+        await self._restore_mongo_fixture(name)
+
+    async def _restore_mongo_fixture(self, name: str) -> None:
+        await _run(
+            "docker",
+            "exec",
+            name,
+            "mongorestore",
+            "--drop",
+            "--nsInclude=store.*",
+            "/opt/mcp-task-fixture/dump",
+            timeout=180,
+        )
+        write_runtime_event(
+            "sandbox",
+            "task_mongo_fixture_restored",
+            task_id=self.task_id,
+            container=name,
+            image=self.mongo_image,
+            database="store",
+            image_id=(self.mongo_fixture or {}).get("image_id"),
+            fixture_id=(self.mongo_fixture or {}).get("fixture_id"),
+            fixture_sha256=(self.mongo_fixture or {}).get("content_sha256"),
+        )
 
     async def _wait_for_mongo(self, name: str) -> None:
         deadline = time.monotonic() + self.startup_timeout

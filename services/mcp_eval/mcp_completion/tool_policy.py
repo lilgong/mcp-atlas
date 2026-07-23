@@ -78,6 +78,16 @@ TASK_LOCAL_SERVERS = frozenset(
 # These servers download and retain local artifacts.  They need outbound network
 # access, so they are kept separate from the no-network arbitrary-code sandbox.
 TASK_NETWORK_SERVERS = frozenset({"arxiv", "pubmed"})
+TASK_MONGODB_DATABASE = "store"
+UNSUPPORTED_TOOLS = frozenset(
+    {
+        # Per-task Docker isolation cannot make a remote E2B execution
+        # reproducible. Keep it closed until the double-execution gate exists.
+        "e2b-server_run_code",
+        # Task-local containers deliberately have no network access.
+        "mcp-code-executor_install_dependencies",
+    }
+)
 
 
 class ToolRoute(str, Enum):
@@ -85,6 +95,7 @@ class ToolRoute(str, Enum):
     TASK_LOCAL = "task_local"
     TASK_NETWORK = "task_network"
     BLOCKED_CLOUD_WRITE = "blocked_cloud_write"
+    BLOCKED_UNSUPPORTED = "blocked_unsupported"
 
 
 # Exact read-only surface for services backed by a shared cloud account.
@@ -175,6 +186,8 @@ def is_cloud_data_write(tool_name: str) -> bool:
 
 
 def route_for_tool(tool_name: str) -> ToolRoute:
+    if tool_name in UNSUPPORTED_TOOLS:
+        return ToolRoute.BLOCKED_UNSUPPORTED
     if is_cloud_data_write(tool_name):
         return ToolRoute.BLOCKED_CLOUD_WRITE
 
