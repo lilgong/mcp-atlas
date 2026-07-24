@@ -2,7 +2,7 @@
 
 在真实 MCP server 上评测模型的工具使用能力。本文只讲**如何部署、如何评测、如何排障**。
 
-> 一句话流程：`git clone` → 配 `.env` → 准备有状态服务数据 → `make build` → `make run-docker-host` → 生成轨迹 → 打分。
+> 一句话流程：`git clone` → 配 `.env` → 构建无数据运行时 → 准备外部 fixture → 启动共享 MCP → 生成轨迹 → 打分。
 
 ---
 
@@ -10,7 +10,7 @@
 
 | 组件 | 说明 | 端口 |
 | --- | --- | --- |
-| **agent-environment** | 跑共享 MCP server 的常驻容器（docker） | `MCP_SHARED_PORT`（默认 1984） |
+| **MCP runtime** | 跑共享 MCP server 的常驻容器（docker） | `MCP_SHARED_PORT`（默认 1984） |
 | **completion 服务** | 连接 LLM 与 MCP server，跑 agentic loop | `PORT`（默认 3000） |
 | **评测脚本** | 生成轨迹 / 打分 / 验收（`services/mcp_eval/`） | — |
 
@@ -20,13 +20,14 @@
 
 ### 0.1 当前隔离边界
 
-- `1984` 的常驻 `agent-environment` 只承载云端/公开读取工具，保留现有 Yibu 适配和云端凭证。
+- `1984` 的常驻 `mcp-atlas-runtime:<version>` 只承载云端/公开读取工具，保留 Yibu 适配和云端凭证。
 - filesystem、Git、Memory、CLI、Desktop Commander、代码执行和 MongoDB 按任务启动一次性容器；不向这些容器传入 `.env` 或云端凭证，而且容器使用 `network=none`。
 - Arxiv/PubMed 有本地下载缓存且需要联网，使用另一类无云凭证的按任务容器。
 - Airtable、GitHub、Google Workspace、Lara Memory、Notion、Slack 的云端写工具在工具展示和实际调用两层都被拒绝；这些服务的读取工具仍开放。
 - 宿主机通过 `docker exec` 访问只监听容器 loopback 的本地 MCP 服务；Mongo 走仅挂载给该题两个容器的私有 volume 内 Unix socket，不需要给代码容器开放 Docker bridge。
 - 每题结束后容器、匿名数据层和私有 Mongo socket volume 都会销毁。服务异常退出留下的同 owner 容器和 volume 会在下次启动时回收。
 - 模型每轮请求/响应/失败/token、工具调用、容器生命周期和容器 stdout/stderr 都写到 `MCP_RUNTIME_LOG_DIR`。
+- 运行时镜像不含任何 `/data` fixture。外部数据先校验内容 SHA，再为每题复制一份并挂载到 `/data:rw`；写入只影响该题副本。
 
 这不是把 36 个 server 全复制进一个带凭证的任务容器。那样 CLI/代码执行可以直接读取云端 token，不构成安全隔离。
 
@@ -40,7 +41,8 @@ cd mcp-atlas
 git submodule update --init --recursive   # clone 时若没带 --recursive
 ```
 
-> 子模块非必需——`make build` 会按 `data/repos/git_submodule_info.csv` 里的 SHA 现克隆。仅从源码构建时建议补上。
+> 子模块非必需。Git 任务按外部 fixture 的
+> `repos/git_submodule_info.csv` 固定 SHA，并在任务副本中物化仓库。
 
 ---
 
@@ -62,12 +64,13 @@ scp <老机器>:/path/to/mcp-atlas/.env ./.env
 | --- | --- |
 | `PANGU_API_URL` / `LLM_BASE_URL` | 模型推理端点，新机器必须**能连通**（先 `curl` 测） |
 | `MONGODB_CONNECTION_STRING` | 本机 mongo 用 `mongodb://localhost:27017`（配合 host 网络，见 §4） |
-| `MCP_SHARED_HOST` / `MCP_SHARED_PORT` | 常驻 agent-environment 的监听地址和宿主端口 |
-| `MCP_SERVER_URL` | completion 访问常驻 agent-environment 的地址；应与上面的端口一致 |
+| `MCP_SHARED_HOST` / `MCP_SHARED_PORT` | 常驻 MCP runtime 的监听地址和宿主端口 |
+| `MCP_SERVER_URL` | completion 访问常驻 MCP runtime 的地址；应与上面的端口一致 |
 | `PORT` / `SERVER_URL` | completion 服务端口；改了 `PORT` 必须同步改 `SERVER_URL` |
 | `OXYLABS_SCRAPER_URL` | **必填**，见下方警告 |
 | `EVAL_LLM_MODEL` | 打分用的裁判模型（如 `openai/gpt-5.4`） |
-| `MCP_TASK_AGENT_IMAGE` | 按任务容器复用的既有镜像，默认 `agent-environment:latest`；运行时不会 build/tag 它 |
+| `MCP_SHARED_AGENT_IMAGE` / `MCP_TASK_AGENT_IMAGE` | 共享/按任务容器使用的无数据版本化镜像，默认 `mcp-atlas-runtime:20260724` |
+| `MCP_TASK_DATA_DIR` | 带 `.atlas-fixture.json` 的外部任务数据目录；本地/下载型任务必填 |
 | `MCP_TASK_MONGO_IMAGE` | 一次性 synthetic Mongo fixture 镜像；Mongo 任务必填，不配置时 fail closed |
 | `MCP_RUNTIME_LOG_DIR` | 完整模型调用与隔离运行日志目录；跨机器部署时可设绝对路径 |
 
@@ -131,24 +134,51 @@ mongorestore --uri="mongodb://localhost:27017" mongo_dump_video_game_store-UNZIP
 
 ---
 
-## 4. 起 agent-environment 容器
+## 4. 构建运行时、准备外部数据并启动共享容器
 
-**镜像先二选一：**
+构建版本化、无 fixture 的运行时镜像：
 
 ```bash
-# A. 从源码自建（推荐，完全自包含，含 Yibu 网关适配）
-make build
-
-# B. 用预构建镜像（上游原版，不含 Yibu 网关适配）
-docker pull ghcr.io/scaleapi/mcp-atlas:1.2.5
-docker tag ghcr.io/scaleapi/mcp-atlas:1.2.5 agent-environment:latest
+make build-atlas-runtime \
+  ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:20260724
 ```
 
-> 本仓库的 `make build` 已把 Brave / Exa / Oxylabs 的 Yibu 网关适配（`vendor/yibu-patched/`）、
-> 依赖版本锁定、CRLF/权限修复都烤进构建，**出来即用，无需挂载任何宿主机路径**。
-> 预构建镜像是上游原版，Brave/Exa/Oxylabs 会打各自官方端点——用 Yibu key 会 401/422，此时应选 A。
+该构建从独立基础镜像和显式源码清单生成，包含固定 MCP 依赖、code-executor
+只读 venv 与 Yibu patch，但构建上下文明确排除 `data/` 和 `.env*`。它不会
+build、retag 或修改 `agent-environment:latest`。
 
-**再起容器——用 host 网络：**
+再从你选择的数据目录生成内容寻址 fixture。合成数据必须使用 synthetic
+源；复测同一批题时，两边必须使用同一个 fixture ID 和 SHA：
+
+```bash
+uv run --project services/mcp_eval python \
+  scripts/prepare_task_data_fixture.py \
+  --source /path/to/synthetic-data \
+  --output /srv/mcp-fixtures/my-synthetic-v1 \
+  --fixture-id my-synthetic-v1
+```
+
+在 `.env` 中设置：
+
+```dotenv
+MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:20260724
+MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:20260724
+MCP_TASK_DATA_DIR=/srv/mcp-fixtures/my-synthetic-v1
+```
+
+若生成和复测在不同机器上，不要分别用同一个 tag 各自重建后假设内容相同。
+在构建机一次构建，再用现有离线传输方式复制镜像，并核对 image ID：
+
+```bash
+docker save mcp-atlas-runtime:20260724 -o mcp-atlas-runtime-20260724.tar
+# 复制 tar 到目标机后：
+docker load -i mcp-atlas-runtime-20260724.tar
+docker image inspect mcp-atlas-runtime:20260724 --format '{{.Id}}'
+```
+
+fixture 目录也一并复制；两端运行日志中的 image ID、fixture ID 和 SHA 必须一致。
+
+启动共享容器：
 
 ```bash
 make run-docker-host
@@ -160,12 +190,8 @@ make run-docker-host
 curl -s http://localhost:<MCP_SHARED_PORT>/enabled-servers | jq -c
 ```
 
-> ⚠️ **为什么用 `run-docker-host` 而不是 `run-docker`**：`.env` 里 mongo 是 `localhost:27017`，
-> 而系统 mongod 通常只监听 `127.0.0.1`。默认 bridge 网络下容器的 `localhost` 是容器自己，**连不上本机 mongo**；
-> `--network host` 让容器的 `localhost` 就是宿主机的回环。
-> （hzp 那份仓库把 `--network host` 直接写进了 `run-docker`，所以它的 `make run-docker` ≡ 这里的 `run-docker-host`。）
->
-> 若坚持用 bridge 的 `make run-docker`：须把 mongod 改为监听 `0.0.0.0`，并把 `.env` 改成 `mongodb://host.docker.internal:27017`。
+共享容器使用 host 网络访问云端服务和现有本机依赖；逐题 local/Mongo 容器仍是
+独立的 `network=none`，不会继承共享容器的凭证或数据。
 
 ---
 
@@ -173,7 +199,7 @@ curl -s http://localhost:<MCP_SHARED_PORT>/enabled-servers | jq -c
 
 第一次启用 Mongo 任务前，从自己的 synthetic mongodump 构建一次性 fixture
 镜像。源数据库名可以任意指定，构建器会统一规范化为任务内的 `store`。这个命令
-**不会修改或覆盖** `agent-environment:latest`：
+**不会修改或覆盖**任何 MCP runtime 镜像：
 
 ```bash
 make build-task-mongo \
@@ -303,11 +329,13 @@ uv run mcp_evals_scores.py \
 ## 9. 启动顺序小结
 
 ```
-① make run-docker-host   (MCP_SHARED_PORT，常驻) —— 先起
-② make run-mcp-completion (PORT，常驻)      —— 再起
-③ uv run test_server_v1.py                 —— 验收
-④ uv run mcp_completion_script.py          —— 生成轨迹
-⑤ uv run mcp_evals_scores.py               —— 打分
+① make build-atlas-runtime                 —— 构建无数据运行时
+② scripts/prepare_task_data_fixture.py      —— 准备外部 fixture
+③ make run-docker-host                      —— 起共享 MCP
+④ make run-mcp-completion                   —— 起 completion
+⑤ uv run test_server_v1.py                  —— 验收
+⑥ uv run mcp_completion_script.py           —— 生成轨迹
+⑦ uv run mcp_evals_scores.py                —— 打分
 ```
 
 改了 `.env` 后 **必须重启容器**（`--env-file` 只在启动时读一次）。
@@ -329,5 +357,5 @@ uv run mcp_evals_scores.py \
 
 - **36 个 MCP server**（filesystem、Git、Wikipedia、GitHub、weather、Airtable、Notion、Slack、MongoDB…）
 - **completion 服务**：跑多轮 LLM + 工具调用
-- **docker 化的 agent-environment**：一致的 server 运行环境
+- **docker 化的 fixture-free MCP runtime**：一致的 server 运行环境，数据按题注入
 - **评测脚本**：轨迹生成（`mcp_completion_script.py`）、打分（`mcp_evals_scores.py`）、数据验收（`test_server_v1.py`）

@@ -1,9 +1,4 @@
-"""Docker lifecycle for disposable task-local MCP environments.
-
-This module deliberately uses the existing ``agent-environment:latest`` image.
-It never builds, tags, or mutates that image.  Cloud credentials are not passed
-to task containers.
-"""
+"""Docker lifecycle for fixture-injected disposable MCP environments."""
 
 from __future__ import annotations
 
@@ -12,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import time
 import uuid
@@ -24,12 +20,20 @@ from dotenv import load_dotenv
 
 from .docker_http import docker_post_json
 from .runtime_log import container_log_path, write_runtime_event
+from .task_data import (
+    TaskDataFixture,
+    prepare_task_workspace,
+)
 
 load_dotenv()
 
 
 class TaskSandboxError(RuntimeError):
     pass
+
+
+DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:20260724"
+RUNTIME_DATA_CONTRACT = "external-data-v1"
 
 
 def _safe_fragment(value: str, limit: int = 30) -> str:
@@ -116,6 +120,45 @@ async def inspect_mongo_fixture_image(image: str) -> dict[str, str]:
     }
 
 
+async def inspect_runtime_image(image: str) -> dict[str, str]:
+    stdout, _, _ = await _run(
+        "docker",
+        "image",
+        "inspect",
+        image,
+        "--format",
+        "{{.Id}}\n{{json .Config.Labels}}\n{{json .Config.Volumes}}",
+        timeout=30,
+    )
+    image_id, _, remainder = stdout.partition("\n")
+    labels_text, _, volumes_text = remainder.partition("\n")
+    try:
+        labels = json.loads(labels_text or "{}") or {}
+        volumes = json.loads(volumes_text or "{}") or {}
+    except json.JSONDecodeError as exc:
+        raise TaskSandboxError(
+            f"invalid runtime image metadata for {image!r}"
+        ) from exc
+    if (
+        labels.get("mcp-atlas.runtime") != "true"
+        or labels.get("mcp-atlas.data-contract") != RUNTIME_DATA_CONTRACT
+        or labels.get("mcp-atlas.contains-fixture") != "false"
+        or "/data" not in volumes
+    ):
+        raise TaskSandboxError(
+            f"runtime image {image!r} does not implement the fixture-free "
+            f"{RUNTIME_DATA_CONTRACT} contract"
+        )
+    return {
+        "image": image,
+        "image_id": image_id,
+        "runtime_version": str(
+            labels.get("mcp-atlas.runtime-version") or ""
+        ),
+        "data_contract": RUNTIME_DATA_CONTRACT,
+    }
+
+
 @dataclass
 class ManagedContainer:
     kind: str
@@ -135,9 +178,15 @@ class TaskSandbox:
     startup_timeout: float
     memory_limit: str
     cpu_limit: str
+    task_data_source: str
     owner: str = field(default_factory=_owner_label)
     mongo_socket_volume: Optional[str] = None
     mongo_fixture: Optional[dict[str, str]] = None
+    runtime_image: Optional[dict[str, str]] = None
+    task_data_fixture: Optional[TaskDataFixture] = None
+    task_data_dir: Optional[Path] = None
+    task_workspace: Optional[Path] = None
+    git_repositories: list[str] = field(default_factory=list)
     containers: list[ManagedContainer] = field(default_factory=list)
     _started_at: float = field(default_factory=time.monotonic)
     _closed: bool = False
@@ -155,7 +204,7 @@ class TaskSandbox:
             local_servers=set(local_servers),
             network_servers=set(network_servers),
             agent_image=os.getenv(
-                "MCP_TASK_AGENT_IMAGE", "agent-environment:latest"
+                "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
             ),
             mongo_image=(os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip(),
             startup_timeout=float(
@@ -163,6 +212,7 @@ class TaskSandbox:
             ),
             memory_limit=os.getenv("MCP_TASK_SANDBOX_MEMORY", "3g"),
             cpu_limit=os.getenv("MCP_TASK_SANDBOX_CPUS", "2.0"),
+            task_data_source=(os.getenv("MCP_TASK_DATA_DIR") or "").strip(),
         )
 
     @property
@@ -205,6 +255,35 @@ class TaskSandbox:
             network_servers=sorted(self.network_servers),
         )
         try:
+            if not self.task_data_source:
+                raise TaskSandboxError(
+                    "MCP_TASK_DATA_DIR is required for isolated tasks; "
+                    "prepare an external task-data fixture first"
+                )
+            self.runtime_image = await inspect_runtime_image(self.agent_image)
+            (
+                self.task_data_dir,
+                self.task_data_fixture,
+                self.git_repositories,
+            ) = await asyncio.to_thread(
+                prepare_task_workspace,
+                source_dir=self.task_data_source,
+                task_id=_safe_fragment(self.task_id, 24),
+                include_git="git" in self.local_servers,
+            )
+            self.task_workspace = self.task_data_dir.parent
+            write_runtime_event(
+                "sandbox",
+                "task_data_injected",
+                task_id=self.task_id,
+                fixture_id=self.task_data_fixture.fixture_id,
+                fixture_sha256=self.task_data_fixture.content_sha256,
+                source_dir=str(self.task_data_fixture.source_dir),
+                task_data_dir=str(self.task_data_dir),
+                git_repositories=self.git_repositories,
+                runtime_image_id=self.runtime_image["image_id"],
+                runtime_version=self.runtime_image["runtime_version"],
+            )
             if self.local_servers:
                 await self._start_local_stack()
             if self.network_servers:
@@ -460,6 +539,8 @@ class TaskSandbox:
             self.cpu_limit,
             "--env",
             f"ENABLED_SERVERS={','.join(servers)}",
+            "--volume",
+            f"{self.task_data_dir}:/data:rw",
         ]
         if kind == "local":
             repository_root = Path(__file__).resolve().parents[3]
@@ -537,6 +618,16 @@ class TaskSandbox:
             kind=kind,
             container=name,
             image=self.agent_image,
+            image_id=(self.runtime_image or {}).get("image_id"),
+            runtime_version=(self.runtime_image or {}).get("runtime_version"),
+            fixture_id=(
+                self.task_data_fixture.fixture_id
+                if self.task_data_fixture else None
+            ),
+            fixture_sha256=(
+                self.task_data_fixture.content_sha256
+                if self.task_data_fixture else None
+            ),
             enabled_servers=servers,
             credential_env_names=sorted(extra_env),
             network=network,
@@ -676,6 +767,18 @@ class TaskSandbox:
                 error=stderr if code else None,
             )
             self.mongo_socket_volume = None
+
+        if self.task_workspace:
+            workspace = self.task_workspace
+            await asyncio.to_thread(shutil.rmtree, workspace, True)
+            write_runtime_event(
+                "sandbox",
+                "task_data_removed",
+                task_id=self.task_id,
+                workspace=str(workspace),
+            )
+            self.task_workspace = None
+            self.task_data_dir = None
 
         write_runtime_event(
             "sandbox",

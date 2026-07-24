@@ -37,7 +37,7 @@
       "env": {
         "CODE_STORAGE_DIR": "/data/repos/mcp_code_executor_workspace",
         "ENV_TYPE": "venv-uv",
-        "UV_VENV_PATH": "/data/repos/mcp_code_executor_workspace/.venv"
+        "UV_VENV_PATH": "/opt/mcp-code-venv"
       }
     },
     "mcp-server-code-runner": {

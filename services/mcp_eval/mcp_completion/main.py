@@ -15,7 +15,7 @@ from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
 from .runtime_log import write_runtime_event
-from .task_sandbox import reap_owned_task_sandboxes
+from .task_sandbox import DEFAULT_RUNTIME_IMAGE, reap_owned_task_sandboxes
 
 # Configure logging
 logging.basicConfig(
@@ -39,7 +39,7 @@ async def lifespan(_app: FastAPI):
         shared_mcp_url=config.MCP_SERVER_URL,
         task_isolation_enabled=isolation_enabled,
         task_agent_image=os.getenv(
-            "MCP_TASK_AGENT_IMAGE", "agent-environment:latest"
+            "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
         ),
     )
     try:

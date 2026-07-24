@@ -1,6 +1,6 @@
 # MCP Eval
 
-A standalone Python package for running multi-turn LLM conversations that leverage MCP servers for tool use and function calling. Requires the `agent-environment` service to supply MCP server endpoints.
+A standalone Python package for running multi-turn LLM conversations that leverage MCP servers for tool use and function calling. Requires the versioned fixture-free MCP runtime described in the repository root README.
 
 ## Overview
 
@@ -23,7 +23,10 @@ cp env.template .env
 Edit .env file with your API keys `LLM_API_KEY`. Could be an openai api key or LiteLLM key. The default `LLM_BASE_URL` is for openai, but modify it if you're using LiteLLM.
 
 3. Start the MCP server:
-Follow instructions for `agent-environment`. It should start a http server on port 1984 that responds to HTTP POST /list-tools and /call-tool. If you change the URL or port, modify `MCP_SERVER_URL` in `.env`.
+Follow the root README to build `mcp-atlas-runtime:<version>`, prepare
+`MCP_TASK_DATA_DIR`, and start the shared service. It should expose HTTP POST
+`/list-tools` and `/call-tool` on `MCP_SERVER_URL`; local stateful tools are
+routed into disposable per-task containers using a copied external fixture.
 
 4. Run the server:
 ```bash

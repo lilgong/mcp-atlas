@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,6 +14,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
+DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:20260724"
 
 
 def configured_shared_port() -> int:
@@ -33,11 +36,33 @@ def main() -> int:
     load_dotenv(ENV_FILE, override=False)
     port = configured_shared_port()
     host = os.getenv("MCP_SHARED_HOST", "0.0.0.0")
-    image = os.getenv("MCP_SHARED_AGENT_IMAGE", "agent-environment:latest")
+    image = os.getenv("MCP_SHARED_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
+    inspected = subprocess.run(
+        [
+            "docker", "image", "inspect", image,
+            "--format", "{{json .Config.Labels}}\n{{json .Config.Volumes}}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    labels_text, _, volumes_text = inspected.partition("\n")
+    labels = json.loads(labels_text or "{}") or {}
+    volumes = json.loads(volumes_text or "{}") or {}
+    if (
+        labels.get("mcp-atlas.runtime") != "true"
+        or labels.get("mcp-atlas.data-contract") != "external-data-v1"
+        or labels.get("mcp-atlas.contains-fixture") != "false"
+        or "/data" not in volumes
+    ):
+        raise RuntimeError(
+            f"{image} is not a fixture-free MCP-Atlas runtime image"
+        )
     command = [
         "docker", "run", "--rm", "--network", "host",
         "--add-host=host.docker.internal:host-gateway",
         "--env-file", str(ENV_FILE),
+        "--env", "MCP_ATLAS_SHARED_RUNTIME=true",
         image,
         "/agent-environment/.venv/bin/python", "-m", "uvicorn",
         "agent_environment.main:app",

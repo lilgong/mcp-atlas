@@ -7,11 +7,12 @@ MCP_HOST_PORT ?= 1984
 MCP_STATUS_HOST_PORT ?= 1985
 # Host-networked shared MCP port is read from MCP_SHARED_PORT in .env.
 TASK_MONGO_IMAGE ?=
+ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:20260724
 MONGO_FIXTURE_DUMP ?=
 MONGO_FIXTURE_DB ?=
 MONGO_FIXTURE_ID ?=
 
-.PHONY: build build-task-mongo run run-docker run-docker-host shell test test-completion run-mcp-completion check-task-isolation cleanup-task-sandboxes push
+.PHONY: build build-atlas-runtime build-task-mongo run run-docker run-docker-host shell test test-completion run-mcp-completion check-task-isolation cleanup-task-sandboxes push
 
 run-docker: # run docker container for mcp servers (agent-environment service)
 	docker run --rm -p $(MCP_HOST_PORT):1984 -p $(MCP_STATUS_HOST_PORT):1985 --add-host=host.docker.internal:host-gateway --env-file .env $(IMAGE_NAME):latest
@@ -22,6 +23,9 @@ run-docker-host: # run shared MCP using MCP_SHARED_HOST/MCP_SHARED_PORT from .en
 build: # builds agent-environment
 	cd services/agent-environment && docker buildx build --platform linux/amd64 -t $(IMAGE_NAME) .
 	docker tag $(IMAGE_NAME):latest $(IMAGE_NAME):$(VERSION)
+
+build-atlas-runtime: # builds the versioned fixture-free runtime; never touches agent-environment:latest
+	python3 scripts/build_atlas_runtime.py --image "$(ATLAS_RUNTIME_IMAGE)"
 
 build-task-mongo: # build disposable synthetic Mongo fixture; does not modify agent-environment:latest
 	@test -n "$(MONGO_FIXTURE_DUMP)" || (echo "MONGO_FIXTURE_DUMP is required" && exit 2)
