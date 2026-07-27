@@ -3,7 +3,10 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -15,6 +18,7 @@ sys.path.insert(0, str(MCP_EVAL_DIR))
 from test_server_v1 import (  # noqa: E402
     DataMismatch,
     load_target_servers,
+    main as run_all_checks,
     make_caller,
     probe_airtable,
 )
@@ -129,6 +133,57 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(servers, ["airtable", "weather"])
+
+    async def test_mongodb_probe_uses_isolated_route_when_shared_is_offline(
+        self,
+    ) -> None:
+        calls = []
+        requested = []
+
+        class FakeIsolatedClient:
+            def __init__(self, **kwargs):
+                requested.extend(kwargs["enabled_tools"])
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+            async def call_tool(self, tool, args):
+                calls.append((tool, args))
+                item = SimpleNamespace(
+                    model_dump=lambda **kwargs: {
+                        "type": "text",
+                        "text": "Found 10 documents",
+                    }
+                )
+                return SimpleNamespace(content=[item], is_error=False)
+
+        output = StringIO()
+        with (
+            patch(
+                "test_server_v1.load_target_servers",
+                return_value=["airtable"],
+            ),
+            patch(
+                "test_server_v1.IsolatedMCPClient",
+                FakeIsolatedClient,
+            ),
+            redirect_stdout(output),
+        ):
+            await run_all_checks(
+                "http://gateway:1984",
+                timeout=1,
+                concurrency=20,
+                only="mongodb",
+                data_only=False,
+                smoke_only=False,
+            )
+
+        self.assertEqual(["mongodb_count"], requested)
+        self.assertEqual("mongodb_count", calls[0][0])
+        self.assertIn("DATA OK   mongodb", output.getvalue())
 
 
 class EnvLoadingTests(unittest.TestCase):

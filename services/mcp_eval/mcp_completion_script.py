@@ -2,14 +2,15 @@
 # From file:       uv run mcp_completion_script.py --model "openai/gpt-4o" --input "sample_tasks.csv" --output "sample_4o_results.csv"
 # From HuggingFace: uv run mcp_completion_script.py --model "openai/gpt-4o" --input_huggingface "ScaleAI/mcp-eval" --output "results.csv"
 #
-# By default, tasks are filtered to only run those whose ground truth trajectories use MCP servers you have API keys for.
+# By default, tasks are filtered to servers available through either the shared
+# cloud runtime or the configured task-isolated runtime.
 # Use --no-filter to disable this and run all tasks regardless of available servers.
 #
 # The filtering process:
-# 1. Query the agent-environment service (MCP_SERVER_URL) to get the list of enabled servers
-# 2. If no servers are returned, all servers are considered enabled
+# 1. Query the shared service (MCP_SERVER_URL) for online cloud servers
+# 2. Merge task-local/network servers whose required fixture configuration exists
 # 3. If servers are returned, run extract_mcp_servers_per_task.py to extract which servers are used in each task's ground truth TRAJECTORY
-# 4. Filter out tasks whose ground truth trajectories used servers you don't have API keys for
+# 4. Filter out tasks whose ground truth trajectories require an unavailable route
 # 5. Print summary of how many tasks are being run vs skipped
 
 # Note that if rows exist in the output file, it'll skip re-evaluating those already-processed rows
@@ -40,6 +41,7 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from datasets import load_dataset
+from mcp_completion.tool_policy import effective_enabled_servers
 
 warnings.filterwarnings("ignore")
 
@@ -558,12 +560,12 @@ def load_tool_map(tool_map_path: str) -> Dict[str, List[str]]:
 def filter_tasks_by_enabled_servers(
     df: pd.DataFrame, tool_map: Dict[str, List[str]], enabled_servers: List[str]
 ) -> tuple[pd.DataFrame, List[tuple[str, List[str]]]]:
-    """Filter dataframe to only include tasks whose ground truth trajectories used servers you have enabled.
+    """Keep tasks whose trajectory servers are available through a runtime route.
 
     Args:
         df: DataFrame with tasks
         tool_map: Dict mapping task_id -> list of servers used in that task's ground truth TRAJECTORY
-        enabled_servers: List of servers you have API keys for (from /enabled-servers endpoint)
+        enabled_servers: Route-aware shared and task-isolated server list
 
     Returns:
         Tuple of (filtered_df, excluded_tasks) where excluded_tasks is a list of (task_id, missing_servers)
@@ -615,7 +617,9 @@ def write_exclusion_report(
         f.write(
             "Tasks were filtered out because their ground truth trajectories used MCP servers\n"
         )
-        f.write("that are not currently enabled (missing API keys).\n\n")
+        f.write(
+            "that are not available through the configured shared or task-isolated runtime.\n\n"
+        )
 
         f.write(f"Available servers ({len(enabled_servers)}):\n")
         f.write(", ".join(sorted(enabled_servers)) + "\n\n")
@@ -639,7 +643,7 @@ def write_exclusion_report(
 
 
 def get_enabled_servers() -> List[str]:
-    """Get enabled servers by querying the agent-environment service.
+    """Get route-aware enabled servers for the isolated evaluation runtime.
 
     Supports both old and new response formats:
     - Old: {"enabled_servers": ["server1", "server2"], "count": 2}
@@ -656,22 +660,38 @@ def get_enabled_servers() -> List[str]:
 
         # New format: servers is list of [name, status] tuples
         if "servers" in data:
-            enabled_servers = [
+            shared_enabled_servers = [
                 name for name, status in data["servers"] if status == "OK"
             ]
         # Old format: enabled_servers is list of names
         else:
-            enabled_servers = data.get("enabled_servers", [])
+            shared_enabled_servers = data.get("enabled_servers", [])
+
+        isolation_enabled = (
+            os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+            not in {"0", "false", "no"}
+        )
+        task_data_configured = bool(
+            (os.getenv("MCP_TASK_DATA_DIR") or "").strip()
+        )
+        task_mongo_configured = bool(
+            (os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip()
+        )
+        enabled_servers = effective_enabled_servers(
+            shared_enabled_servers,
+            isolation_enabled=isolation_enabled,
+            task_data_configured=task_data_configured,
+            task_mongo_configured=task_mongo_configured,
+        )
 
         logging.info(
-            f"Retrieved {len(enabled_servers)} enabled servers from agent-environment service"
+            "Resolved %d enabled servers: %d shared-online, "
+            "task_data=%s, task_mongo=%s",
+            len(enabled_servers),
+            len(shared_enabled_servers),
+            task_data_configured,
+            task_mongo_configured,
         )
-        # enabled_servers = ['airtable', 'alchemy', 'arxiv', 'calculator', 'cli-mcp-server',
-        #                    'clinicaltrialsgov-mcp-server', 'context7', 'ddg-search', 'desktop-commander', 'fetch',
-        #                    'filesystem', 'git', 'github', 'google-maps', 'mcp-code-executor',
-        #                    'mcp-server-code-runner', 'memory', 'met-museum', 'mongodb', 'national-parks', 'notion',
-        #                    'open-library', 'osm-mcp-server', 'pubmed', 'slack', 'twelvedata', 'weather',
-        #                    'weather-data', 'whois', 'wikipedia']
         return enabled_servers
 
     except requests.exceptions.RequestException as e:
@@ -832,11 +852,12 @@ async def main():
         enabled_servers = get_enabled_servers()
 
         if not enabled_servers:
-            logging.info(
-                "🌐 No enabled servers returned from agent-environment service - all servers are enabled, skipping filter"
+            raise RuntimeError(
+                "No MCP servers are available through the configured shared "
+                "or task-isolated runtime; refusing to disable filtering"
             )
         else:
-            logging.info("🔍 Filtering tasks by enabled servers...")
+            logging.info("🔍 Filtering tasks by route-aware server availability...")
 
             # Validate that TRAJECTORY column exists
             if "TRAJECTORY" not in df.columns:
@@ -877,7 +898,8 @@ async def main():
             skipped_count = original_count - filtered_count
             if skipped_count > 0:
                 logging.info(
-                    f"⚠️  Skipped {skipped_count} tasks because their ground truth trajectories used MCP servers you don't have API keys for"
+                    f"⚠️  Skipped {skipped_count} tasks because their ground "
+                    "truth trajectories require unavailable MCP routes"
                 )
 
             # Write exclusion report

@@ -6,6 +6,7 @@ from pathlib import Path
 from mcp_completion.runtime_log import write_runtime_event
 from mcp_completion.tool_policy import (
     ToolRoute,
+    effective_enabled_servers,
     is_cloud_data_write,
     route_for_tool,
     server_for_tool,
@@ -79,6 +80,36 @@ class ToolPolicyTests(unittest.TestCase):
             "mcp-server-code-runner",
         )
         self.assertEqual(server_for_tool("MongoDB_find"), "mongodb")
+
+    def test_isolated_availability_ignores_shared_local_status(self):
+        enabled = effective_enabled_servers(
+            ["airtable", "git"],
+            isolation_enabled=True,
+            task_data_configured=True,
+            task_mongo_configured=True,
+        )
+        self.assertIn("airtable", enabled)
+        self.assertIn("git", enabled)
+        self.assertIn("mongodb", enabled)
+        self.assertIn("arxiv", enabled)
+
+    def test_isolated_availability_fails_closed_without_fixtures(self):
+        enabled = effective_enabled_servers(
+            ["airtable", "git", "mongodb", "arxiv"],
+            isolation_enabled=True,
+            task_data_configured=False,
+            task_mongo_configured=False,
+        )
+        self.assertEqual(["airtable"], enabled)
+
+    def test_legacy_availability_preserves_shared_status(self):
+        enabled = effective_enabled_servers(
+            ["airtable", "git"],
+            isolation_enabled=False,
+            task_data_configured=False,
+            task_mongo_configured=False,
+        )
+        self.assertEqual(["airtable", "git"], enabled)
 
 
 class RuntimeLogTests(unittest.TestCase):

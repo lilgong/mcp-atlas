@@ -204,3 +204,33 @@ def partition_tools(tool_names: Iterable[str]) -> dict[ToolRoute, list[str]]:
     for tool_name in tool_names:
         result[route_for_tool(tool_name)].append(tool_name)
     return result
+
+
+def effective_enabled_servers(
+    shared_enabled_servers: Iterable[str],
+    *,
+    isolation_enabled: bool,
+    task_data_configured: bool,
+    task_mongo_configured: bool,
+) -> list[str]:
+    """Combine shared-cloud health with task-routed runtime availability.
+
+    In isolation mode, a task-local/network server must never inherit its
+    availability from the fixture-free shared container.  Those routes are
+    available when task data is configured; Mongo additionally requires its
+    fixture image.  With isolation disabled, preserve the legacy shared-only
+    behavior.
+    """
+
+    shared = set(shared_enabled_servers)
+    if not isolation_enabled:
+        return sorted(shared)
+
+    task_routed = set(TASK_LOCAL_SERVERS) | set(TASK_NETWORK_SERVERS)
+    effective = shared - task_routed
+    if task_data_configured:
+        effective.update(TASK_NETWORK_SERVERS)
+        effective.update(set(TASK_LOCAL_SERVERS) - {"mongodb"})
+        if task_mongo_configured:
+            effective.add("mongodb")
+    return sorted(effective)

@@ -18,8 +18,10 @@ MCP 服务器检查（v1）：区分"API 通不通"和"数据对不对"。
     DATA BAD   API 通，但数据对不上（多半是没导入 / 导错账号）
     API FAIL   调用本身失败（key 失效、服务没起、网络不通）
 
-待测 server 列表取自 --base-url 的 /enabled-servers；所有工具调用都发往同一端口的
-/call-tool，并显式绕过缓存读取，避免本地 .env 或历史缓存影响目标容器的验收结果。
+云端 server 状态取自 --base-url 的 /enabled-servers；实际工具调用经过与正式评测相同的
+IsolatedMCPClient 路由。云端读取走共享端口，Git/filesystem/Mongo 等在本机创建逐任务
+容器。脚本必须在待验收的 MCP-Atlas runtime 主机上运行，不能隔着网络代替目标机验收
+其 task-local Docker 环境。
 
 Usage:
     uv run test_server_v1.py
@@ -34,11 +36,19 @@ import argparse
 import asyncio
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
 
+from mcp_completion.mcp_client.isolated_client import IsolatedMCPClient
+from mcp_completion.tool_policy import (
+    TASK_LOCAL_SERVERS,
+    TASK_NETWORK_SERVERS,
+    ToolRoute,
+    route_for_tool,
+)
 from test_servers import (
     ENV_PATH,
     TEST_CALLS,
@@ -104,6 +114,48 @@ def make_caller(client: httpx.AsyncClient, base_url: str, timeout: float,
                     continue
                 raise
             except Exception as exc:  # httpx 超时/连接异常等
+                wrapped = ApiError(f"{tool}: {exc}")
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise wrapped from exc
+
+    return call
+
+
+def make_isolated_caller(
+    client: IsolatedMCPClient,
+    timeout: float,
+    retries: int = 0,
+):
+    """Adapt the production route-aware client to the probe string interface."""
+
+    async def call(tool: str, args: dict[str, Any]) -> str:
+        attempt = 0
+        while True:
+            try:
+                response = await asyncio.wait_for(
+                    client.call_tool(tool, args),
+                    timeout=timeout,
+                )
+                body = json.dumps(
+                    [
+                        item.model_dump(by_alias=True)
+                        for item in response.content
+                    ],
+                    ensure_ascii=False,
+                )
+                if response.is_error or _tool_errored(body):
+                    raise ApiError(f"{tool}: {_flat(body)[:150]}")
+                return body
+            except ApiError as exc:
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise
+            except Exception as exc:
                 wrapped = ApiError(f"{tool}: {exc}")
                 if attempt < retries and _is_transient(str(exc)):
                     await asyncio.sleep(2 * (attempt + 1))
@@ -306,6 +358,24 @@ PROBES: dict[str, tuple[Probe, str]] = {
     "google-workspace": (probe_google_workspace, "Google Calendar 的 .ics 是否已导入"),
 }
 
+PROBE_TOOLS: dict[str, tuple[str, ...]] = {
+    "mongodb": ("mongodb_count",),
+    "airtable": (
+        "airtable_list_bases",
+        "airtable_list_records",
+        "airtable_search_records",
+    ),
+    "notion": (
+        "notion_API-post-search",
+        "notion_API-post-database-query",
+    ),
+    "slack": (
+        "slack_channels_list",
+        "slack_conversations_history",
+    ),
+    "google-workspace": ("google-workspace_list_events",),
+}
+
 
 # ── 结果 ──────────────────────────────────────────────────────────────────────
 OK, BAD, FAIL = "DATA OK", "DATA BAD", "API FAIL"
@@ -383,36 +453,80 @@ async def main(base_url: str, timeout: float, concurrency: int,
 
     async with httpx.AsyncClient() as client:
         servers = await load_target_servers(client, base_url, timeout)
-        probes, smokes = [], []
-        for name in servers:
-            if only and name != only:
-                continue
-            if name in PROBES and not smoke_only:
-                probes.append(name)
-            elif name in TEST_CALLS and not data_only:
-                smokes.append(name)
+    # Task-routed servers do not need to be online in the fixture-free shared
+    # container. Add their probes independently of /enabled-servers.
+    server_names = set(servers)
+    server_names.update(
+        name
+        for name in (set(TASK_LOCAL_SERVERS) | set(TASK_NETWORK_SERVERS))
+        if name in PROBES or name in TEST_CALLS
+    )
 
-        if only and only not in servers:
-            print(f"目标端口未配置 server: {only}")
-            return
-        if not probes and not smokes:
-            print("没有可跑的检查（模式过滤后为空，或该 server 没有测试用例）")
-            return
+    probes, smokes = [], []
+    for name in sorted(server_names):
+        if only and name != only:
+            continue
+        if name in PROBES and not smoke_only:
+            probes.append(name)
+        elif name in TEST_CALLS and not data_only:
+            smokes.append(name)
 
-        call = make_caller(
-            client,
-            f"{base_url.rstrip('/')}/call-tool",
-            timeout,
-            retries,
-        )
+    if only and only not in server_names:
+        print(f"没有配置或定义该 server 的检查: {only}")
+        return
+    if not probes and not smokes:
+        print("没有可跑的检查（模式过滤后为空，或该 server 没有测试用例）")
+        return
 
-        async def guard(coro_fn, *a):
-            async with sem:
-                return await coro_fn(*a)
+    requested_tools = {
+        tool
+        for name in probes
+        for tool in PROBE_TOOLS[name]
+    }
+    requested_tools.update(TEST_CALLS[name][0] for name in smokes)
+    skipped_tools = sorted(
+        tool
+        for tool in requested_tools
+        if route_for_tool(tool) in {
+            ToolRoute.BLOCKED_CLOUD_WRITE,
+            ToolRoute.BLOCKED_UNSUPPORTED,
+        }
+    )
+    requested_tools.difference_update(skipped_tools)
+    skipped_servers = sorted(
+        name
+        for name in smokes
+        if TEST_CALLS[name][0] in skipped_tools
+    )
+    smokes = [
+        name for name in smokes
+        if TEST_CALLS[name][0] not in skipped_tools
+    ]
 
-        tasks = [guard(run_probe, call, n, timeout) for n in probes]
-        tasks += [guard(run_smoke, call, n, *TEST_CALLS[n]) for n in smokes]
-        results = list(await asyncio.gather(*tasks))
+    if requested_tools:
+        async with IsolatedMCPClient(
+            task_id=f"connectivity-{uuid.uuid4().hex[:12]}",
+            shared_url=base_url,
+            enabled_tools=sorted(requested_tools),
+        ) as isolated_client:
+            call = make_isolated_caller(
+                isolated_client,
+                timeout,
+                retries,
+            )
+
+            async def guard(coro_fn, *a):
+                async with sem:
+                    return await coro_fn(*a)
+
+            tasks = [guard(run_probe, call, n, timeout) for n in probes]
+            tasks += [
+                guard(run_smoke, call, n, *TEST_CALLS[n])
+                for n in smokes
+            ]
+            results = list(await asyncio.gather(*tasks))
+    else:
+        results = []
 
     icon = {OK: "✅", BAD: "❌", FAIL: "💥"}
     data_res = [r for r in results if r.kind == "data"]
@@ -434,9 +548,17 @@ async def main(base_url: str, timeout: float, concurrency: int,
             if r.detail:
                 print(f"       └─ {r.detail}")
 
+    if skipped_servers:
+        print(f"\n{'='*78}\n策略禁用（保留在目录中，但不进入确定性评测）\n{'='*78}")
+        for server in skipped_servers:
+            print(f"⏭️  POLICY SKIP {server:18s} {TEST_CALLS[server][0]}")
+
     n = {s: sum(1 for r in results if r.status == s) for s in (OK, BAD, FAIL)}
     print(f"\n{'='*78}")
-    print(f"合计 {len(results)} 项：✅ {n[OK]}   ❌ 数据不符 {n[BAD]}   💥 API 失败 {n[FAIL]}")
+    print(
+        f"合计 {len(results)} 项：✅ {n[OK]}   ❌ 数据不符 {n[BAD]}   "
+        f"💥 API 失败 {n[FAIL]}   ⏭️ 策略跳过 {len(skipped_servers)}"
+    )
     if n[BAD]:
         print("→ ❌ API 通但数据对不上：该服务的官方数据没导入（或导到了别的账号）。")
         print("   依赖它的评测任务会照跑但拿不到分——注意这类失败会压低分数。")

@@ -828,19 +828,37 @@ ss -ltnp | grep -E ':(1984|3000|3500)\b'
 curl -sS http://localhost:1984/enabled-servers | jq
 ```
 
-检查计划使用的 server 是否为 `OK`。server 不在列表通常表示：
+这个接口只负责验收走共享 runtime 的公开 API 和云端读取 server。检查这类 server
+是否为 `OK`；不在列表通常表示：
 
 - 对应凭证为空。
 - `ENABLED_SERVERS` 显式列表没有包含它。
 - server 启动失败。
 
-### 12.2 公开 API 和云端读取工具
+Git、filesystem、Mongo、Arxiv/PubMed 等任务路由不以这里的状态为准。它们使用
+当前任务的 fixture 和独立容器，在下面的路由感知测试或 `make check-task-isolation`
+中验收。Mongo 在共享接口里显示 `offline` 不代表任务 Mongo 不可用。
+
+### 12.2 全部 MCP 路由
 
 进入评测目录：
 
 ```bash
 cd services/mcp_eval
 ```
+
+一次检查全部已配置路由：
+
+```bash
+uv run python test_server_v1.py \
+  --base-url http://localhost:1984 \
+  --concurrency 20
+```
+
+这个脚本使用与正式评测相同的路由：公开 API 和云端读取走共享 1984；Git、
+filesystem、Mongo、Arxiv/PubMed 等走当前主机上的逐任务容器。因此必须在实际运行
+MCP-Atlas 的主机上执行，不能在另一台机器上只把 `--base-url` 指向目标机来代替验收
+目标机的 Docker 环境。策略明确禁用的能力会显示为 `POLICY SKIP`，不算连通性失败。
 
 单独检查一个 server：
 
@@ -850,7 +868,7 @@ uv run python test_server_v1.py \
   --server brave-search
 ```
 
-对准备参与评测的共享 server 逐项执行。示例：
+也可以只对准备参与评测的共享 server 逐项执行。示例：
 
 ```bash
 for server in \
@@ -1072,9 +1090,11 @@ uv run python mcp_completion_script.py
 - system prompt 开关。
 - retry 次数。
 
-默认会根据共享 runtime 的 enabled server 过滤任务。被过滤的任务不会进入模型请求；
-排除信息写入 `excluded_tasks.txt`。只有明确要测试不可用 server 的失败行为时才使用
-`--no-filter`。
+默认使用路由感知的可用性过滤任务：公开 API 和云端读取依据共享 runtime 的在线
+状态；Git、filesystem、Mongo、Arxiv/PubMed 等依据任务 fixture、Mongo fixture 镜像
+和隔离配置。共享 runtime 中的 Mongo/Git 状态不会错误排除任务。被过滤的任务不会
+进入模型请求，排除信息写入 `excluded_tasks.txt`。只有明确要测试不可用 server 的
+失败行为时才使用 `--no-filter`。
 
 如果输出文件已经存在，脚本会读取其中的 `TASK` 并跳过已完成任务。因此：
 
@@ -1464,7 +1484,7 @@ docker run --rm hello-world
 | `scripts/run_shared_mcp.py` | 启动共享 MCP runtime |
 | `services/mcp_eval/mcp_completion_script.py` | 生成模型轨迹 |
 | `services/mcp_eval/mcp_evals_scores.py` | claim coverage 评分 |
-| `services/mcp_eval/test_server_v1.py` | 公开 API 和云端账号数据探针 |
+| `services/mcp_eval/test_server_v1.py` | 按正式路由检查共享云端与逐任务容器工具 |
 | `services/mcp_eval/scripts/check_task_isolation.py` | 任务容器隔离验收 |
 | `services/mcp_eval/scripts/cleanup_task_sandboxes.py` | 清理同 owner 孤儿容器 |
 | `data_exports/` | 官方云端账号数据和 Mongo dump |
