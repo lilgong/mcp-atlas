@@ -27,7 +27,10 @@
     },
     "git": {
       "command": "/root/.local/share/uv/tools/mcp-server-git/bin/mcp-server-git",
-      "args": []
+      "args": [],
+      "env": {
+        "GIT_CONFIG_GLOBAL": "/data/.atlas-gitconfig"
+      }
     },
     "mcp-code-executor": {
       "command": "node",

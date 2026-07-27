@@ -14,11 +14,11 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 FIXTURE_MANIFEST = ".atlas-fixture.json"
-FIXTURE_CONTRACT = "mcp-atlas-task-data-v1"
+FIXTURE_CONTRACT = "mcp-atlas-task-data-v2"
 IGNORED_PATTERNS = (
     ".venv",
     "__pycache__",
@@ -29,8 +29,18 @@ IGNORED_PATTERNS = (
     ".DS_Store",
     ".channels_cache_v2.json",
     ".users_cache.json",
+    ".atlas-gitconfig",
+)
+CODE_EXECUTOR_WORKSPACE = PurePosixPath(
+    "repos/mcp_code_executor_workspace"
+)
+CODE_EXECUTOR_IGNORED_PATTERNS = (
+    "code_*.py",
+    "check_packages_*.py",
+    "mcp_code_executor_server_*.py",
 )
 _git_cache_lock = threading.Lock()
+GIT_SAFE_CONFIG_NAME = ".atlas-gitconfig"
 
 
 class TaskDataError(RuntimeError):
@@ -51,29 +61,109 @@ class RepoSpec:
     name: str
 
 
-def fixture_ignore(_directory: str, names: list[str]) -> set[str]:
-    return {
-        name
-        for name in names
-        if any(fnmatch.fnmatch(name, pattern) for pattern in IGNORED_PATTERNS)
-    }
+def pinned_git_repository_names(root: str | Path) -> frozenset[str]:
+    """Return validated materialized-repository names declared by the fixture."""
+    manifest = Path(root).resolve() / "repos/git_submodule_info.csv"
+    if manifest.is_symlink():
+        raise TaskDataError(f"fixture symlinks are not allowed: {manifest}")
+    if not manifest.is_file():
+        return frozenset()
+    names = set()
+    with manifest.open(encoding="utf-8", newline="") as handle:
+        for row in csv.reader(handle):
+            if not row:
+                continue
+            if len(row) != 3:
+                raise TaskDataError(f"invalid Git fixture row: {row!r}")
+            name = PurePosixPath(row[2].strip()).name
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+                raise TaskDataError(
+                    f"invalid Git fixture repository name: {name!r}"
+                )
+            names.add(name)
+    return frozenset(names)
+
+
+def fixture_path_is_ignored(
+    relative_path: str | PurePosixPath,
+    *,
+    git_repository_names: frozenset[str] = frozenset(),
+) -> bool:
+    """Apply the versioned fixture-v2 ignore contract to one relative path."""
+    relative = PurePosixPath(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise TaskDataError(
+            f"fixture path must be relative and contained: {relative}"
+        )
+    if any(
+        fnmatch.fnmatch(part, pattern)
+        for part in relative.parts
+        for pattern in IGNORED_PATTERNS
+    ):
+        return True
+    if (
+        len(relative.parts) >= 2
+        and relative.parts[0] == "repos"
+        and relative.parts[1] in git_repository_names
+    ):
+        return True
+    workspace_parts = CODE_EXECUTOR_WORKSPACE.parts
+    inside_code_workspace = (
+        relative.parts[:len(workspace_parts)] == workspace_parts
+    )
+    return inside_code_workspace and any(
+        fnmatch.fnmatch(relative.name, pattern)
+        for pattern in CODE_EXECUTOR_IGNORED_PATTERNS
+    )
+
+
+def fixture_copy_ignore(root: str | Path):
+    """Return a copytree callback with exactly the digest ignore semantics."""
+    source = Path(root).resolve()
+    git_repository_names = pinned_git_repository_names(source)
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        directory_path = Path(directory).resolve()
+        try:
+            relative_dir = directory_path.relative_to(source)
+        except ValueError as exc:
+            raise TaskDataError(
+                f"fixture copy escaped source root: {directory_path}"
+            ) from exc
+        return {
+            name
+            for name in names
+            if fixture_path_is_ignored(
+                PurePosixPath(relative_dir.as_posix()) / name,
+                git_repository_names=git_repository_names,
+            )
+        }
+
+    return ignore
 
 
 def content_digest(root: str | Path) -> str:
     root = Path(root).resolve()
+    git_repository_names = pinned_git_repository_names(root)
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
-        if relative == FIXTURE_MANIFEST:
-            continue
-        if any(
-            fnmatch.fnmatch(part, pattern)
-            for part in path.relative_to(root).parts
-            for pattern in IGNORED_PATTERNS
+        relative_posix = PurePosixPath(relative)
+        if (
+            len(relative_posix.parts) >= 2
+            and relative_posix.parts[0] == "repos"
+            and relative_posix.parts[1] in git_repository_names
         ):
             continue
         if path.is_symlink():
             raise TaskDataError(f"fixture symlinks are not allowed: {path}")
+        if relative == FIXTURE_MANIFEST:
+            continue
+        if fixture_path_is_ignored(
+            relative_posix,
+            git_repository_names=git_repository_names,
+        ):
+            continue
         if not path.is_file():
             continue
         digest.update(relative.encode("utf-8"))
@@ -213,6 +303,35 @@ def materialize_git_repositories(data_dir: Path, cache_root: Path) -> list[str]:
     return created
 
 
+def write_git_safe_directory_config(
+    data_dir: Path,
+    repository_paths: list[str],
+) -> Path:
+    """Trust only the exact pinned repositories inside this disposable /data."""
+    data_root = data_dir.resolve()
+    container_paths = []
+    for raw_path in repository_paths:
+        repository = Path(raw_path).resolve()
+        try:
+            relative = repository.relative_to(data_root)
+        except ValueError as exc:
+            raise TaskDataError(
+                f"Git repository escapes task data: {repository}"
+            ) from exc
+        if not relative.parts or relative.parts[0] != "repos":
+            raise TaskDataError(
+                f"Git repository is outside task repos: {repository}"
+            )
+        container_paths.append(f"/data/{relative.as_posix()}")
+    config = "".join(
+        f"[safe]\n\tdirectory = {path}\n"
+        for path in sorted(set(container_paths))
+    )
+    config_path = data_root / GIT_SAFE_CONFIG_NAME
+    config_path.write_text(config, encoding="utf-8")
+    return config_path
+
+
 def prepare_task_workspace(
     *,
     source_dir: str | Path,
@@ -233,7 +352,7 @@ def prepare_task_workspace(
         shutil.copytree(
             fixture.source_dir,
             data_dir,
-            ignore=fixture_ignore,
+            ignore=fixture_copy_ignore(fixture.source_dir),
         )
         copied_digest = content_digest(data_dir)
         if copied_digest != fixture.content_sha256:
@@ -251,6 +370,7 @@ def prepare_task_workspace(
                     workspace_root / "mcp-atlas-git-cache",
                 )).resolve(),
             )
+            write_git_safe_directory_config(data_dir, repos)
             make_task_copy_writable(data_dir)
         return data_dir, fixture, repos
     except BaseException:

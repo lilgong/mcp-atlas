@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
-DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:20260724"
+DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
 
 
 def configured_shared_port() -> int:

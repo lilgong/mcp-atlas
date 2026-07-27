@@ -32,7 +32,7 @@ class TaskSandboxError(RuntimeError):
     pass
 
 
-DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:20260724"
+DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
 RUNTIME_DATA_CONTRACT = "external-data-v1"
 
 

@@ -18,7 +18,7 @@ from mcp_completion.task_data import (  # noqa: E402
     FIXTURE_CONTRACT,
     FIXTURE_MANIFEST,
     content_digest,
-    fixture_ignore,
+    fixture_copy_ignore,
 )
 
 
@@ -35,7 +35,9 @@ def prepare_fixture(source: Path, output: Path, fixture_id: str) -> dict[str, st
         raise ValueError(f"output fixture directory already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copytree(source, output, ignore=fixture_ignore)
+        # Validate the source itself before copytree can follow a symlink.
+        content_digest(source)
+        shutil.copytree(source, output, ignore=fixture_copy_ignore(source))
         digest = content_digest(output)
         manifest = {
             "contract": FIXTURE_CONTRACT,

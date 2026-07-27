@@ -27,6 +27,7 @@ WORKDIR /agent-environment
 COPY pyproject.toml uv.lock README.md entrypoint.sh ./
 COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/main.py src/agent_environment/mcp_client.py \
+     src/agent_environment/mcp_router.py \
      src/agent_environment/
 COPY src/agent_environment/mcp_server_template.json \
      src/agent_environment/mcp_server_template.json

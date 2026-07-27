@@ -13,11 +13,13 @@ MCP 服务器检查（v1）：区分"API 通不通"和"数据对不对"。
     Notion database、Slack channel 都会变）。所以有 ID 的地方一律先动态发现、再断言内容。
     评测时模型也是这么做的（先 list_bases/search 再查），因此 ID 不同不影响跑分。
 
-结果分四类：
+结果分三类：
     DATA OK    API 通，且数据与 GT 一致
     DATA BAD   API 通，但数据对不上（多半是没导入 / 导错账号）
     API FAIL   调用本身失败（key 失效、服务没起、网络不通）
-    SKIP       该服务未启用（.env 缺 key）
+
+待测 server 列表取自 --base-url 的 /enabled-servers；所有工具调用都发往同一端口的
+/call-tool，并显式绕过缓存读取，避免本地 .env 或历史缓存影响目标容器的验收结果。
 
 Usage:
     uv run test_server_v1.py
@@ -32,7 +34,7 @@ import argparse
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -41,8 +43,6 @@ from test_servers import (
     DEFAULT_MCP_SERVER_URL,
     ENV_PATH,
     TEST_CALLS,
-    load_env_keys,
-    load_servers,
     read_env_value,
 )
 
@@ -83,7 +83,13 @@ def make_caller(client: httpx.AsyncClient, base_url: str, timeout: float,
         while True:
             try:
                 resp = await client.post(
-                    base_url, json={"tool_name": tool, "tool_args": args}, timeout=timeout
+                    base_url,
+                    json={
+                        "tool_name": tool,
+                        "tool_args": args,
+                        "use_cache": False,
+                    },
+                    timeout=timeout,
                 )
                 body = resp.text
                 if resp.status_code >= 300:
@@ -171,55 +177,25 @@ async def probe_mongodb(call) -> str:
     return "video_game_store 已恢复，Delivery Logistics 文档数与 GT 一致"
 
 
-async def _airtable_membership() -> str:
+async def _airtable_membership(call, base_id: str) -> str:
     """会员失效探针：Airtable 免费版每 base 只保留 1000 条记录，超出的（按 base 内创建
     顺序排在 1000 名之后）会被隐藏。Customer Feedback 表有 3350 条，最后一条的
     Customer ID=6NbOYtn9 稳落在 1000 之后（Copy base 会原样保留这个字段值）。够得到它
     → 会员有效；够不到 → base 已被截到 1000，会员失效。
 
-    走直连 Airtable API 而非 MCP：felores 的 list_records 没有过滤参数，够到第 3350 条得
-    翻 34 页必然限流；filterByFormula 一次调用就定位。token 取自 .env 的 AIRTABLE_API_KEY，
-    没配则跳过（不误报）。"""
-    token = read_env_value(ENV_PATH, "AIRTABLE_API_KEY")
-    if not token:
-        return "会员检测跳过（.env 无 AIRTABLE_API_KEY）"
-    headers = {"Authorization": f"Bearer {token}"}
-
-    async def _get(client, url, **kw):
-        # 所有 429 都退避重试（含 airtable BILLING_LIMIT——实测间歇性、负载一降就恢复）。
-        # 多试几次、退避到 ~30s，尽量熬过突发峰值。
-        for attempt in range(5):
-            resp = await client.get(url, headers=headers, **kw)
-            if resp.status_code != 429:
-                return resp
-            await asyncio.sleep(2 * (attempt + 1))  # 2,4,6,8,10
-        return resp
-
-    def _check(resp, what):
-        if resp.status_code == 200:
-            return
-        if "BILLING" in resp.text.upper():
-            raise ApiError(f"membership: 重试多次仍触发套餐级 API 用量限制"
-                           f"(PUBLIC_API_BILLING_LIMIT_EXCEEDED) —— 按账号套餐限 API 调用量，"
-                           f"非每秒速率限流；降并发或升级套餐可缓解")
-        raise ApiError(f"membership: {what} HTTP {resp.status_code}: {_flat(resp.text)[:110]}")
-
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await _get(c, "https://api.airtable.com/v0/meta/bases")
-        _check(r, "列 base 失败")
-        base = next((b for b in r.json().get("bases", []) if b.get("name") == "Car Dealership"), None)
-        if base is None:
-            raise DataMismatch(".env token 的账号里没有 Car Dealership base（token 和数据账号不一致？）")
-        r2 = await _get(
-            c, f"https://api.airtable.com/v0/{base['id']}/Customer Feedback",
-            params={"filterByFormula": "{Customer ID}='6NbOYtn9'", "maxRecords": 1},
+    必须通过 --base-url 对应网关的 airtable_search_records 调用；该 MCP 工具内部用一次
+    filterByFormula 定位记录，既不读取本地 .env，也不需要翻 34 页。"""
+    records = json.loads(_texts(await call("airtable_search_records", {
+        "base_id": base_id,
+        "table_name": "Customer Feedback",
+        "field_name": "Customer ID",
+        "value": "6NbOYtn9",
+    })))
+    if not records:
+        raise DataMismatch(
+            "⚠️ 会员疑似已失效：够不到 Customer Feedback 第 3350 条 (Customer ID=6NbOYtn9)，"
+            "免费版每 base 截到 1000 条、深层记录被隐藏"
         )
-        _check(r2, "查深层记录失败")
-        if not r2.json().get("records"):
-            raise DataMismatch(
-                "⚠️ 会员疑似已失效：够不到 Customer Feedback 第 3350 条 (Customer ID=6NbOYtn9)，"
-                "免费版每 base 截到 1000 条、深层记录被隐藏"
-            )
     return "会员有效（够到第 3350 条深层记录）"
 
 
@@ -241,7 +217,7 @@ async def probe_airtable(call) -> str:
     hit = any(r.get("fields", {}).get("Page Name") == "Inventory" for r in recs)
     if not hit:
         raise DataMismatch(f"Digital Analytics 有 {len(recs)} 条记录，但找不到 Page Name='Inventory' 的行")
-    membership = await _airtable_membership()
+    membership = await _airtable_membership(call, base["id"])
     return (f"Car Dealership({base['id']}) 的 Digital Analytics 含 GT 的 Inventory 行；"
             f"{membership}")
 
@@ -293,7 +269,11 @@ async def probe_slack(call) -> str:
             chan_id = parts[0].strip()
             break
     if not chan_id:
-        found = [l.split(",")[1] for l in csv.splitlines()[1:] if len(l.split(",")) >= 2]
+        found = [
+            line.split(",")[1]
+            for line in csv.splitlines()[1:]
+            if len(line.split(",")) >= 2
+        ]
         raise DataMismatch(f"没找到 #movie-suggestions 频道（Slack 导出未导入？）；现有: {found}")
     hist = _texts(await call("slack_conversations_history", {"channel_id": chan_id}))
     _need(hist, "Akira", "#movie-suggestions 应含 GT 的历史消息")
@@ -329,7 +309,7 @@ PROBES: dict[str, tuple[Probe, str]] = {
 
 
 # ── 结果 ──────────────────────────────────────────────────────────────────────
-OK, BAD, FAIL, SKIP = "DATA OK", "DATA BAD", "API FAIL", "SKIP"
+OK, BAD, FAIL = "DATA OK", "DATA BAD", "API FAIL"
 
 
 @dataclass
@@ -364,43 +344,68 @@ async def run_smoke(call, server: str, tool: str, args: dict) -> Result:
         return Result(server, "smoke", FAIL, time.monotonic() - t0, str(e))
 
 
+async def load_target_servers(
+    client: httpx.AsyncClient,
+    service_url: str,
+    timeout: float,
+) -> list[str]:
+    """从目标网关获取实际配置的 server；不使用运行脚本所在仓库的 .env 判断。"""
+    endpoint = f"{service_url.rstrip('/')}/enabled-servers"
+    try:
+        resp = await client.get(endpoint, timeout=timeout)
+        if resp.status_code >= 300:
+            raise ApiError(
+                f"enabled-servers: HTTP {resp.status_code}: {_flat(resp.text)[:150]}"
+            )
+        payload = resp.json()
+        entries = payload.get("servers")
+        if not isinstance(entries, list):
+            raise ValueError("响应缺少 servers 列表")
+        names = [
+            entry[0]
+            for entry in entries
+            if isinstance(entry, list)
+            and len(entry) >= 1
+            and isinstance(entry[0], str)
+        ]
+        if len(names) != len(entries):
+            raise ValueError("servers 列表格式错误")
+        return names
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(f"enabled-servers: {exc}") from exc
+
+
 async def main(base_url: str, timeout: float, concurrency: int,
                only: str | None, data_only: bool, smoke_only: bool,
                retries: int = 0) -> None:
-    servers, required_vars = load_servers()
-    env_keys = load_env_keys(ENV_PATH)
-
-    def missing_keys(name: str) -> list[str]:
-        if not servers.get(name, False):
-            return []
-        return [v for v in required_vars.get(name, []) if v not in env_keys]
-
-    probes, smokes, skipped = [], [], []
-    for name in servers:
-        if only and name != only:
-            continue
-        if name in PROBES and not smoke_only:
-            kind = "data"
-        elif name in TEST_CALLS and not data_only:
-            kind = "smoke"
-        else:
-            continue
-        lack = missing_keys(name)
-        if lack:
-            skipped.append(Result(name, kind, SKIP, detail=f".env 缺: {', '.join(lack)}"))
-        elif kind == "data":
-            probes.append(name)
-        else:
-            smokes.append(name)
-
-    if not probes and not smokes and not skipped:
-        print("没有可跑的检查（--server 名字写错？）")
-        return
-
     sem = asyncio.Semaphore(concurrency)
 
     async with httpx.AsyncClient() as client:
-        call = make_caller(client, base_url, timeout, retries)
+        servers = await load_target_servers(client, base_url, timeout)
+        probes, smokes = [], []
+        for name in servers:
+            if only and name != only:
+                continue
+            if name in PROBES and not smoke_only:
+                probes.append(name)
+            elif name in TEST_CALLS and not data_only:
+                smokes.append(name)
+
+        if only and only not in servers:
+            print(f"目标端口未配置 server: {only}")
+            return
+        if not probes and not smokes:
+            print("没有可跑的检查（模式过滤后为空，或该 server 没有测试用例）")
+            return
+
+        call = make_caller(
+            client,
+            f"{base_url.rstrip('/')}/call-tool",
+            timeout,
+            retries,
+        )
 
         async def guard(coro_fn, *a):
             async with sem:
@@ -409,9 +414,8 @@ async def main(base_url: str, timeout: float, concurrency: int,
         tasks = [guard(run_probe, call, n, timeout) for n in probes]
         tasks += [guard(run_smoke, call, n, *TEST_CALLS[n]) for n in smokes]
         results = list(await asyncio.gather(*tasks))
-    results += skipped
 
-    icon = {OK: "✅", BAD: "❌", FAIL: "💥", SKIP: "⏭️"}
+    icon = {OK: "✅", BAD: "❌", FAIL: "💥"}
     data_res = [r for r in results if r.kind == "data"]
     smoke_res = [r for r in results if r.kind == "smoke"]
 
@@ -431,9 +435,9 @@ async def main(base_url: str, timeout: float, concurrency: int,
             if r.detail:
                 print(f"       └─ {r.detail}")
 
-    n = {s: sum(1 for r in results if r.status == s) for s in (OK, BAD, FAIL, SKIP)}
+    n = {s: sum(1 for r in results if r.status == s) for s in (OK, BAD, FAIL)}
     print(f"\n{'='*78}")
-    print(f"合计 {len(results)} 项：✅ {n[OK]}   ❌ 数据不符 {n[BAD]}   💥 API 失败 {n[FAIL]}   ⏭️ 跳过 {n[SKIP]}")
+    print(f"合计 {len(results)} 项：✅ {n[OK]}   ❌ 数据不符 {n[BAD]}   💥 API 失败 {n[FAIL]}")
     if n[BAD]:
         print("→ ❌ API 通但数据对不上：该服务的官方数据没导入（或导到了别的账号）。")
         print("   依赖它的评测任务会照跑但拿不到分——注意这类失败会压低分数。")
@@ -456,5 +460,5 @@ if __name__ == "__main__":
 
     mcp_url = a.base_url or read_env_value(ENV_PATH, "MCP_SERVER_URL") or DEFAULT_MCP_SERVER_URL
     print(f"MCP 服务: {mcp_url.rstrip('/')}/call-tool")
-    asyncio.run(main(f"{mcp_url.rstrip('/')}/call-tool", a.timeout, a.concurrency,
+    asyncio.run(main(mcp_url.rstrip("/"), a.timeout, a.concurrency,
                      a.server, a.data_only, a.smoke_only, a.retries))

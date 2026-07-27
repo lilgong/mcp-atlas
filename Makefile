@@ -7,7 +7,7 @@ MCP_HOST_PORT ?= 1984
 MCP_STATUS_HOST_PORT ?= 1985
 # Host-networked shared MCP port is read from MCP_SHARED_PORT in .env.
 TASK_MONGO_IMAGE ?=
-ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:20260724
+ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:latest
 MONGO_FIXTURE_DUMP ?=
 MONGO_FIXTURE_DB ?=
 MONGO_FIXTURE_ID ?=
@@ -20,9 +20,8 @@ run-docker: # run docker container for mcp servers (agent-environment service)
 run-docker-host: # run shared MCP using MCP_SHARED_HOST/MCP_SHARED_PORT from .env
 	uv run --project services/mcp_eval python scripts/run_shared_mcp.py
 
-build: # builds agent-environment
+build: # builds agent-environment; only tags :latest (VERSION is for the GHCR push target)
 	cd services/agent-environment && docker buildx build --platform linux/amd64 -t $(IMAGE_NAME) .
-	docker tag $(IMAGE_NAME):latest $(IMAGE_NAME):$(VERSION)
 
 build-atlas-runtime: # builds the versioned fixture-free runtime; never touches agent-environment:latest
 	python3 scripts/build_atlas_runtime.py --image "$(ATLAS_RUNTIME_IMAGE)"

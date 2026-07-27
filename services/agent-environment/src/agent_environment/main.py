@@ -1,12 +1,12 @@
-import asyncio
 import contextlib
 import mcp
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, cast
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import mcp.types
-from .mcp_client import client, config
+from .mcp_client import config, create_server_client
+from .mcp_router import DirectMCPRouter, RouterTimeoutError
 from .logger import create_logger
 from cacheout import Cache
 import json
@@ -16,6 +16,7 @@ import random
 CACHE_TTL_HOURS = 48
 
 logger = create_logger(__name__)
+router = DirectMCPRouter(config, create_server_client)
 
 # Create cache with appropriate settings for the use case
 tool_cache = Cache(
@@ -90,16 +91,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(
         f"Starting agent environment with {len(mcp_servers)} MCP servers: {mcp_servers.keys()}"
     )
-    async with client:
-        tools = await client.list_tools()
-        logger.info(f"{len(tools)} tools loaded in total")
-        tool_names = [tool.name for tool in tools]
-        if "desktop-commander_set_config_value" in tool_names:
-            await client.call_tool(
-                "desktop-commander_set_config_value",
-                {"key": "allowedDirectories", "value": ["/data"]},
-            )
-    yield
+    await router.start()
+    tools = router.list_tools()
+    logger.info(f"{len(tools)} tools loaded in total")
+    tool_names = [tool.name for tool in tools]
+    if "desktop-commander_set_config_value" in tool_names:
+        result = await router.call_tool(
+            "desktop-commander_set_config_value",
+            {"key": "allowedDirectories", "value": ["/data"]},
+        )
+        if result.isError:
+            logger.warning("Failed to configure desktop-commander: %s", result.content)
+    try:
+        yield
+    finally:
+        await router.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -114,13 +120,7 @@ async def root() -> dict[str, str]:
 @app.post("/list-tools")
 async def list_tools() -> list[mcp.types.Tool]:
     """List all available tools from the MCP server."""
-    async with client:
-        try:
-            return await client.list_tools()
-        except Exception as e:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to list tools: {str(e)}"
-            )
+    return router.list_tools()
 
 
 def should_cache_tool(tool_name: str) -> bool:
@@ -148,7 +148,10 @@ async def call_tool(
     cache_key = generate_cache_key(mapped_tool_name, request.tool_args)
 
     # Check cache first
-    cached_result = tool_cache.get(cache_key)
+    cached_result = cast(
+        list[mcp.types.ContentBlock] | None,
+        tool_cache.get(cache_key),
+    )
     if (
         cached_result is not None
         and request.use_cache
@@ -157,40 +160,43 @@ async def call_tool(
         logger.info(f"Returning cached result for tool '{request.tool_name}'")
         return cached_result
 
-    async with client:
-        try:
-            result = await client.call_tool(mapped_tool_name, request.tool_args)
+    try:
+        result = await router.call_tool(mapped_tool_name, request.tool_args)
 
-            # Check for errors first (FastMCP best practice)
-            if result.is_error:
-                error_msg = "Unknown error"
-                if result.content and isinstance(
-                    result.content[0], mcp.types.TextContent
-                ):
-                    error_msg = result.content[0].text
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Tool '{request.tool_name}' execution failed: {error_msg}",
-                )
-
-            # Cache the successful result only for cacheable tools
-            content_blocks = result.content
-            if should_cache_tool(mapped_tool_name) and cache_key is not None:
-                # TTL is 70-100% of default TTL, to avoid all items expiring at the same time
-                random_ttl = int(CACHE_TTL_HOURS * 60 * 60 * random.uniform(0.7, 1.0))
-                tool_cache.set(cache_key, content_blocks, ttl=random_ttl)
-
-            return content_blocks
-
-        except Exception as e:
+        if result.isError:
+            error_msg = "Unknown error"
+            if result.content and isinstance(
+                result.content[0], mcp.types.TextContent
+            ):
+                error_msg = result.content[0].text
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to call tool '{request.tool_name}': {str(e)}",
+                detail=f"Tool '{request.tool_name}' execution failed: {error_msg}",
             )
+
+        content_blocks = result.content
+        if should_cache_tool(mapped_tool_name) and cache_key is not None:
+            random_ttl = int(CACHE_TTL_HOURS * 60 * 60 * random.uniform(0.7, 1.0))
+            tool_cache.set(cache_key, content_blocks, ttl=random_ttl)
+
+        return content_blocks
+
+    except HTTPException:
+        raise
+    except RouterTimeoutError as e:
+        raise HTTPException(
+            status_code=504,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to call tool '{request.tool_name}': {str(e)}",
+        )
 
 
 @app.get("/cache-stats")
-async def get_cache_stats():
+async def get_cache_stats() -> dict[str, Any]:
     """Get cache statistics for monitoring."""
     return {
         "cache_size": len(tool_cache),
@@ -200,7 +206,7 @@ async def get_cache_stats():
 
 
 @app.post("/cache-clear")
-async def clear_cache():
+async def clear_cache() -> dict[str, Any]:
     """Clear the entire cache."""
     tool_cache.clear()
     return {"message": "Cache cleared successfully", "cache_size": len(tool_cache)}
@@ -209,56 +215,45 @@ async def clear_cache():
 @app.get("/enabled-servers")
 async def get_enabled_servers() -> dict[str, Any]:
     """Get list of configured MCP servers with their status (OK or ERROR_NOT_ONLINE)."""
-    configured = set(config.get("mcpServers", {}).keys())
-
-    async with client:
-        try:
-            tools = await client.list_tools()
-            # Extract unique server prefixes from tool names (format: servername_toolname)
-            live_servers = set()
-            for tool in tools:
-                if "_" in tool.name:
-                    server_name = tool.name.split("_", 1)[0]
-                    live_servers.add(server_name)
-
-            # Build status list for each configured server
-            servers = [
-                (name, "OK" if name in live_servers else "ERROR_NOT_ONLINE")
-                for name in sorted(configured)
-            ]
-
-            return {
-                "servers": servers,
-                "total": len(configured),
-                "online": len(live_servers),
-                "offline": len(configured - live_servers),
-            }
-        except Exception as e:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to get server status: {str(e)}"
-            )
+    servers = router.server_statuses()
+    details = router.server_details()
+    online = sum(1 for _, status in servers if status == "OK")
+    return {
+        "servers": servers,
+        "total": len(servers),
+        "online": online,
+        "offline": len(servers) - online,
+        "details": details,
+        "errors": {
+            detail["name"]: detail["last_error"]
+            for detail in details
+            if detail["last_error"] is not None
+        },
+    }
 
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Simple health check that verifies client is also ok. Timeout is 5 seconds."""
-    try:
-
-        async def _health_check_with_client():
-            async with client:
-                return {
-                    "status": "health_and_client_connection_ok",
-                }
-
-        return await asyncio.wait_for(_health_check_with_client(), timeout=5.0)
-
-    except asyncio.TimeoutError:
-        return {
-            "status": "health_and_client_connection_timeout",
-            "error": "Client connection timed out after 5 seconds",
-        }
-    except Exception as e:
-        return {
-            "status": "health_and_client_connection_health_check_failed",
-            "error": str(e),
-        }
+    """Report router readiness and last-observed backend health."""
+    servers = router.server_statuses()
+    details = router.server_details()
+    online = sum(1 for _, status in servers if status == "OK")
+    if not router.started:
+        status = "health_and_client_connection_not_started"
+    elif online < len(servers):
+        status = "health_and_client_connection_degraded"
+    else:
+        status = "health_and_client_connection_ok"
+    return {
+        "status": status,
+        "ready": router.started,
+        "online": online,
+        "total": len(servers),
+        "offline": len(servers) - online,
+        "in_flight": sum(detail["in_flight"] for detail in details),
+        "errors": {
+            detail["name"]: detail["last_error"]
+            for detail in details
+            if detail["last_error"] is not None
+        },
+    }

@@ -69,7 +69,7 @@ scp <老机器>:/path/to/mcp-atlas/.env ./.env
 | `PORT` / `SERVER_URL` | completion 服务端口；改了 `PORT` 必须同步改 `SERVER_URL` |
 | `OXYLABS_SCRAPER_URL` | **必填**，见下方警告 |
 | `EVAL_LLM_MODEL` | 打分用的裁判模型（如 `openai/gpt-5.4`） |
-| `MCP_SHARED_AGENT_IMAGE` / `MCP_TASK_AGENT_IMAGE` | 共享/按任务容器使用的无数据版本化镜像，默认 `mcp-atlas-runtime:20260724` |
+| `MCP_SHARED_AGENT_IMAGE` / `MCP_TASK_AGENT_IMAGE` | 共享/按任务容器使用的无数据运行时镜像，默认 `mcp-atlas-runtime:latest` |
 | `MCP_TASK_DATA_DIR` | 带 `.atlas-fixture.json` 的外部任务数据目录；本地/下载型任务必填 |
 | `MCP_TASK_MONGO_IMAGE` | 一次性 synthetic Mongo fixture 镜像；Mongo 任务必填，不配置时 fail closed |
 | `MCP_RUNTIME_LOG_DIR` | 完整模型调用与隔离运行日志目录；跨机器部署时可设绝对路径 |
@@ -140,7 +140,7 @@ mongorestore --uri="mongodb://localhost:27017" mongo_dump_video_game_store-UNZIP
 
 ```bash
 make build-atlas-runtime \
-  ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:20260724
+  ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
 ```
 
 该构建从独立基础镜像和显式源码清单生成，包含固定 MCP 依赖、code-executor
@@ -161,8 +161,8 @@ uv run --project services/mcp_eval python \
 在 `.env` 中设置：
 
 ```dotenv
-MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:20260724
-MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:20260724
+MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:latest
+MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:latest
 MCP_TASK_DATA_DIR=/srv/mcp-fixtures/my-synthetic-v1
 ```
 
@@ -170,10 +170,10 @@ MCP_TASK_DATA_DIR=/srv/mcp-fixtures/my-synthetic-v1
 在构建机一次构建，再用现有离线传输方式复制镜像，并核对 image ID：
 
 ```bash
-docker save mcp-atlas-runtime:20260724 -o mcp-atlas-runtime-20260724.tar
+docker save mcp-atlas-runtime:latest -o mcp-atlas-runtime.tar
 # 复制 tar 到目标机后：
-docker load -i mcp-atlas-runtime-20260724.tar
-docker image inspect mcp-atlas-runtime:20260724 --format '{{.Id}}'
+docker load -i mcp-atlas-runtime.tar
+docker image inspect mcp-atlas-runtime:latest --format '{{.Id}}'
 ```
 
 fixture 目录也一并复制；两端运行日志中的 image ID、fixture ID 和 SHA 必须一致。

@@ -3,7 +3,7 @@ name = "agent-environment"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "cacheout>=0.16.0",
     "fastapi>=0.115.12",
