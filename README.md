@@ -148,12 +148,11 @@ codex/task-isolation-runtime
 
 ## 4. 准备部署材料
 
-仅执行 `git clone` 不能得到以下内容，需要单独准备：
+仓库已经包含官方的 `services/mcp_eval/MCP-Atlas.csv`。以下运行材料仍需单独准备：
 
 | 材料 | 用途 |
 | --- | --- |
 | `.env` | 模型端点、裁判端点、第三方 MCP 凭证、端口和运行参数 |
-| `MCP-Atlas.csv` | 官方任务、claims、enabled tools 和参考轨迹 |
 | `mcp-atlas-runtime:latest` | 运行全部 MCP server 的软件镜像 |
 | 文件 fixture | 为每道题提供 `/data` |
 | Mongo fixture 镜像 | 为每道 Mongo 题提供独立数据库 |
@@ -161,13 +160,20 @@ codex/task-isolation-runtime
 
 ### 4.1 任务 CSV
 
-官方任务 CSV 不随当前 Git 分支提交。把可信来源的 CSV 放到：
+官方原版已经提交在：
 
 ```text
 services/mcp_eval/MCP-Atlas.csv
 ```
 
-检查文件：
+它有 500 条任务，五列为 `TASK`、`ENABLED_TOOLS`、`PROMPT`、
+`GTFA_CLAIMS`、`TRAJECTORY`。官方原版的 SHA256 是：
+
+```text
+065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad
+```
+
+clone 后检查：
 
 ```bash
 cd services/mcp_eval
@@ -188,7 +194,8 @@ raise SystemExit(1 if missing else 0)
 cd ../..
 ```
 
-记录 CSV 的 SHA256。比较不同机器上的结果时，应使用相同任务 CSV。
+不要直接修改这个文件。比较不同机器上的结果时，应使用相同 CSV SHA256。
+免费 Slack 需要的日期对齐版由 §6.4 的脚本派生，写到另一个文件，不覆盖官方原版。
 
 ### 4.2 复制 `.env`
 
@@ -292,7 +299,7 @@ MCP_TASK_ISOLATION_ENABLED=true
 MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:latest
 MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:latest
 
-MCP_TASK_DATA_DIR=<后续生成的文件fixture绝对路径>
+MCP_TASK_DATA_DIR=/home/lny/mcp-atlas/.runtime/fixtures/official-data-v2
 MCP_TASK_MONGO_IMAGE=mcp-task-mongo:official-video-game-store-v1
 
 MCP_TASK_SANDBOX_CONCURRENCY=20
@@ -309,6 +316,11 @@ MCP_SANDBOX_OWNER=
 ```dotenv
 MCP_TASK_ISOLATION_ENABLED=true
 ```
+
+上面的 `/home/lny/mcp-atlas` 只适用于仓库确实 clone 在该位置的机器。
+如果 clone 路径不同，按 §8 生成 fixture 后运行 `realpath`，把输出原样写入
+`MCP_TASK_DATA_DIR`。不要写容器内路径 `/data`，也不要直接写源目录
+`services/agent-environment/data`。
 
 `MCP_SANDBOX_OWNER` 可以留空。代码会用 hostname 和 completion 端口生成 owner，
 并在服务启动时清理相同 owner 遗留的任务容器。
@@ -457,22 +469,82 @@ GOOGLE_REFRESH_TOKEN=<refresh-token>
 
 ### 6.4 Slack
 
-1. 阅读：
+官方导出位于：
 
 ```text
-docs/slack_free_method.md
+data_exports/slack_mcp_eval_export.zip
 ```
 
-2. 使用 `data_exports/slack_mcp_eval_export.zip` 导入评测 workspace。
-3. 按文档处理消息时间戳和用户映射。
-4. 写入 `.env`：
+官方消息日期为 2025-12-01 至 2025-12-10。付费 Slack 能保留这段历史时，
+可以直接导入官方 zip，并继续使用官方 `MCP-Atlas.csv`。
+
+免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息和两条绑定消息日期的
+claims。脚本始终读取官方文件并生成派生文件，不会修改 Git 中的官方 CSV：
+
+```bash
+cd services/mcp_eval
+
+uv run python prepare_slack_import.py --fix-claims
+```
+
+命令会打印本次实际文件名，并生成：
+
+```text
+data_exports/slack_mcp_eval_export_<MMDD>.zip
+services/mcp_eval/MCP-Atlas.slack-aligned.csv
+```
+
+`<MMDD>` 是运行日期；不要把尖括号原样写进命令。
+
+浏览器打开：
+
+```text
+https://<你的-workspace>.slack.com/services/import
+```
+
+选择 Slack 导入方式并上传刚生成的 zip。导入页面必须这样选：
+
+1. 6 个频道都选择“创建同样隐私设置的新频道”或“创建新的公共频道”，不要合并到现有频道。
+2. 尤其确保 `movie-suggestions`、`gaming-suggestions`、
+   `tv-show-suggestions` 是新频道。
+3. 用户选择“导入为已注销账户”，不要邀请真实邮箱，也不要选择“仅导入消息”。
+4. 如果以前导入过这一批数据，先删除原来的 6 个评测频道或换一个空 workspace；
+   Slack 导入是追加，重复消息会破坏计数类 claims。
+
+免费 Slack 的 `.env` 使用派生 CSV：
+
+```dotenv
+MCP_COMPLETION_INPUT=MCP-Atlas.slack-aligned.csv
+```
+
+付费 Slack 或严格跑官方原版时保持：
+
+```dotenv
+MCP_COMPLETION_INPUT=MCP-Atlas.csv
+```
+
+然后写入同一个 workspace 的浏览器会话 token：
 
 ```dotenv
 SLACK_MCP_XOXC_TOKEN=<xoxc-token>
 SLACK_MCP_XOXD_TOKEN=<xoxd-token>
 ```
 
-Slack 免费 workspace 会隐藏超过可见时间窗口的消息，因此必须在评测前做数据探针。
+修改 token 或输入 CSV 后重启共享 MCP 和 completion 服务。启动共享 MCP 后验证：
+
+```bash
+cd services/mcp_eval
+
+uv run python test_server_v1.py \
+  --server slack \
+  --base-url http://localhost:1984
+```
+
+验证必须能读到建议频道消息并解析发送者名字。UI 能看到消息但工具只返回极少消息，
+通常说明导入用户时误选了“仅导入消息”。
+
+完整原理、免费版定期刷新和故障排查见
+[`docs/slack_free_method.md`](docs/slack_free_method.md)。
 
 ---
 
@@ -538,18 +610,10 @@ docker image inspect mcp-atlas-runtime:latest \
 services/agent-environment/data
 ```
 
-选择一个仓库外、当前用户可写的绝对目录，例如：
-
-```text
-/home/your-user/mcp-atlas-fixtures
-```
-
-把 `your-user` 替换为目标机器的实际用户名。
-
-创建父目录：
+在仓库根创建一个 Git 会忽略的运行目录：
 
 ```bash
-mkdir -p /home/your-user/mcp-atlas-fixtures
+mkdir -p .runtime/fixtures
 ```
 
 将仓库内的官方文件数据打包为 fixture-v2：
@@ -558,7 +622,7 @@ mkdir -p /home/your-user/mcp-atlas-fixtures
 uv run --project services/mcp_eval python \
   scripts/prepare_task_data_fixture.py \
   --source services/agent-environment/data \
-  --output /home/your-user/mcp-atlas-fixtures/official-data-v2 \
+  --output "$(pwd)/.runtime/fixtures/official-data-v2" \
   --fixture-id official-data-v2
 ```
 
@@ -575,14 +639,24 @@ uv run --project services/mcp_eval python \
 
 ```bash
 python3 -m json.tool \
-  /home/your-user/mcp-atlas-fixtures/official-data-v2/.atlas-fixture.json
+  .runtime/fixtures/official-data-v2/.atlas-fixture.json
 ```
 
-把实际绝对路径写入 `.env`：
+打印需要写进 `.env` 的绝对路径：
+
+```bash
+realpath .runtime/fixtures/official-data-v2
+```
+
+如果仓库位于 `/home/lny/mcp-atlas`，输出就是：
 
 ```dotenv
-MCP_TASK_DATA_DIR=/home/your-user/mcp-atlas-fixtures/official-data-v2
+MCP_TASK_DATA_DIR=/home/lny/mcp-atlas/.runtime/fixtures/official-data-v2
 ```
+
+`MCP_TASK_DATA_DIR` 的含义是：宿主机上已经打包完成、根目录含
+`.atlas-fixture.json` 的文件 fixture 绝对路径。它不是容器内 `/data`，
+也不是 Mongo dump。评测运行时会从这个目录为每道题复制一份独立数据。
 
 任务启动时，代码会：
 
@@ -1347,9 +1421,9 @@ docker run --rm hello-world
 ```text
 [ ] 安装并验证 Git、Docker、Make、Python、uv、curl、jq、unzip
 [ ] clone codex/task-isolation-runtime
-[ ] 放置 services/mcp_eval/MCP-Atlas.csv 并记录 SHA256
+[ ] 验证仓库内 services/mcp_eval/MCP-Atlas.csv 的 SHA256
 [ ] 创建并填写 .env
-[ ] 导入 Airtable、Notion、Calendar、Slack 数据
+[ ] 导入 Airtable、Notion、Calendar、Slack 数据；免费 Slack 生成并选择对齐版 CSV
 [ ] docker load 或 make build-atlas-runtime
 [ ] 生成 official-data-v2 文件 fixture
 [ ] 解压 Mongo dump 并构建 task-Mongo fixture 镜像
