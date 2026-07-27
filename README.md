@@ -690,7 +690,7 @@ unzip \
 
 ```bash
 find \
-  data_exports/mongo_dump_video_game_store-UNZIP-FIRST/mongo_dump_video_game_store/video_game_store \
+  data_exports/mongo_dump_video_game_store/video_game_store \
   -maxdepth 1 -type f -name '*.bson' -print
 ```
 
@@ -698,7 +698,7 @@ find \
 
 ```bash
 make build-task-mongo \
-  MONGO_FIXTURE_DUMP=data_exports/mongo_dump_video_game_store-UNZIP-FIRST/mongo_dump_video_game_store \
+  MONGO_FIXTURE_DUMP=data_exports/mongo_dump_video_game_store \
   MONGO_FIXTURE_DB=video_game_store \
   MONGO_FIXTURE_ID=official-video-game-store-v1 \
   TASK_MONGO_IMAGE=mcp-task-mongo:official-video-game-store-v1
