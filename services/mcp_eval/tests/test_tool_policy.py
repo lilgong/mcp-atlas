@@ -68,10 +68,10 @@ class ToolPolicyTests(unittest.TestCase):
             ToolRoute.BLOCKED_UNSUPPORTED,
         )
 
-    def test_e2b_is_blocked_until_determinism_gate_exists(self):
+    def test_e2b_remains_available_for_official_evaluation(self):
         self.assertEqual(
             route_for_tool("e2b-server_run_code"),
-            ToolRoute.BLOCKED_UNSUPPORTED,
+            ToolRoute.CLOUD,
         )
 
     def test_longest_server_prefix_and_legacy_mongo(self):

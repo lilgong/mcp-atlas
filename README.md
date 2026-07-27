@@ -50,7 +50,7 @@ completion 服务（PORT）
 - Arxiv/PubMed 容器允许联网，但不会收到共享云端账号凭证。
 - Airtable、GitHub、Google Workspace、Lara、Notion、Slack 的共享账号写工具被拒绝。
 - filesystem、Git、Memory、MongoDB、Desktop Commander 等任务本地写工具可以在一次性容器中执行。
-- `e2b-server_run_code` 不进入评测工具列表。
+- `e2b-server_run_code` 通过共享 E2B 云端沙箱执行，与官方评测工具面保持一致。
 - `mcp-code-executor_install_dependencies` 不进入评测工具列表。
 - 模型请求、工具调用、容器生命周期和容器日志写入 `MCP_RUNTIME_LOG_DIR`。
 
@@ -400,7 +400,8 @@ ENABLED_SERVERS=calculator,wikipedia,github
 如果配置 Oxylabs，`OXYLABS_SCRAPER_URL` 不能留空。留空会使 Oxylabs server
 启动后不注册工具。
 
-配置 `E2B_API_KEY` 不会开放 `e2b-server_run_code`；该工具仍由评测策略拒绝。
+配置 `E2B_API_KEY` 后，`e2b-server_run_code` 通过共享 runtime 提供。E2B 代码在
+远程沙箱中执行，不会进入本机 task-local 容器。
 
 MongoDB 由 task-Mongo 容器提供。官方评测部署中保持：
 
@@ -535,7 +536,7 @@ SLACK_MCP_XOXD_TOKEN=<xoxd-token>
 ```bash
 cd services/mcp_eval
 
-uv run python test_server_v1.py \
+uv run python test_server_v2.py \
   --server slack \
   --base-url http://localhost:1984
 ```
@@ -850,7 +851,7 @@ cd services/mcp_eval
 一次检查全部已配置路由：
 
 ```bash
-uv run python test_server_v1.py \
+uv run python test_server_v2.py \
   --base-url http://localhost:1984 \
   --concurrency 20
 ```
@@ -858,12 +859,16 @@ uv run python test_server_v1.py \
 这个脚本使用与正式评测相同的路由：公开 API 和云端读取走共享 1984；Git、
 filesystem、Mongo、Arxiv/PubMed 等走当前主机上的逐任务容器。因此必须在实际运行
 MCP-Atlas 的主机上执行，不能在另一台机器上只把 `--base-url` 指向目标机来代替验收
-目标机的 Docker 环境。策略明确禁用的能力会显示为 `POLICY SKIP`，不算连通性失败。
+目标机的 Docker 环境。每个列出的 server 都会执行真实代表调用，不会因为评测策略
+静默跳过。
+
+`test_server_v1.py` 仅用于所有工具都直接走共享 `/call-tool` 的 V1 runtime；它不会
+创建任务容器。当前任务隔离部署统一使用 `test_server_v2.py`。
 
 单独检查一个 server：
 
 ```bash
-uv run python test_server_v1.py \
+uv run python test_server_v2.py \
   --base-url http://localhost:1984 \
   --server brave-search
 ```
@@ -877,7 +882,7 @@ for server in \
   met-museum national-parks notion open-library osm-mcp-server oxylabs \
   slack twelvedata weather weather-data whois wikipedia
 do
-  uv run python test_server_v1.py \
+  uv run python test_server_v2.py \
     --base-url http://localhost:1984 \
     --server "$server"
 done
@@ -893,7 +898,7 @@ server 保留为已启用状态后直接跑正式任务。
 ```bash
 for server in airtable notion slack google-workspace
 do
-  uv run python test_server_v1.py \
+  uv run python test_server_v2.py \
     --base-url http://localhost:1984 \
     --server "$server" \
     --data-only
@@ -1484,7 +1489,9 @@ docker run --rm hello-world
 | `scripts/run_shared_mcp.py` | 启动共享 MCP runtime |
 | `services/mcp_eval/mcp_completion_script.py` | 生成模型轨迹 |
 | `services/mcp_eval/mcp_evals_scores.py` | claim coverage 评分 |
-| `services/mcp_eval/test_server_v1.py` | 按正式路由检查共享云端与逐任务容器工具 |
+| `services/mcp_eval/test_server_v1.py` | 检查所有工具均走共享端点的 V1 runtime |
+| `services/mcp_eval/test_server_v2.py` | 按正式路由检查共享云端与逐任务容器工具 |
+| `services/mcp_eval/mcp_server_probe.py` | V1/V2 共用的代表调用和官方数据断言 |
 | `services/mcp_eval/scripts/check_task_isolation.py` | 任务容器隔离验收 |
 | `services/mcp_eval/scripts/cleanup_task_sandboxes.py` | 清理同 owner 孤儿容器 |
 | `data_exports/` | 官方云端账号数据和 Mongo dump |

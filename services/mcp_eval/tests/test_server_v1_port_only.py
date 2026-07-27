@@ -18,10 +18,11 @@ sys.path.insert(0, str(MCP_EVAL_DIR))
 from test_server_v1 import (  # noqa: E402
     DataMismatch,
     load_target_servers,
-    main as run_all_checks,
+    main as run_legacy_checks,
     make_caller,
     probe_airtable,
 )
+from test_server_v2 import main as run_isolated_checks  # noqa: E402
 from test_servers import resolve_mcp_server_url  # noqa: E402
 
 
@@ -134,6 +135,51 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(servers, ["airtable", "weather"])
 
+    async def test_v1_calls_e2b_directly_through_shared_gateway(self) -> None:
+        calls = []
+        endpoint = []
+
+        class FakeHttpClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+        async def call(tool, args):
+            calls.append((tool, args))
+            return tool_response({"stdout": "4"})
+
+        def fake_make_caller(client, base_url, timeout, retries):
+            endpoint.append(base_url)
+            return call
+
+        output = StringIO()
+        with (
+            patch("mcp_server_probe.httpx.AsyncClient", FakeHttpClient),
+            patch(
+                "mcp_server_probe.load_target_servers",
+                return_value=["e2b-server"],
+            ),
+            patch(
+                "mcp_server_probe.make_caller",
+                side_effect=fake_make_caller,
+            ),
+            redirect_stdout(output),
+        ):
+            await run_legacy_checks(
+                "http://gateway:1984",
+                timeout=1,
+                concurrency=5,
+                only="e2b-server",
+                data_only=False,
+                smoke_only=False,
+            )
+
+        self.assertEqual(["http://gateway:1984/call-tool"], endpoint)
+        self.assertEqual("e2b-server_run_code", calls[0][0])
+        self.assertIn("OK        e2b-server", output.getvalue())
+
     async def test_mongodb_probe_uses_isolated_route_when_shared_is_offline(
         self,
     ) -> None:
@@ -163,16 +209,16 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
         output = StringIO()
         with (
             patch(
-                "test_server_v1.load_target_servers",
+                "mcp_server_probe.load_target_servers",
                 return_value=["airtable"],
             ),
             patch(
-                "test_server_v1.IsolatedMCPClient",
+                "mcp_server_probe.IsolatedMCPClient",
                 FakeIsolatedClient,
             ),
             redirect_stdout(output),
         ):
-            await run_all_checks(
+            await run_isolated_checks(
                 "http://gateway:1984",
                 timeout=1,
                 concurrency=20,
@@ -184,6 +230,58 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["mongodb_count"], requested)
         self.assertEqual("mongodb_count", calls[0][0])
         self.assertIn("DATA OK   mongodb", output.getvalue())
+
+    async def test_e2b_is_called_through_v2_instead_of_policy_skipped(
+        self,
+    ) -> None:
+        calls = []
+        requested = []
+
+        class FakeIsolatedClient:
+            def __init__(self, **kwargs):
+                requested.extend(kwargs["enabled_tools"])
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+            async def call_tool(self, tool, args):
+                calls.append((tool, args))
+                item = SimpleNamespace(
+                    model_dump=lambda **kwargs: {
+                        "type": "text",
+                        "text": "4",
+                    }
+                )
+                return SimpleNamespace(content=[item], is_error=False)
+
+        output = StringIO()
+        with (
+            patch(
+                "mcp_server_probe.load_target_servers",
+                return_value=["e2b-server"],
+            ),
+            patch(
+                "mcp_server_probe.IsolatedMCPClient",
+                FakeIsolatedClient,
+            ),
+            redirect_stdout(output),
+        ):
+            await run_isolated_checks(
+                "http://gateway:1984",
+                timeout=1,
+                concurrency=20,
+                only="e2b-server",
+                data_only=False,
+                smoke_only=False,
+            )
+
+        self.assertEqual(["e2b-server_run_code"], requested)
+        self.assertEqual("e2b-server_run_code", calls[0][0])
+        self.assertIn("OK        e2b-server", output.getvalue())
+        self.assertNotIn("POLICY SKIP", output.getvalue())
 
 
 class EnvLoadingTests(unittest.TestCase):

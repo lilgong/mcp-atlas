@@ -2,7 +2,7 @@
 
 官方 Slack 导出的时间戳早已超出免费版的 90 天可见期。本文说明**每次**要跑什么、怎么导入、怎么验证。
 
-> 一句话：跑 `uv run prepare_slack_import.py --fix-claims` → 浏览器手动导入生成的 zip → 跑 `test_server_v1.py --server slack` 验收。
+> 一句话：跑 `uv run prepare_slack_import.py --fix-claims` → 浏览器手动导入生成的 zip → 跑 `test_server_v2.py --server slack` 验收。
 > 免费版下每 ~3 个月要重复一次。
 
 ---
@@ -262,7 +262,7 @@ make run-docker          # 或 make run-docker-host
 
 ```bash
 cd services/mcp_eval
-uv run test_server_v1.py --server slack --base-url http://localhost:1984
+uv run test_server_v2.py --server slack --base-url http://localhost:1984
 ```
 
 期望：
@@ -284,7 +284,7 @@ uv run test_server_v1.py --server slack --base-url http://localhost:1984
 顺带把 5 个有状态服务一起验：
 
 ```bash
-uv run test_server_v1.py --data-only --base-url http://localhost:1984
+uv run test_server_v2.py --data-only --base-url http://localhost:1984
 ```
 
 常见失败：
@@ -341,7 +341,7 @@ MCP_COMPLETION_INPUT=MCP-Atlas.csv
 | `data_exports/slack_mcp_eval_export.zip` | 官方原始导出（只读，不修改） |
 | `data_exports/slack_mcp_eval_export_<MMDD>.zip` | 脚本产出，用它导入 |
 | `services/mcp_eval/prepare_slack_import.py` | 平移 + 修 claims |
-| `services/mcp_eval/test_server_v1.py` | 验证数据是否真的导入了 |
+| `services/mcp_eval/test_server_v2.py` | 按任务隔离正式路由验证数据是否真的导入 |
 | `services/mcp_eval/MCP-Atlas.csv` | Git 跟踪的官方原版评测集（只读） |
 | `services/mcp_eval/MCP-Atlas.slack-aligned.csv` | 免费 Slack 对齐版（脚本生成、Git 忽略） |
 | `data_exports/README.md` | 官方的 5 个有状态服务数据设置说明 |

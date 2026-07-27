@@ -321,7 +321,7 @@ def main() -> int:
      选 "Slack" 导入方式，上传这个 zip
   3. ⚠️ 若之前导入过旧数据，先清掉频道里的旧消息，否则会重复
   4. 重启 MCP 容器（--env-file 只在启动时读一次），然后验收:
-       uv run test_server_v1.py --server slack --base-url http://localhost:1984
+       uv run test_server_v2.py --server slack --base-url http://localhost:1984
   5. 免费 Slack 评测把 .env 设为:
        MCP_COMPLETION_INPUT={a.csv.name}
 """)

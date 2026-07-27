@@ -81,9 +81,6 @@ TASK_NETWORK_SERVERS = frozenset({"arxiv", "pubmed"})
 TASK_MONGODB_DATABASE = "store"
 UNSUPPORTED_TOOLS = frozenset(
     {
-        # Per-task Docker isolation cannot make a remote E2B execution
-        # reproducible. Keep it closed until the double-execution gate exists.
-        "e2b-server_run_code",
         # Task-local containers deliberately have no network access.
         "mcp-code-executor_install_dependencies",
     }
