@@ -24,8 +24,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
+from dotenv import dotenv_values
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent
@@ -34,9 +36,8 @@ TEMPLATE_PATH = (
     REPO_ROOT / "services/agent-environment/src/agent_environment/mcp_server_template.json"
 )
 ENV_PATH = REPO_ROOT / ".env"
-DEFAULT_MCP_SERVER_URL = "http://localhost:1984"
-# 在 __main__ 里按 --base-url / .env 的 MCP_SERVER_URL / 默认 重新赋值
-BASE_URL = f"{DEFAULT_MCP_SERVER_URL}/call-tool"
+# 在 __main__ 里按 --base-url / .env 的 MCP_SERVER_URL 赋值。
+BASE_URL = ""
 
 
 # ── Parse .env ───────────────────────────────────────────────────────────────
@@ -56,19 +57,44 @@ def load_env_keys(env_path: Path) -> set[str]:
 
 
 def read_env_value(env_path: Path, name: str) -> str | None:
-    """取变量值：优先进程环境变量，其次 .env 里非空的同名项，否则 None。"""
+    """取变量值：进程环境优先，其次读取并展开 .env 中的同名项。"""
     if os.getenv(name):
         return os.getenv(name)
     if not env_path.exists():
         return None
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        if k.strip() == name and v.strip():
-            return v.strip()
-    return None
+    value = dotenv_values(env_path).get(name)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def resolve_mcp_server_url(
+    explicit_url: str | None,
+    env_path: Path = ENV_PATH,
+) -> tuple[str, int]:
+    """Resolve one explicit MCP URL and require an HTTP(S) host and port."""
+    value = explicit_url or read_env_value(env_path, "MCP_SERVER_URL")
+    if not value:
+        raise ValueError(
+            "缺少 MCP 服务地址：请设置 .env 的 MCP_SERVER_URL，"
+            "或传入 --base-url；地址必须显式包含端口"
+        )
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            f"MCP_SERVER_URL 无效或变量未展开: {value!r}"
+        ) from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(
+            f"MCP_SERVER_URL 必须是带主机名的 http(s) URL: {value!r}"
+        )
+    if port is None:
+        raise ValueError(
+            f"MCP_SERVER_URL 必须显式包含端口: {value!r}"
+        )
+    return value.rstrip("/"), port
 
 
 # ── Load server list from template ───────────────────────────────────────────
@@ -397,11 +423,15 @@ if __name__ == "__main__":
     parser.add_argument("--server", metavar="NAME",
                         help="Test only this server (e.g. --server github)")
     parser.add_argument("--base-url", default=None,
-                        help="MCP 服务地址（默认取 .env 的 MCP_SERVER_URL，否则 http://localhost:1984）")
+                        help="MCP 服务地址（否则读取 .env 的 MCP_SERVER_URL；必须显式含端口）")
     args = parser.parse_args()
 
-    mcp_url = args.base_url or read_env_value(ENV_PATH, "MCP_SERVER_URL") or DEFAULT_MCP_SERVER_URL
+    try:
+        mcp_url, mcp_port = resolve_mcp_server_url(args.base_url)
+    except ValueError as exc:
+        parser.error(str(exc))
     BASE_URL = mcp_url.rstrip("/") + "/call-tool"
-    print(f"Testing against MCP service: {BASE_URL}")
+    print(f"Testing MCP service: {mcp_url}  (port {mcp_port})")
+    print(f"Tool endpoint: {BASE_URL}")
 
     asyncio.run(main(args.timeout, args.concurrency, args.server))

@@ -40,10 +40,9 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from test_servers import (
-    DEFAULT_MCP_SERVER_URL,
     ENV_PATH,
     TEST_CALLS,
-    read_env_value,
+    resolve_mcp_server_url,
 )
 
 
@@ -448,7 +447,7 @@ async def main(base_url: str, timeout: float, concurrency: int,
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MCP 服务器数据+连通性检查")
     p.add_argument("--base-url", default=None,
-                   help="MCP 服务地址（默认取 .env 的 MCP_SERVER_URL，否则 http://localhost:1984）")
+                   help="MCP 服务地址（否则读取 .env 的 MCP_SERVER_URL；必须显式含端口）")
     p.add_argument("--timeout", type=float, default=60.0)
     p.add_argument("--concurrency", type=int, default=5)
     p.add_argument("--server", default=None, help="只测某一个服务")
@@ -458,7 +457,11 @@ if __name__ == "__main__":
                    help="瞬时错误(429/超时/5xx/连接)的重试次数，带退避；数据不符和永久错误不重试（默认 2）")
     a = p.parse_args()
 
-    mcp_url = a.base_url or read_env_value(ENV_PATH, "MCP_SERVER_URL") or DEFAULT_MCP_SERVER_URL
-    print(f"MCP 服务: {mcp_url.rstrip('/')}/call-tool")
-    asyncio.run(main(mcp_url.rstrip("/"), a.timeout, a.concurrency,
+    try:
+        mcp_url, mcp_port = resolve_mcp_server_url(a.base_url, ENV_PATH)
+    except ValueError as exc:
+        p.error(str(exc))
+    print(f"MCP 服务: {mcp_url}  (端口 {mcp_port})")
+    print(f"工具端点: {mcp_url}/call-tool")
+    asyncio.run(main(mcp_url, a.timeout, a.concurrency,
                      a.server, a.data_only, a.smoke_only, a.retries))

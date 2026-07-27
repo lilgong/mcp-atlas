@@ -1,7 +1,10 @@
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -15,6 +18,7 @@ from test_server_v1 import (  # noqa: E402
     make_caller,
     probe_airtable,
 )
+from test_servers import resolve_mcp_server_url  # noqa: E402
 
 
 def tool_response(payload) -> str:
@@ -125,6 +129,37 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(servers, ["airtable", "weather"])
+
+
+class EnvLoadingTests(unittest.TestCase):
+    def test_expands_port_reference_from_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env_path = Path(raw) / ".env"
+            env_path.write_text(
+                "MCP_SHARED_PORT=3984\n"
+                "MCP_SERVER_URL=http://localhost:${MCP_SHARED_PORT}\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"MCP_SERVER_URL": "", "MCP_SHARED_PORT": ""},
+            ):
+                self.assertEqual(
+                    ("http://localhost:3984", 3984),
+                    resolve_mcp_server_url(None, env_path),
+                )
+
+    def test_missing_url_fails_instead_of_using_default_port(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env_path = Path(raw) / ".env"
+            env_path.write_text("", encoding="utf-8")
+            with patch.dict(os.environ, {"MCP_SERVER_URL": ""}):
+                with self.assertRaisesRegex(ValueError, "缺少 MCP 服务地址"):
+                    resolve_mcp_server_url(None, env_path)
+
+    def test_url_without_explicit_port_fails(self) -> None:
+        with self.assertRaisesRegex(ValueError, "必须显式包含端口"):
+            resolve_mcp_server_url("http://localhost")
 
 
 if __name__ == "__main__":
