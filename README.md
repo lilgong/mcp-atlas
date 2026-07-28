@@ -541,8 +541,19 @@ uv run python test_server_v2.py \
   --base-url http://localhost:1984
 ```
 
-验证必须能读到建议频道消息并解析发送者名字。UI 能看到消息但工具只返回极少消息，
-通常说明导入用户时误选了“仅导入消息”。
+验证会读取仓库根 `.env` 的 `MCP_COMPLETION_INPUT`，并核对 CSV claim 与 Slack
+云端 Napoleon Dynamite 消息的 UTC 时间戳。临时核对其他测试集时可显式传入：
+
+```bash
+uv run python test_server_v2.py \
+  --server slack \
+  --base-url http://localhost:1984 \
+  --input /your_path/mcp-atlas/services/mcp_eval/MCP-Atlas.csv
+```
+
+相对输入路径按 `services/mcp_eval/` 解析；未配置 `MCP_COMPLETION_INPUT` 时回退到
+当前仓库的 `MCP-Atlas.csv`。UI 能看到消息但工具只返回极少消息，通常说明导入用户时
+误选了“仅导入消息”。
 
 完整原理、免费版定期刷新和故障排查见
 [`docs/slack_free_method.md`](docs/slack_free_method.md)。

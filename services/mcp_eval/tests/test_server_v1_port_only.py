@@ -23,11 +23,19 @@ from test_server_v1 import (  # noqa: E402
     probe_airtable,
 )
 from test_server_v2 import main as run_isolated_checks  # noqa: E402
+from mcp_server_probe import (  # noqa: E402
+    probe_slack_timestamp_alignment,
+    resolve_completion_input,
+)
 from test_servers import resolve_mcp_server_url  # noqa: E402
 
 
 def tool_response(payload) -> str:
     return json.dumps([{"type": "text", "text": json.dumps(payload)}])
+
+
+def text_response(text: str) -> str:
+    return json.dumps([{"type": "text", "text": text}])
 
 
 class AirtablePortOnlyTests(unittest.IsolatedAsyncioTestCase):
@@ -282,6 +290,55 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("e2b-server_run_code", calls[0][0])
         self.assertIn("OK        e2b-server", output.getvalue())
         self.assertNotIn("POLICY SKIP", output.getvalue())
+
+
+class SlackTimestampAlignmentTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _write_input(path: Path, timestamp: str) -> None:
+        path.write_text(
+            "TASK,TRAJECTORY,GTFA_CLAIMS\n"
+            f'task-1,\"slack_conversations_history\",'
+            f'\"Napoleon Dynamite posted on {timestamp}.\"\n',
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    async def _call(tool, args):
+        if tool == "slack_channels_list":
+            return text_response(
+                "ID,Name,Topic,Purpose,MemberCount,Cursor\n"
+                "C123,#movie-suggestions,,,8,\n"
+            )
+        if tool == "slack_conversations_history":
+            return text_response(
+                "UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor\n"
+                "U123,mcpdumle,,C123,,You cant go wrong with Napoleon Dynamite,"
+                "1783615136.421649,\n"
+            )
+        raise AssertionError(f"unexpected tool call: {tool} {args}")
+
+    async def test_selected_csv_matches_cloud_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "aligned.csv"
+            self._write_input(path, "2026-07-09 at 16:38:56.421649+00:00")
+
+            detail = await probe_slack_timestamp_alignment(self._call, path)
+
+        self.assertIn("2026-07-09T16:38:56.421649+00:00", detail)
+
+    async def test_selected_csv_mismatch_is_data_bad(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "official.csv"
+            self._write_input(path, "2025-06-27 at 16:38:56.421649+00:00")
+
+            with self.assertRaisesRegex(DataMismatch, "时间不对应"):
+                await probe_slack_timestamp_alignment(self._call, path)
+
+    def test_explicit_input_path_has_highest_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "chosen.csv"
+            path.write_text("TASK,TRAJECTORY,GTFA_CLAIMS\n", encoding="utf-8")
+            self.assertEqual(path.resolve(), resolve_completion_input(str(path)))
 
 
 class EnvLoadingTests(unittest.TestCase):

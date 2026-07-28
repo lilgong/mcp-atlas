@@ -265,21 +265,25 @@ cd services/mcp_eval
 uv run test_server_v2.py --server slack --base-url http://localhost:1984
 ```
 
+脚本默认读取仓库根 `.env` 的 `MCP_COMPLETION_INPUT`；未配置时回退到当前仓库的
+`services/mcp_eval/MCP-Atlas.csv`。也可用 `--input /绝对路径/MCP-Atlas.csv`
+临时指定另一份测试集。
+
 期望：
 
 ```
 ✅ DATA OK   slack                0.7s
        └─ 验的是: Slack 导出的频道/消息是否已导入
-       └─ #movie-suggestions(C...) 历史消息在位，且用户名可解析
+       └─ #movie-suggestions(C...) 历史消息在位，且用户名可解析；测试集 ... 与 Slack 时间锚点一致
 ```
 
-它依次断言三件事：
+它依次断言四件事：
 
 1. `slack_channels_list` 里能找到 **`#movie-suggestions`** 频道 → 频道导进来了
 2. 该频道的 `slack_conversations_history` 里含 GT 的消息文本 **`Akira`** → 消息可见（没被 90 天窗口挡掉）
 3. 同一条消息的发送者能解析出 **`hiphopluvr1989` / `Omari West`** → 用户映射选对了（见 3.4）
-
-**断言的全是频道名、消息文本、用户名，不含任何时间戳**，所以平移时间戳后**不需要改这个脚本**。
+4. 当前评测 CSV 中 Napoleon Dynamite 的精确 UTC claim 与 Slack 云端消息时间戳一致
+   → 导入的 zip 与实际使用的测试集属于同一轮平移。
 
 顺带把 5 个有状态服务一起验：
 
@@ -294,6 +298,7 @@ uv run test_server_v2.py --data-only --base-url http://localhost:1984
 | `❌ DATA BAD ... 没找到 #movie-suggestions 频道` | zip 没导入，或导到了别的 workspace |
 | `❌ DATA BAD ... 返回里找不到 'Akira'` | 频道建出来了但消息不可见 → 多半是**时间戳超期**，重跑第 2 节的平移脚本 |
 | `❌ DATA BAD ... 发送者名字解析不出来` | 导入时**用户映射选错了**（把用户整个排除了）→ 见 3.4，应选“导入为已注销账户” |
+| `❌ DATA BAD ... 测试集与 Slack 时间不对应` | `.env` 的 `MCP_COMPLETION_INPUT` 与本次导入的 Slack zip 不配套；重新生成/导入并使用同轮派生 CSV |
 | `💥 API FAIL ... channel_not_found` | 同上，或 token 指向了别的 workspace |
 | `💥 API FAIL` 且 token 刚换过 | **忘了重启容器** |
 

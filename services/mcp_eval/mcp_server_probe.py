@@ -27,10 +27,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
+import datetime as dt
+import io
 import json
+import sys
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -43,8 +48,10 @@ from mcp_completion.tool_policy import (
 from test_servers import (
     ENV_PATH,
     TEST_CALLS,
+    read_env_value,
     resolve_mcp_server_url,
 )
+from prepare_slack_import import ISO_DT
 
 
 class ApiError(RuntimeError):
@@ -327,6 +334,94 @@ async def probe_slack(call) -> str:
     return f"#movie-suggestions({chan_id}) 历史消息在位，且用户名可解析"
 
 
+def resolve_completion_input(explicit: str | None) -> Path:
+    """Resolve the exact CSV used by completion, relative to mcp_eval."""
+    value = explicit or read_env_value(ENV_PATH, "MCP_COMPLETION_INPUT")
+    path = Path(value or "MCP-Atlas.csv").expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"测试集不存在: {path}")
+    return path
+
+
+def _slack_anchor_from_input(input_path: Path) -> dt.datetime:
+    """Read the exact Napoleon-Dynamite timestamp expected by the selected CSV."""
+    csv.field_size_limit(sys.maxsize)
+    with input_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            trajectory = row.get("TRAJECTORY") or ""
+            claims = row.get("GTFA_CLAIMS") or ""
+            if "slack_" not in trajectory or "Napoleon Dynamite" not in claims:
+                continue
+            for match in ISO_DT.finditer(claims):
+                year, month, day, hour, minute, second, fraction = match.groups()
+                if hour is None or fraction is None:
+                    continue
+                microsecond = int(fraction[1:].ljust(6, "0")[:6])
+                return dt.datetime(
+                    int(year),
+                    int(month),
+                    int(day),
+                    int(hour),
+                    int(minute),
+                    int(second),
+                    microsecond,
+                    tzinfo=dt.timezone.utc,
+                )
+    raise DataMismatch(
+        f"{input_path} 中找不到 Slack/Napoleon Dynamite 的精确时间 claim"
+    )
+
+
+def _slack_time(raw: str) -> dt.datetime:
+    seconds, _, fraction = raw.partition(".")
+    microsecond = int(fraction.ljust(6, "0")[:6]) if fraction else 0
+    return dt.datetime.fromtimestamp(
+        int(seconds), dt.timezone.utc
+    ).replace(microsecond=microsecond)
+
+
+async def probe_slack_timestamp_alignment(call, input_path: Path) -> str:
+    """Verify that the selected evaluation CSV matches the imported Slack shift."""
+    channels = _texts(await call(
+        "slack_channels_list", {"channel_types": "public_channel, private_channel"}
+    ))
+    channel_id = None
+    for row in csv.DictReader(io.StringIO(channels)):
+        if (row.get("Name") or "").strip() == "#movie-suggestions":
+            channel_id = (row.get("ID") or "").strip()
+            break
+    if not channel_id:
+        raise DataMismatch("时间对齐检查找不到 #movie-suggestions 频道")
+
+    history = _texts(await call(
+        "slack_conversations_history", {"channel_id": channel_id}
+    ))
+    actual = None
+    for row in csv.DictReader(io.StringIO(history)):
+        if "Napoleon Dynamite" in (row.get("Text") or ""):
+            raw_time = (row.get("Time") or "").strip()
+            if raw_time:
+                actual = _slack_time(raw_time)
+                break
+    if actual is None:
+        raise DataMismatch("Slack 云端找不到 Napoleon Dynamite 时间锚点")
+
+    expected = _slack_anchor_from_input(input_path)
+    if actual != expected:
+        raise DataMismatch(
+            "测试集与 Slack 时间不对应："
+            f"CSV={expected.isoformat()}，Slack={actual.isoformat()}，"
+            f"输入={input_path}"
+        )
+    return (
+        f"测试集 {input_path.name} 与 Slack 时间锚点一致："
+        f"{actual.isoformat()}"
+    )
+
+
 async def probe_google_workspace(call) -> str:
     """GT task 68993ef3cf3e953b8ab83fa3：2025-07 下半月的日历事件。
     事件标题由 .ics 导入原样保留，可直接断言。"""
@@ -561,6 +656,7 @@ async def run_isolated(
     data_only: bool,
     smoke_only: bool,
     retries: int = 0,
+    input_path: Path | None = None,
 ) -> None:
     """Validate tools and data through the production task-isolated routes."""
 
@@ -604,6 +700,23 @@ async def run_isolated(
             concurrency=concurrency,
             timeout=timeout,
         )
+        if "slack" in probes:
+            selected_input = input_path or resolve_completion_input(None)
+            slack_result = next(
+                result for result in results if result.server == "slack"
+            )
+            if slack_result.status == OK:
+                try:
+                    alignment = await probe_slack_timestamp_alignment(
+                        call, selected_input
+                    )
+                    slack_result.detail = f"{slack_result.detail}；{alignment}"
+                except DataMismatch as exc:
+                    slack_result.status = BAD
+                    slack_result.detail = str(exc)
+                except ApiError as exc:
+                    slack_result.status = FAIL
+                    slack_result.detail = str(exc)
     _render_results(results)
 
 
@@ -640,6 +753,14 @@ def _parse_cli(description: str, *, default_concurrency: int):
             "数据不符和永久错误不重试（默认 2）"
         ),
     )
+    parser.add_argument(
+        "--input",
+        default=None,
+        help=(
+            "V2 用于核对 Slack 时间戳的评测 CSV；否则读取 .env 的 "
+            "MCP_COMPLETION_INPUT，未配置时使用 MCP-Atlas.csv"
+        ),
+    )
     return parser, parser.parse_args()
 
 
@@ -655,6 +776,8 @@ def cli_legacy() -> None:
     print(f"MCP 服务: {mcp_url}  (端口 {mcp_port})")
     print(f"工具端点: {mcp_url}/call-tool")
     print("测试模式: V1 旧共享 runtime（所有工具直接调用共享端点）")
+    if args.input:
+        parser.error("--input 仅用于 test_server_v2.py")
     asyncio.run(
         run_legacy(
             mcp_url,
@@ -677,8 +800,13 @@ def cli_isolated() -> None:
         mcp_url, mcp_port = resolve_mcp_server_url(args.base_url, ENV_PATH)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        input_path = resolve_completion_input(args.input)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"共享 MCP 服务: {mcp_url}  (端口 {mcp_port})")
     print("测试模式: V2 正式路由（云端共享，本地/下载/Mongo 使用任务容器）")
+    print(f"评测输入: {input_path}")
     asyncio.run(
         run_isolated(
             mcp_url,
@@ -688,5 +816,6 @@ def cli_isolated() -> None:
             args.data_only,
             args.smoke_only,
             args.retries,
+            input_path,
         )
     )
