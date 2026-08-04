@@ -9,7 +9,7 @@ npm install -g \
     @alchemy/mcp-server@0.1.8 \
     @modelcontextprotocol/server-brave-search@0.6.2 \
     clinicaltrialsgov-mcp-server@1.0.8 \
-    @upstash/context7-mcp@1.0.14 \
+    @upstash/context7-mcp@1.0.33 \
     @wonderwhy-er/desktop-commander@0.2.7 \
     @e2b/mcp-server@0.2.0 \
     exa-mcp-server@0.3.10 \

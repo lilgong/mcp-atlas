@@ -383,6 +383,7 @@ ENABLED_SERVERS=calculator,wikipedia,github
 | --- | --- |
 | Airtable | `AIRTABLE_API_KEY` |
 | Alchemy | `ALCHEMY_API_KEY` |
+| Context7 | `CONTEXT7_API_KEY`（小规模可留空，批量评测建议填写） |
 | Brave Search | `BRAVE_API_KEY` |
 | E2B | `E2B_API_KEY` |
 | Exa | `EXA_API_KEY` |

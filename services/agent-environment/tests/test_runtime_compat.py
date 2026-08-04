@@ -56,6 +56,22 @@ def test_runtime_templates_use_guarded_compatibility_entrypoints():
     assert local["filesystem"]["args"] == expected_filesystem
 
 
+def test_context7_uses_authenticated_schema_compatible_release():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    context7 = servers["context7"]
+    assert context7["args"] == ["-y", "@upstash/context7-mcp@1.0.33"]
+    assert context7["env"] == {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}",
+    }
+
+
 def test_python_mcp_servers_pin_their_sdk():
     servers = json.loads(
         (

@@ -72,8 +72,12 @@
     "context7": {
       "command": "npx",
       "args": [
-        "@upstash/context7-mcp@1.0.14"
-      ]
+        "-y",
+        "@upstash/context7-mcp@1.0.33"
+      ],
+      "env": {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      }
     },
     "ddg-search": {
       "command": "uvx",
