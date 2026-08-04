@@ -33,6 +33,28 @@ def _tool_result_char_limit() -> int:
     return int(os.getenv("MAX_TOOL_RESULT_CHARS", "120000"))
 
 
+def _turn_result_char_limit() -> int:
+    """Combined budget for every tool call in one turn.
+
+    A per-call cap alone is trivially defeated by parallel tool calls: seven
+    calls each clipped to the per-call limit still add seven times that much
+    to the context in a single turn.
+    """
+    return int(os.getenv("MAX_TURN_TOOL_RESULT_CHARS", "150000"))
+
+
+def _call_budget(turn_budget: int, calls_left: int, per_call: int) -> int:
+    """Share what is left of the turn budget across the remaining calls.
+
+    Splitting evenly keeps one greedy call from starving its siblings, while
+    unspent share rolls forward because the budget is recomputed per call.
+    """
+    if turn_budget <= 0:
+        return per_call
+    share = max(1, turn_budget // max(1, calls_left))
+    return share if per_call <= 0 else min(per_call, share)
+
+
 _TRUNCATION_NOTE = (
     "\n\n[Tool result truncated: {kept} of {total} characters shown. Narrow the "
     "query with a filter, a smaller page size, or a more specific search term "
@@ -42,22 +64,19 @@ _TRUNCATION_NOTE = (
 
 def _clamp_tool_result(
     content: List[Content], limit: int
-) -> Tuple[List[Content], int]:
+) -> Tuple[List[Content], int, int]:
     """Clip a tool result so a single call cannot swamp the context window.
 
     An unbounded result (an unfiltered search can return hundreds of KB) is
     re-sent on every subsequent turn, which is what pushes a task past the
-    caller's request timeout. Returns the clamped content and how many
-    characters were dropped.
+    caller's request timeout. Returns the clamped content, how many characters
+    were dropped, and how many were kept.
     """
-    if limit <= 0:
-        return content, 0
-
     total = sum(
         len(part.text) for part in content if isinstance(part, TextContent)
     )
-    if total <= limit:
-        return content, 0
+    if limit <= 0 or total <= limit:
+        return content, 0, total
 
     clamped: List[Content] = []
     budget = limit
@@ -76,7 +95,7 @@ def _clamp_tool_result(
             text=_TRUNCATION_NOTE.format(kept=limit, total=total),
         )
     )
-    return clamped, total - limit
+    return clamped, total - limit, limit
 
 
 class AgentOutput:
@@ -133,7 +152,12 @@ async def run_mcp_eval(
         tool_calls = assistant_message.tool_calls or []
 
         if tool_calls:
-            for tool_call in tool_calls:
+            per_call_limit = _tool_result_char_limit()
+            turn_budget = _turn_result_char_limit()
+
+            for call_index, tool_call in enumerate(tool_calls):
+                # Recomputed per call so a failed call does not skew the split.
+                calls_left = len(tool_calls) - call_index
                 try:
                     # Parse tool arguments
                     args = json.loads(tool_call.function["arguments"])
@@ -144,9 +168,13 @@ async def run_mcp_eval(
                         args,
                     )
 
-                    content, dropped = _clamp_tool_result(
-                        response.content, _tool_result_char_limit()
+                    limit = _call_budget(
+                        turn_budget, calls_left, per_call_limit
                     )
+                    content, dropped, kept = _clamp_tool_result(
+                        response.content, limit
+                    )
+                    turn_budget -= kept
                     if dropped:
                         write_runtime_event(
                             "tools",
@@ -155,6 +183,8 @@ async def run_mcp_eval(
                             turn=i + 1,
                             tool=tool_call.function["name"],
                             dropped_chars=dropped,
+                            limit=limit,
+                            parallel_calls=len(tool_calls),
                         )
 
                     # Create tool call message
