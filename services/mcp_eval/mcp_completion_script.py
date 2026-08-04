@@ -41,7 +41,11 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from datasets import load_dataset
-from mcp_completion.tool_policy import effective_enabled_servers
+from mcp_completion.tool_policy import (
+    effective_enabled_servers,
+    shared_routable_servers,
+)
+from mcp_completion.response_validation import is_completely_empty_agent_response
 
 warnings.filterwarnings("ignore")
 
@@ -274,8 +278,17 @@ class AsyncMCPTrajectoryGenerator:
                             text = await resp.text()
                             messages = json.loads(text)
 
-                        response = json.dumps(messages) if messages else None
-                        return response, attempt + 1
+                        if is_completely_empty_agent_response(messages):
+                            logging.warning(
+                                "HTTP 200 returned a completely empty agent "
+                                "response on attempt %d/%d for task %s",
+                                attempt + 1,
+                                MAX_RETRY_ATTEMPTS,
+                                taskId,
+                            )
+                        else:
+                            response = json.dumps(messages) if messages else None
+                            return response, attempt + 1
                     else:
                         error_text = await resp.text()
                         logging.error(
@@ -652,20 +665,65 @@ def get_enabled_servers() -> List[str]:
     mcp_server_url = os.getenv("MCP_SERVER_URL", "http://localhost:1984")
     # mcp_server_url = "http://localhost:1985"
 
+    attempts = max(1, int(os.getenv("MCP_ROUTE_PREFLIGHT_ATTEMPTS", "3")))
+    retry_delay = max(
+        0.0, float(os.getenv("MCP_ROUTE_PREFLIGHT_RETRY_DELAY", "1"))
+    )
+
     try:
-        response = requests.get(f"{mcp_server_url}/enabled-servers", timeout=10)
-        response.raise_for_status()
+        data = None
+        last_request_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.get(
+                    f"{mcp_server_url}/enabled-servers", timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+                offline = [
+                    name
+                    for name, status in data.get("servers", [])
+                    if status != "OK"
+                ]
+                if not offline or attempt == attempts:
+                    break
+                logging.warning(
+                    "MCP route preflight %d/%d has degraded servers: %s; "
+                    "retrying in %.1fs",
+                    attempt,
+                    attempts,
+                    ", ".join(sorted(offline)),
+                    retry_delay,
+                )
+            except requests.exceptions.RequestException as exc:
+                last_request_error = exc
+                if attempt == attempts:
+                    raise
+                logging.warning(
+                    "MCP route preflight %d/%d failed: %s; retrying in %.1fs",
+                    attempt,
+                    attempts,
+                    exc,
+                    retry_delay,
+                )
+            if retry_delay:
+                time.sleep(retry_delay)
 
-        data = response.json()
+        if data is None:
+            assert last_request_error is not None
+            raise last_request_error
 
-        # New format: servers is list of [name, status] tuples
-        if "servers" in data:
-            shared_enabled_servers = [
-                name for name, status in data["servers"] if status == "OK"
-            ]
-        # Old format: enabled_servers is list of names
-        else:
-            shared_enabled_servers = data.get("enabled_servers", [])
+        (
+            shared_enabled_servers,
+            reconnectable_servers,
+            shared_online_count,
+        ) = shared_routable_servers(data)
+        shared_configured_count = len(data.get("servers", shared_enabled_servers))
+        if reconnectable_servers:
+            logging.warning(
+                "Keeping transiently degraded but reconnectable MCP routes: %s",
+                ", ".join(reconnectable_servers),
+            )
 
         isolation_enabled = (
             os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
@@ -685,10 +743,13 @@ def get_enabled_servers() -> List[str]:
         )
 
         logging.info(
-            "Resolved %d enabled servers: %d shared-online, "
+            "Resolved %d enabled routes: %d shared-configured "
+            "(%d online, %d reconnectable), "
             "task_data=%s, task_mongo=%s",
             len(enabled_servers),
-            len(shared_enabled_servers),
+            shared_configured_count,
+            shared_online_count,
+            len(reconnectable_servers),
             task_data_configured,
             task_mongo_configured,
         )

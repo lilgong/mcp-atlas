@@ -26,7 +26,9 @@ SOURCE_FILES = (
     "src/agent_environment/main.py",
     "src/agent_environment/mcp_client.py",
     "src/agent_environment/mcp_router.py",
+    "src/agent_environment/oxylabs_mcp_compat.py",
     "src/agent_environment/mcp_server_template.json",
+    "filesystem_server_compat.mjs",
 )
 
 

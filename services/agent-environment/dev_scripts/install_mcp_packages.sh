@@ -30,21 +30,17 @@ npm install -g \
 
 echo "Installing UVX MCP server packages..."
 # Pre-install all UVX MCP server packages to eliminate download time during runtime
-uv tool install arxiv-mcp-server==0.2.11
-uv tool install mcp-server-calculator==0.2.0
-uv tool install cli-mcp-server==0.2.5
-uv tool install duckduckgo-mcp-server==0.1.1
-uv tool install mcp-server-fetch==2025.4.7
+uv tool install arxiv-mcp-server==0.2.11 --with mcp==1.28.1
+uv tool install mcp-server-calculator==0.2.0 --with mcp==1.28.1
+uv tool install cli-mcp-server==0.2.5 --with mcp==1.28.1
+uv tool install duckduckgo-mcp-server==0.1.1 --with mcp==1.28.1
+uv tool install mcp-server-fetch==2025.4.7 --with mcp==1.28.1
 # --with pins a transitive dep that would otherwise float: mcp-server-git is pinned
 # but its MCP SDK isn't, and 1.28 asks the client for "roots" on startup, which the
 # agent-environment client doesn't implement — the server then dies with -32603 and
 # every git task fails. 1.25 is the version the working image shipped.
 uv tool install mcp-server-git==2025.7.1 --with mcp==1.25.0
-uv tool install osm-mcp-server==0.1.1
-# Same here: oxylabs-mcp is pinned, oxylabs-ai-studio isn't, and 0.2.22 registers no
-# tools at all without an AI-Studio key — the server comes up "healthy" exposing
-# nothing, so calls fail with "Unknown tool". 0.2.20 is what the working image had.
-uv tool install oxylabs-mcp==0.4.1 --with oxylabs-ai-studio==0.2.20
-uv tool install mcp-server-twelve-data==0.2.5
+uv tool install osm-mcp-server==0.1.1 --with mcp==1.28.1
+uv tool install mcp-server-twelve-data==0.2.5 --with mcp==1.28.1
 
-echo "All UVX/NPX MCP packages installation complete. Ignored any that install from github!" 
+echo "All UVX/NPX MCP packages installation complete. Ignored any that install from github!"

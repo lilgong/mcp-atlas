@@ -18,7 +18,7 @@ becoming writable.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 
 KNOWN_SERVERS = (
@@ -231,3 +231,39 @@ def effective_enabled_servers(
         if task_mongo_configured:
             effective.add("mongodb")
     return sorted(effective)
+
+
+def shared_routable_servers(
+    health: Mapping[str, Any],
+) -> tuple[list[str], list[str], int]:
+    """Resolve shared routes without dropping transiently degraded servers.
+
+    A server with previously discovered tools remains routable even when its
+    latest call marked the connection unhealthy: the router retains those
+    routes and reconnects on the next call.  A server that has never exposed
+    any tools still fails closed.
+
+    Returns ``(routable, reconnectable, online_count)``.
+    """
+
+    if "servers" not in health:
+        enabled = sorted(set(health.get("enabled_servers", [])))
+        return enabled, [], len(enabled)
+
+    statuses = {
+        str(name): str(status)
+        for name, status in health.get("servers", [])
+    }
+    details = {
+        str(detail.get("name")): detail
+        for detail in health.get("details", [])
+        if isinstance(detail, Mapping) and detail.get("name")
+    }
+    online = {name for name, status in statuses.items() if status == "OK"}
+    reconnectable = {
+        name
+        for name, status in statuses.items()
+        if status != "OK"
+        and int(details.get(name, {}).get("tool_count") or 0) > 0
+    }
+    return sorted(online | reconnectable), sorted(reconnectable), len(online)

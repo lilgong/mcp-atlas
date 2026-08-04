@@ -10,6 +10,7 @@ from mcp_completion.tool_policy import (
     is_cloud_data_write,
     route_for_tool,
     server_for_tool,
+    shared_routable_servers,
 )
 
 
@@ -110,6 +111,33 @@ class ToolPolicyTests(unittest.TestCase):
             task_mongo_configured=False,
         )
         self.assertEqual(["airtable", "git"], enabled)
+
+    def test_transiently_degraded_discovered_server_remains_routable(self):
+        routable, reconnectable, online_count = shared_routable_servers(
+            {
+                "servers": [
+                    ["airtable", "OK"],
+                    ["oxylabs", "ERROR_NOT_ONLINE"],
+                    ["never-started", "ERROR_NOT_ONLINE"],
+                ],
+                "details": [
+                    {"name": "airtable", "tool_count": 5},
+                    {"name": "oxylabs", "tool_count": 4},
+                    {"name": "never-started", "tool_count": 0},
+                ],
+            }
+        )
+        self.assertEqual(["airtable", "oxylabs"], routable)
+        self.assertEqual(["oxylabs"], reconnectable)
+        self.assertEqual(1, online_count)
+
+    def test_old_health_format_remains_supported(self):
+        self.assertEqual(
+            (["airtable", "github"], [], 2),
+            shared_routable_servers(
+                {"enabled_servers": ["github", "airtable"]}
+            ),
+        )
 
 
 class RuntimeLogTests(unittest.TestCase):

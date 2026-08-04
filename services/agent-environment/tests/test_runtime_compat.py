@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agent_environment.oxylabs_mcp_compat import normalize_scraper_payload
+
+
+ROOT = Path(__file__).resolve().parents[3]
+AGENT_ROOT = ROOT / "services" / "agent-environment"
+
+
+def test_oxylabs_universal_payload_gets_required_source():
+    original = {"url": "https://example.com"}
+    assert normalize_scraper_payload(original) == {
+        "url": "https://example.com",
+        "source": "universal",
+    }
+    assert original == {"url": "https://example.com"}
+
+
+def test_oxylabs_search_and_explicit_source_are_unchanged():
+    search = {"query": "example", "url": "https://example.com"}
+    explicit = {"url": "https://example.com", "source": "custom"}
+    assert normalize_scraper_payload(search) is search
+    assert normalize_scraper_payload(explicit) is explicit
+
+
+def test_runtime_templates_use_guarded_compatibility_entrypoints():
+    shared = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    local = json.loads(
+        (
+            ROOT
+            / "services"
+            / "task-sandbox"
+            / "local_mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+
+    assert shared["oxylabs"]["args"] == [
+        "-m",
+        "agent_environment.oxylabs_mcp_compat",
+    ]
+    expected_filesystem = [
+        "/agent-environment/filesystem_server_compat.mjs",
+        "/data",
+    ]
+    assert shared["filesystem"]["args"] == expected_filesystem
+    assert local["filesystem"]["args"] == expected_filesystem
+
+
+def test_python_mcp_servers_pin_their_sdk():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    expected = {
+        "arxiv": "mcp==1.28.1",
+        "calculator": "mcp==1.28.1",
+        "cli-mcp-server": "mcp==1.28.1",
+        "ddg-search": "mcp==1.28.1",
+        "fetch": "mcp==1.28.1",
+        "git": "mcp==1.25.0",
+        "osm-mcp-server": "mcp==1.28.1",
+        "pubmed": "mcp==1.28.1",
+        "twelvedata": "mcp==1.28.1",
+        "weather-data": "mcp==1.28.1",
+        "wikipedia": "mcp==1.28.1",
+    }
+    for server, pin in expected.items():
+        args = servers[server]["args"]
+        assert args[:2] == ["--with", pin], server
+
+
+def test_git_backed_python_servers_pin_commits():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    for server in ("pubmed", "weather-data", "wikipedia"):
+        source = servers[server]["args"][
+            servers[server]["args"].index("--from") + 1
+        ]
+        revision = source.rpartition("@")[2]
+        assert len(revision) == 40
+        assert all(character in "0123456789abcdef" for character in revision)

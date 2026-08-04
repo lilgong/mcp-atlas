@@ -95,11 +95,18 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "server-brave-search/dist/index.js",
                 paths,
             )
+            self.assertIn("filesystem_server_compat.mjs", paths)
+            self.assertIn(
+                "src/agent_environment/oxylabs_mcp_compat.py",
+                paths,
+            )
             template = (
                 context
                 / "src/agent_environment/mcp_server_template.json"
             ).read_text(encoding="utf-8")
             self.assertIn("/opt/mcp-code-venv", template)
+            self.assertIn("filesystem_server_compat.mjs", template)
+            self.assertIn("oxylabs_mcp_compat", template)
             self.assertNotIn(
                 "/data/repos/mcp_code_executor_workspace/.venv",
                 template,

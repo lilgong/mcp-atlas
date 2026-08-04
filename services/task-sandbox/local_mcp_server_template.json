@@ -21,7 +21,7 @@
     "filesystem": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/agent-environment/filesystem_server_compat.mjs",
         "/data"
       ]
     },

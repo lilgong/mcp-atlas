@@ -22,6 +22,8 @@
     "arxiv": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "arxiv-mcp-server==0.2.11"
       ]
     },
@@ -37,12 +39,16 @@
     "calculator": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "mcp-server-calculator==0.2.0"
       ]
     },
     "cli-mcp-server": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "cli-mcp-server==0.2.5"
       ],
       "env": {
@@ -72,6 +78,8 @@
     "ddg-search": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "duckduckgo-mcp-server==0.1.1"
       ]
     },
@@ -102,19 +110,23 @@
     "fetch": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "mcp-server-fetch==2025.4.7"
       ]
     },
     "filesystem": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "@modelcontextprotocol/server-filesystem@2025.11.25",
+        "/agent-environment/filesystem_server_compat.mjs",
         "/data"
       ]
     },
     "git": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.25.0",
         "mcp-server-git==2025.7.1"
       ]
     },
@@ -227,12 +239,17 @@
     "osm-mcp-server": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "osm-mcp-server==0.1.1"
       ]
     },
     "oxylabs": {
-      "command": "/agent-environment/.venv/bin/oxylabs-mcp",
-      "args": [],
+      "command": "/agent-environment/.venv/bin/python",
+      "args": [
+        "-m",
+        "agent_environment.oxylabs_mcp_compat"
+      ],
       "env": {
         "OXYLABS_USERNAME": "${OXYLABS_USERNAME}",
         "OXYLABS_PASSWORD": "${OXYLABS_PASSWORD}",
@@ -242,8 +259,10 @@
     "pubmed": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "--from",
-        "git+https://github.com/geobio/PubMed-MCP-Server.git",
+        "git+https://github.com/geobio/PubMed-MCP-Server.git@e452cfc7d23cd4c0248c177d7814df3d9e82ea3b",
         "python",
         "-m",
         "pubmed_server"
@@ -264,6 +283,8 @@
     "twelvedata": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "mcp-server-twelve-data==0.2.5",
         "-k",
         "${TWELVE_DATA_API_KEY}"
@@ -279,8 +300,10 @@
     "weather-data": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "--from",
-        "git+https://github.com/geobio/weather-mcp-server",
+        "git+https://github.com/geobio/weather-mcp-server@70b6a7c8183c8a3acc175f786f4b7be9c2ba66e4",
         "weather-mcp-server"
       ],
       "env": {
@@ -296,6 +319,8 @@
     "wikipedia": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.28.1",
         "--from",
         "git+https://github.com/Rudra-ravi/wikipedia-mcp.git@735590286fbe91f705e97eba25f8272cafba5edb",
         "wikipedia-mcp"

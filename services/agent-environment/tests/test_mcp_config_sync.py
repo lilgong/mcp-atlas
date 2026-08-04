@@ -51,16 +51,28 @@ def extract_packages_from_config():
         command = server_config.get("command")
         if command in ["npx", "uvx"]:
             args = server_config.get("args", [])
-            if args:
-                # Get the first argument that looks like a package (skip -y flag)
-                package_arg = None
-                for arg in args:
-                    if not arg.startswith("-") and not arg.startswith("/"):
-                        package_arg = arg
-                        break
-
-                if package_arg:
-                    packages[command].append(package_arg)
+            package_arg = None
+            index = 0
+            while index < len(args):
+                arg = args[index]
+                if arg == "--with":
+                    index += 2
+                    continue
+                if arg == "--from" and index + 1 < len(args):
+                    package_arg = args[index + 1]
+                    break
+                if arg.startswith("-"):
+                    index += 1
+                    continue
+                # An absolute executable path (for example the vendored Slack
+                # entrypoint) is not an npm package. Do not scan its later
+                # positional arguments and mistake ``stdio`` for a package.
+                if arg.startswith("/"):
+                    break
+                package_arg = arg
+                break
+            if package_arg:
+                packages[command].append(package_arg)
 
     return packages
 
