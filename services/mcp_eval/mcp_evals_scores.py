@@ -52,6 +52,10 @@ os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 os.environ["NO_PROXY"] = "*"
 
+# Per-request wall clock for a single claim judgement. litellm's default is
+# 6000s, which turns one upstream stall into an hour of held concurrency.
+EVAL_REQUEST_TIMEOUT = float(os.getenv("EVAL_REQUEST_TIMEOUT", "120"))
+
 # =========================================================================
 # 1. CONFIGURATION AND SETUP
 # =========================================================================
@@ -391,8 +395,11 @@ class AsyncLiteLLMClient(AsyncLLMClient):
         task_id = context.get("task_id", "unknown")
         claim_index = context.get("claim_index", "unknown")
         claim_count = context.get("claim_count", "unknown")
-        async with self.semaphore:
-            try:
+        try:
+            # The semaphore covers the HTTP request only. Holding it across the
+            # rate-limit sleep and JSON parsing meant a stalled request starved
+            # the slots every other queued claim was waiting on.
+            async with self.semaphore:
                 self.request_count += 1
 
                 # LiteLLM uses OpenAI-compatible format
@@ -415,55 +422,63 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                         if hasattr(litellm, "api_base") and litellm.api_base
                         else None
                     ),
+                    # Judging one claim is a small, fast call. Without this it
+                    # inherits litellm's 6000s default, so an upstream stall
+                    # blocks a slot for over an hour.
+                    timeout=EVAL_REQUEST_TIMEOUT,
+                    # The OpenAI SDK retries twice on its own, which multiplies
+                    # with the tenacity retry above (6 x 3 = 18 requests). Keep
+                    # retries in one place so the total is predictable.
+                    max_retries=0,
                 )
 
-                # Rate limiting delay
-                await asyncio.sleep(self.config.request_delay)
+            # Rate limiting delay
+            await asyncio.sleep(self.config.request_delay)
 
-                # Parse JSON response. Keep diagnostics metadata-only: no prompt, claim, response, or key.
-                choice = response.choices[0] if response.choices else None
-                message = getattr(choice, "message", None) if choice else None
-                content = getattr(message, "content", None) if message else None
-                finish_reason = getattr(choice, "finish_reason", None) if choice else None
-                content_len = len(content) if isinstance(content, str) else 0
-                try:
-                    parsed_content = json.loads(content or "")
-                except json.JSONDecodeError as e:
-                    self.logger.error(
-                        "LiteLLM JSON parse failed: "
-                        f"task_id={task_id} claim={claim_index}/{claim_count} "
-                        f"model={self.config.evaluator_model} content_len={content_len} "
-                        f"finish_reason={finish_reason} error={e}"
-                    )
-                    raise
-
-                # 统计token使用
-                token_usage = {
-                    "model": self.config.evaluator_model,
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "prompt": prompt,
-                    "answer": content,
-                }
-                os.makedirs(os.path.dirname(TOKEN_LOG_PATH) or ".", exist_ok=True)
-                with open(TOKEN_LOG_PATH, 'a+', encoding="utf-8") as log_out:
-                    log_out.write(json.dumps(token_usage, ensure_ascii=False) + "\n")
-
-                return parsed_content
-
-            except json.JSONDecodeError:
-                self.error_count += 1
-                raise
-            except Exception as e:
-                self.error_count += 1
+            # Parse JSON response. Keep diagnostics metadata-only: no prompt, claim, response, or key.
+            choice = response.choices[0] if response.choices else None
+            message = getattr(choice, "message", None) if choice else None
+            content = getattr(message, "content", None) if message else None
+            finish_reason = getattr(choice, "finish_reason", None) if choice else None
+            content_len = len(content) if isinstance(content, str) else 0
+            try:
+                parsed_content = json.loads(content or "")
+            except json.JSONDecodeError as e:
                 self.logger.error(
-                    "LiteLLM request failed: "
+                    "LiteLLM JSON parse failed: "
                     f"task_id={task_id} claim={claim_index}/{claim_count} "
-                    f"model={self.config.evaluator_model} "
-                    f"error_type={type(e).__name__} error={e}"
+                    f"model={self.config.evaluator_model} content_len={content_len} "
+                    f"finish_reason={finish_reason} error={e}"
                 )
                 raise
+
+            # 统计token使用
+            token_usage = {
+                "model": self.config.evaluator_model,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+                "prompt": prompt,
+                "answer": content,
+            }
+            os.makedirs(os.path.dirname(TOKEN_LOG_PATH) or ".", exist_ok=True)
+            with open(TOKEN_LOG_PATH, 'a+', encoding="utf-8") as log_out:
+                log_out.write(json.dumps(token_usage, ensure_ascii=False) + "\n")
+
+            return parsed_content
+
+        except json.JSONDecodeError:
+            self.error_count += 1
+            raise
+        except Exception as e:
+            self.error_count += 1
+            self.logger.error(
+                "LiteLLM request failed: "
+                f"task_id={task_id} claim={claim_index}/{claim_count} "
+                f"model={self.config.evaluator_model} "
+                f"error_type={type(e).__name__} error={e}"
+            )
+            raise
 
     def get_stats(self) -> Dict[str, int]:
         """Get request statistics"""
