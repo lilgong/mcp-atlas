@@ -68,6 +68,15 @@ SERVER_URL = os.getenv("SERVER_URL", "http://localhost:3000")
 # Retry configuration
 MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "20"))
 
+# A long-context task can legitimately run for most of an hour; the timeout is
+# only meant to catch a genuinely wedged request.
+REQUEST_TIMEOUT = float(os.getenv("TASK_REQUEST_TIMEOUT", "3600"))
+
+# Timeouts are deterministic, not flaky: an identical retry re-runs the same
+# turns and blows the same budget. Cap them well below MAX_RETRY_ATTEMPTS so a
+# single slow task cannot hold the run hostage for hours.
+MAX_TIMEOUT_ATTEMPTS = int(os.getenv("MAX_TIMEOUT_ATTEMPTS", "2"))
+
 
 def get_retry_delay(attempt: int) -> float:
     """Calculate exponential backoff delay with jitter. Base: 5s, 10s, 20s..."""
@@ -266,10 +275,11 @@ class AsyncMCPTrajectoryGenerator:
 
         url = f"{SERVER_URL}/v2/mcp_eval/run_agent"
 
+        timeouts = 0
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
                 async with self.session.post(
-                    url, json=payload, headers=headers, timeout=1800
+                    url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
                 ) as resp:
                     if resp.status == 200:
                         try:
@@ -296,9 +306,26 @@ class AsyncMCPTrajectoryGenerator:
                         )
 
             except Exception as e:
+                # asyncio.TimeoutError stringifies to "", so name the type too.
                 logging.error(
-                    f"Error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for task {taskId}: {e}"
+                    "Error on attempt %d/%d for task %s: %s: %s",
+                    attempt + 1,
+                    MAX_RETRY_ATTEMPTS,
+                    taskId,
+                    type(e).__name__,
+                    e or "<no detail>",
                 )
+                if isinstance(e, asyncio.TimeoutError):
+                    timeouts += 1
+                    if timeouts >= MAX_TIMEOUT_ATTEMPTS:
+                        logging.error(
+                            "Giving up on task %s after %d timeouts at %.0fs; "
+                            "retrying would re-run the same turns",
+                            taskId,
+                            timeouts,
+                            REQUEST_TIMEOUT,
+                        )
+                        return None, attempt + 1
 
             if attempt < MAX_RETRY_ATTEMPTS - 1:
                 delay = get_retry_delay(attempt)

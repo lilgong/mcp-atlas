@@ -12,6 +12,7 @@ import socket
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -168,6 +169,35 @@ class ManagedContainer:
     url: Optional[str] = None
 
 
+# Names of docker resources this process still owns. A sandbox claims a name
+# before `docker run` and releases it only once close() has finished, so the
+# periodic reaper can tell "in use" from "orphaned" without guessing.
+_LIVE_SANDBOX_NAMES: set[str] = set()
+
+
+def _claim_sandbox_name(name: str) -> None:
+    _LIVE_SANDBOX_NAMES.add(name)
+
+
+def _release_sandbox_names(names: Iterable[str]) -> None:
+    _LIVE_SANDBOX_NAMES.difference_update(names)
+
+
+def _parse_docker_timestamp(value: str) -> Optional[float]:
+    """Parse a docker RFC3339 timestamp into an epoch value.
+
+    Docker emits nanosecond precision, which datetime.fromisoformat rejects,
+    so the fraction is clipped to microseconds first. Unparseable input yields
+    None and callers treat that as "age unknown" (never reaped).
+    """
+    text = value.strip().replace("Z", "+00:00")
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
 @dataclass
 class TaskSandbox:
     task_id: str
@@ -188,8 +218,20 @@ class TaskSandbox:
     task_workspace: Optional[Path] = None
     git_repositories: list[str] = field(default_factory=list)
     containers: list[ManagedContainer] = field(default_factory=list)
+    owned_names: set[str] = field(default_factory=set)
     _started_at: float = field(default_factory=time.monotonic)
     _closed: bool = False
+
+    def _claim_name(self, name: str) -> str:
+        """Register a docker resource name before the resource exists.
+
+        Claiming up front means a container orphaned by a crash between
+        `docker run` and bookkeeping is still shielded from the reaper until
+        this sandbox closes, at which point it becomes reapable.
+        """
+        self.owned_names.add(name)
+        _claim_sandbox_name(name)
+        return name
 
     @classmethod
     def from_servers(
@@ -332,7 +374,7 @@ class TaskSandbox:
         )
 
     async def _create_mongo_socket_volume(self) -> None:
-        self.mongo_socket_volume = (
+        self.mongo_socket_volume = self._claim_name(
             f"mcp-atlas-mongo-socket-{_safe_fragment(self.task_id, 20)}-"
             f"{uuid.uuid4().hex[:10]}"
         )
@@ -373,7 +415,7 @@ class TaskSandbox:
         )
 
     async def _start_mongo(self) -> None:
-        name = (
+        name = self._claim_name(
             f"mcp-atlas-mongo-{_safe_fragment(self.task_id, 20)}-"
             f"{uuid.uuid4().hex[:10]}"
         )
@@ -509,7 +551,7 @@ class TaskSandbox:
         extra_env: dict[str, str],
     ) -> None:
         servers = tuple(sorted(set(enabled_servers)))
-        name = (
+        name = self._claim_name(
             f"mcp-atlas-{kind}-{_safe_fragment(self.task_id, 20)}-"
             f"{uuid.uuid4().hex[:10]}"
         )
@@ -725,6 +767,14 @@ class TaskSandbox:
         if self._closed:
             return
         self._closed = True
+        try:
+            await self._close_resources()
+        finally:
+            # Released last: anything this sandbox created but failed to remove
+            # is now fair game for the periodic reaper.
+            _release_sandbox_names(self.owned_names)
+
+    async def _close_resources(self) -> None:
         for container in reversed(self.containers):
             await self._capture_logs(container)
             _, stderr, code = await _run(
@@ -870,3 +920,103 @@ async def reap_owned_task_sandboxes() -> None:
         containers_removed=len(containers),
         volumes_removed=len(volumes),
     )
+
+
+async def _stale_named_resources(
+    list_args: tuple[str, ...],
+    inspect_args: tuple[str, ...],
+    *,
+    min_age_seconds: float,
+    now: Optional[float] = None,
+) -> list[str]:
+    """Return owned-label resources that are untracked and old enough to reap.
+
+    Two independent guards must both agree before a name is returned: it is
+    absent from the in-process registry, and docker reports it as older than
+    `min_age_seconds`. A resource whose creation time cannot be read is left
+    alone.
+    """
+    stdout, _, _ = await _run(*list_args, timeout=30, check=False)
+    names = [line.strip() for line in stdout.splitlines() if line.strip()]
+    candidates = [name for name in names if name not in _LIVE_SANDBOX_NAMES]
+    if not candidates:
+        return []
+
+    stdout, _, code = await _run(
+        *inspect_args, *candidates, timeout=30, check=False
+    )
+    if code != 0:
+        return []
+
+    cutoff = (time.time() if now is None else now) - min_age_seconds
+    stale: list[str] = []
+    for line in stdout.splitlines():
+        name, _, created = line.strip().partition("\t")
+        name = name.lstrip("/")
+        if not name or name in _LIVE_SANDBOX_NAMES:
+            continue
+        created_at = _parse_docker_timestamp(created)
+        if created_at is not None and created_at <= cutoff:
+            stale.append(name)
+    return stale
+
+
+async def reap_orphan_task_sandboxes(min_age_seconds: float) -> dict[str, int]:
+    """Reclaim sandbox resources this process created but no longer tracks.
+
+    Covers the leaks that startup reaping cannot: a sandbox whose teardown was
+    interrupted mid-run leaves containers holding memory and CPU for as long as
+    the service stays up.
+    """
+    owner = _owner_label()
+    label_filters = (
+        "--filter",
+        "label=mcp-atlas.task-sandbox=true",
+        "--filter",
+        f"label=mcp-atlas.owner={owner}",
+    )
+
+    containers = await _stale_named_resources(
+        ("docker", "ps", "-a", "--format", "{{.Names}}", *label_filters),
+        ("docker", "inspect", "--format", "{{.Name}}\t{{.Created}}"),
+        min_age_seconds=min_age_seconds,
+    )
+    for name in containers:
+        await _run("docker", "rm", "-f", "-v", name, timeout=30, check=False)
+
+    volumes = await _stale_named_resources(
+        ("docker", "volume", "ls", "-q", *label_filters),
+        ("docker", "volume", "inspect", "--format", "{{.Name}}\t{{.CreatedAt}}"),
+        min_age_seconds=min_age_seconds,
+    )
+    for name in volumes:
+        await _run("docker", "volume", "rm", "-f", name, timeout=30, check=False)
+
+    if containers or volumes:
+        write_runtime_event(
+            "sandbox",
+            "orphan_sweep_reclaimed",
+            owner=owner,
+            min_age_seconds=min_age_seconds,
+            containers=containers,
+            volumes=volumes,
+        )
+    return {"containers": len(containers), "volumes": len(volumes)}
+
+
+async def run_orphan_sweeper(
+    *, interval_seconds: float, min_age_seconds: float
+) -> None:
+    """Sweep for orphaned sandbox resources until cancelled."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await reap_orphan_task_sandboxes(min_age_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # sweeping must never kill the service
+            write_runtime_event(
+                "sandbox",
+                "orphan_sweep_failed",
+                error=str(exc),
+            )

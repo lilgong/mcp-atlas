@@ -1,10 +1,11 @@
 """Main FastAPI application for MCP eval."""
 
+import asyncio
 import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Dict, List, Optional
 
 import uvicorn
@@ -15,7 +16,11 @@ from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
 from .runtime_log import write_runtime_event
-from .task_sandbox import DEFAULT_RUNTIME_IMAGE, reap_owned_task_sandboxes
+from .task_sandbox import (
+    DEFAULT_RUNTIME_IMAGE,
+    reap_owned_task_sandboxes,
+    run_orphan_sweeper,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -29,8 +34,19 @@ async def lifespan(_app: FastAPI):
         os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
         not in {"0", "false", "no"}
     )
+    sweeper: Optional[asyncio.Task] = None
     if isolation_enabled:
         await reap_owned_task_sandboxes()
+        sweeper = asyncio.create_task(
+            run_orphan_sweeper(
+                interval_seconds=float(
+                    os.getenv("MCP_SANDBOX_SWEEP_INTERVAL", "300")
+                ),
+                min_age_seconds=float(
+                    os.getenv("MCP_SANDBOX_ORPHAN_MAX_AGE", "1800")
+                ),
+            )
+        )
     write_runtime_event(
         "service",
         "completion_service_started",
@@ -45,6 +61,10 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if sweeper is not None:
+            sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
         write_runtime_event(
             "service",
             "completion_service_stopped",

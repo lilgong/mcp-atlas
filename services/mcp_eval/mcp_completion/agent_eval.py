@@ -2,8 +2,9 @@
 
 import json
 import logging
+import os
 import uuid
-from typing import AsyncGenerator, Dict, List, Union, Any, Optional
+from typing import AsyncGenerator, Dict, List, Union, Any, Optional, Tuple
 
 from .mcp_client import IsolatedMCPClient, MCPClient
 from .llm import create_completion, _transform_tool_calls
@@ -22,8 +23,60 @@ from .schema import (
 )
 from .errors import MCPClientToolExecutionError
 from .config import config
+from .runtime_log import write_runtime_event
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_result_char_limit() -> int:
+    """Per-tool-call character budget; 0 or less disables clamping."""
+    return int(os.getenv("MAX_TOOL_RESULT_CHARS", "120000"))
+
+
+_TRUNCATION_NOTE = (
+    "\n\n[Tool result truncated: {kept} of {total} characters shown. Narrow the "
+    "query with a filter, a smaller page size, or a more specific search term "
+    "to see the rest.]"
+)
+
+
+def _clamp_tool_result(
+    content: List[Content], limit: int
+) -> Tuple[List[Content], int]:
+    """Clip a tool result so a single call cannot swamp the context window.
+
+    An unbounded result (an unfiltered search can return hundreds of KB) is
+    re-sent on every subsequent turn, which is what pushes a task past the
+    caller's request timeout. Returns the clamped content and how many
+    characters were dropped.
+    """
+    if limit <= 0:
+        return content, 0
+
+    total = sum(
+        len(part.text) for part in content if isinstance(part, TextContent)
+    )
+    if total <= limit:
+        return content, 0
+
+    clamped: List[Content] = []
+    budget = limit
+    for part in content:
+        if not isinstance(part, TextContent):
+            clamped.append(part)
+            continue
+        if budget <= 0:
+            continue
+        clamped.append(TextContent(type="text", text=part.text[:budget]))
+        budget -= min(budget, len(part.text))
+
+    clamped.append(
+        TextContent(
+            type="text",
+            text=_TRUNCATION_NOTE.format(kept=limit, total=total),
+        )
+    )
+    return clamped, total - limit
 
 
 class AgentOutput:
@@ -91,10 +144,23 @@ async def run_mcp_eval(
                         args,
                     )
 
+                    content, dropped = _clamp_tool_result(
+                        response.content, _tool_result_char_limit()
+                    )
+                    if dropped:
+                        write_runtime_event(
+                            "tools",
+                            "tool_result_truncated",
+                            task_id=task_id,
+                            turn=i + 1,
+                            tool=tool_call.function["name"],
+                            dropped_chars=dropped,
+                        )
+
                     # Create tool call message
                     tool_call_message = ToolCallOutputMessage(
                         role="tool",
-                        content=response.content,
+                        content=content,
                         tool_call_id=tool_call.id,
                     )
 

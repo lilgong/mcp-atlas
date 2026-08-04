@@ -167,7 +167,15 @@ class IsolatedMCPClient(MCPClient):
             )
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
-        await self.close()
+        # A cancelled request (client hang-up, timeout) would otherwise abort
+        # teardown at its first await and orphan the sandbox containers, so let
+        # the shielded cleanup finish even while the cancellation propagates.
+        cleanup = asyncio.ensure_future(self.close())
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await asyncio.wait({cleanup})
+            raise
 
     async def close(self) -> None:
         try:
