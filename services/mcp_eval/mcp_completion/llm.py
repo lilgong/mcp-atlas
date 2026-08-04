@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import os
 import datetime
 import time
@@ -50,6 +50,29 @@ class LLMResponse(BaseModel):
 
     message: AssistantMessage
     original_content: Optional[str] = None
+    dropped_tool_calls: int = 0
+
+
+def _sanitize_tool_calls(
+    raw_calls: List[Dict[str, Any]],
+) -> Tuple[Optional[List[Dict[str, Any]]], int]:
+    """Drop tool calls the schema cannot represent, and count them.
+
+    Some providers emit a call whose function.name is null. ToolCall requires
+    Dict[str, str], so one such call used to raise out of the whole turn and
+    fail the task - and since the model reproduces it deterministically, the
+    caller then paid for a full rerun that hit the same defect again.
+    """
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    for call in raw_calls:
+        function = call.get("function") or {}
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            kept.append(call)
+        else:
+            dropped += 1
+    return (kept or None), dropped
 
 
 def configure_litellm():
@@ -176,6 +199,7 @@ async def create_completion(
         # Convert response back to our format
         # Handle tool_calls conversion from OpenAI format to our format
         tool_calls = None
+        dropped_tool_calls = 0
         if isinstance(response, dict):  # 盘古接口返回的是dict格式
             # 对于盘古思考过程调用工具提前终止的行为做预处理
 
@@ -206,6 +230,20 @@ async def create_completion(
                             },
                         }
                     )
+
+        if tool_calls:
+            tool_calls, dropped_tool_calls = _sanitize_tool_calls(tool_calls)
+            if dropped_tool_calls:
+                write_runtime_event(
+                    "model_calls",
+                    "malformed_tool_calls_dropped",
+                    task_id=task_id,
+                    turn=turn,
+                    call_id=call_id,
+                    model=proxy_model,
+                    dropped=dropped_tool_calls,
+                    kept=len(tool_calls or []),
+                )
 
         # 获取助手轮次思考过程
         if isinstance(response, dict):  # 盘古接口返回的是dict格式
@@ -265,7 +303,9 @@ async def create_completion(
                     original_message=response.choices[0].message,
                 )
 
-        return LLMResponse(message=assistant_message)
+        return LLMResponse(
+            message=assistant_message, dropped_tool_calls=dropped_tool_calls
+        )
 
     except Exception as error:
         logger.error(f"LiteLLM completion failed: {error}")

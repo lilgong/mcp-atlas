@@ -139,15 +139,16 @@ class SandboxNameLifecycleTests(unittest.IsolatedAsyncioTestCase):
             task_sandbox._LIVE_SANDBOX_NAMES,
         )
 
-    async def test_close_releases_names_even_when_teardown_fails(self):
+    async def test_close_absorbs_teardown_failure_and_releases_names(self):
         sandbox = self._sandbox()
         name = sandbox._claim_name("mcp-atlas-local-syn-lifecycle-ffffffffff")
 
         with patch.object(
             sandbox, "_close_resources", AsyncMock(side_effect=RuntimeError("boom"))
-        ):
-            with self.assertRaises(RuntimeError):
-                await sandbox.close()
+        ), patch.object(task_sandbox, "write_runtime_event"):
+            # Must not raise: the task's answer is already complete by now, and
+            # surfacing this would make the caller rerun a finished task.
+            await sandbox.close()
 
         # Released regardless, so the sweeper can reclaim what teardown missed.
         self.assertNotIn(name, task_sandbox._LIVE_SANDBOX_NAMES)

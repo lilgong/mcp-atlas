@@ -55,6 +55,11 @@ def _call_budget(turn_budget: int, calls_left: int, per_call: int) -> int:
     return share if per_call <= 0 else min(per_call, share)
 
 
+# A model that emits malformed calls tends to keep doing it, so bound the
+# corrective retries instead of burning the whole turn budget on them.
+_MAX_MALFORMED_TURNS = int(os.getenv("MAX_MALFORMED_TOOL_CALL_TURNS", "2"))
+
+
 _TRUNCATION_NOTE = (
     "\n\n[Tool result truncated: {kept} of {total} characters shown. Narrow the "
     "query with a filter, a smaller page size, or a more specific search term "
@@ -121,6 +126,7 @@ async def run_mcp_eval(
     transformed_tools = _transform_tool_calls([tool.model_dump() for tool in tools])
 
     all_messages: List[Message] = list(messages)
+    malformed_turns = 0
 
     for i in range(max_turns):
         assistant_message = None
@@ -152,6 +158,7 @@ async def run_mcp_eval(
         tool_calls = assistant_message.tool_calls or []
 
         if tool_calls:
+            malformed_turns = 0
             per_call_limit = _tool_result_char_limit()
             turn_budget = _turn_result_char_limit()
 
@@ -215,6 +222,31 @@ async def run_mcp_eval(
                     )
                     all_messages.append(tool_call_message)
                     yield AgentOutput("message", tool_call_message.model_dump())
+        elif result.dropped_tool_calls:
+            # Every tool call this turn was malformed (a null function.name).
+            # Treat it like a failed tool call: tell the model what went wrong
+            # and let it retry, rather than ending the task as if it were done.
+            malformed_turns += 1
+            if malformed_turns > _MAX_MALFORMED_TURNS:
+                write_runtime_event(
+                    "model_calls",
+                    "malformed_tool_calls_gave_up",
+                    task_id=task_id,
+                    turn=i + 1,
+                    consecutive_turns=malformed_turns,
+                )
+                break
+            retry_message = UserMessage(
+                role="user",
+                content=(
+                    f"{result.dropped_tool_calls} tool call(s) were rejected "
+                    "because the function name was missing. Reissue them with a "
+                    "valid tool name from the provided list, or answer directly "
+                    "if no tool is needed."
+                ),
+            )
+            all_messages.append(retry_message)
+            yield AgentOutput("message", retry_message.model_dump())
         else:
             # No more tool calls, agent is done
             break

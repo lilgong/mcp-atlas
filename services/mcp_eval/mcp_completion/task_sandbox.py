@@ -183,6 +183,15 @@ def _release_sandbox_names(names: Iterable[str]) -> None:
     _LIVE_SANDBOX_NAMES.difference_update(names)
 
 
+def _teardown_timeout() -> float:
+    """Seconds to wait on a single teardown docker command.
+
+    20s was too tight: with 30 tasks concurrently creating and removing
+    containers, the docker daemon queues and `docker rm` overruns it.
+    """
+    return float(os.getenv("MCP_SANDBOX_TEARDOWN_TIMEOUT", "90"))
+
+
 def _parse_docker_timestamp(value: str) -> Optional[float]:
     """Parse a docker RFC3339 timestamp into an epoch value.
 
@@ -769,52 +778,80 @@ class TaskSandbox:
         self._closed = True
         try:
             await self._close_resources()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Teardown runs after the task's answer is already complete. A
+            # docker hiccup here must never be reported as task failure, or the
+            # caller reruns a finished task and pays for the tokens again.
+            write_runtime_event(
+                "sandbox",
+                "task_sandbox_close_failed",
+                task_id=self.task_id,
+                error=str(exc),
+            )
         finally:
             # Released last: anything this sandbox created but failed to remove
             # is now fair game for the periodic reaper.
             _release_sandbox_names(self.owned_names)
 
+    async def _remove_resource(self, *args: str, event: str, **fields) -> None:
+        """Remove one docker resource, absorbing any failure.
+
+        Under load `docker rm` can exceed its timeout, which _run raises on.
+        Whatever survives is left to the orphan sweeper rather than aborting
+        the rest of the teardown.
+        """
+        try:
+            _, stderr, code = await _run(
+                *args, timeout=_teardown_timeout(), check=False
+            )
+            ok, error = code == 0, (stderr if code else None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            ok, error = False, str(exc)
+
+        write_runtime_event(
+            "sandbox", event, task_id=self.task_id, ok=ok, error=error, **fields
+        )
+
     async def _close_resources(self) -> None:
         for container in reversed(self.containers):
-            await self._capture_logs(container)
-            _, stderr, code = await _run(
+            try:
+                await self._capture_logs(container)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                write_runtime_event(
+                    "sandbox",
+                    "container_log_capture_failed",
+                    task_id=self.task_id,
+                    container=container.name,
+                    error=str(exc),
+                )
+            await self._remove_resource(
                 "docker",
                 "rm",
                 "-f",
                 "-v",
                 container.name,
-                timeout=20,
-                check=False,
-            )
-            write_runtime_event(
-                "sandbox",
-                "task_container_stopped",
-                task_id=self.task_id,
+                event="task_container_stopped",
                 kind=container.kind,
                 container=container.name,
-                ok=code == 0,
-                error=stderr if code else None,
             )
         self.containers.clear()
 
         if self.mongo_socket_volume:
             volume = self.mongo_socket_volume
-            _, stderr, code = await _run(
+            await self._remove_resource(
                 "docker",
                 "volume",
                 "rm",
                 "-f",
                 volume,
-                timeout=20,
-                check=False,
-            )
-            write_runtime_event(
-                "sandbox",
-                "task_mongo_socket_volume_removed",
-                task_id=self.task_id,
+                event="task_mongo_socket_volume_removed",
                 volume=volume,
-                ok=code == 0,
-                error=stderr if code else None,
             )
             self.mongo_socket_volume = None
 
