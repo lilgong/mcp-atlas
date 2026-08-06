@@ -143,8 +143,8 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
         {"libraryName": "react"},
     ),
     "ddg-search": (
-        "ddg-search_search",
-        {"query": "python programming"},
+        "ddg-search_fetch_content",
+        {"url": "https://example.com"},
     ),
     "desktop-commander": (
         "desktop-commander_list_directory",
@@ -168,7 +168,7 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
     ),
     "met-museum": (
         "met-museum_get-museum-object",
-        {"objectId": 32907},
+        {"objectId": 435852, "returnImage": False},
     ),
     "mcp-code-executor": (
         "mcp-code-executor_execute_code",
@@ -176,15 +176,23 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
     ),
     "mcp-server-code-runner": (
         "mcp-server-code-runner_run-code",
-        {"languageId": "python", "code": "print(1 + 1)"},
+        {
+            "languageId": "python",
+            "code": "from statistics import mean; print(mean([1, 2, 3]))",
+        },
     ),
     "open-library": (
         "open-library_get_book_by_title",
         {"title": "Dune"},
     ),
     "osm-mcp-server": (
-        "osm-mcp-server_geocode_address",
-        {"address": "New York City"},
+        "osm-mcp-server_find_nearby_places",
+        {
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+            "radius": 100,
+            "limit": 1,
+        },
     ),
     "pubmed": (
         "pubmed_search_pubmed_key_words",
@@ -319,6 +327,21 @@ async def run_test(
                             if isinstance(text, str) and text.startswith("Error:"):
                                 ok = False
                                 break
+                if ok and server == "wikipedia":
+                    candidates = data if isinstance(data, list) else [data]
+                    decoded = None
+                    for item in candidates:
+                        if isinstance(item, dict) and isinstance(item.get("text"), str):
+                            try:
+                                decoded = json.loads(item["text"])
+                            except json.JSONDecodeError:
+                                continue
+                        elif isinstance(item, dict) and "results" in item:
+                            decoded = item
+                        if isinstance(decoded, dict):
+                            break
+                    if not isinstance(decoded, dict) or not decoded.get("results"):
+                        ok = False
             except Exception:
                 pass
 

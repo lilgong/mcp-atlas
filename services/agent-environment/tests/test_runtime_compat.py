@@ -48,6 +48,11 @@ def test_runtime_templates_use_guarded_compatibility_entrypoints():
         "-m",
         "agent_environment.oxylabs_mcp_compat",
     ]
+    assert shared["ddg-search"]["args"][-1].endswith("ddg_mcp_compat.py")
+    assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
+    assert shared["met-museum"]["args"] == [
+        "/agent-environment/metmuseum_mcp_compat.mjs",
+    ]
     expected_filesystem = [
         "/agent-environment/filesystem_server_compat.mjs",
         "/data",
@@ -96,7 +101,8 @@ def test_python_mcp_servers_pin_their_sdk():
     }
     for server, pin in expected.items():
         args = servers[server]["args"]
-        assert args[:2] == ["--with", pin], server
+        index = args.index("--with")
+        assert args[index + 1] == pin, server
 
 
 def test_git_backed_python_servers_pin_commits():
@@ -108,10 +114,24 @@ def test_git_backed_python_servers_pin_commits():
             / "mcp_server_template.json"
         ).read_text(encoding="utf-8")
     )["mcpServers"]
-    for server in ("pubmed", "weather-data", "wikipedia"):
+    for server in ("pubmed", "weather-data"):
         source = servers[server]["args"][
             servers[server]["args"].index("--from") + 1
         ]
         revision = source.rpartition("@")[2]
         assert len(revision) == 40
         assert all(character in "0123456789abcdef" for character in revision)
+
+
+def test_wikipedia_uses_user_agent_fixed_release():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    args = servers["wikipedia"]["args"]
+    assert "wikipedia-mcp==2.0.1" in args
+    assert not any("735590286fbe" in arg for arg in args)

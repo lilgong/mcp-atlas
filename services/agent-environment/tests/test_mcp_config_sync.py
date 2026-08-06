@@ -49,7 +49,16 @@ def extract_packages_from_config():
 
     for server_name, server_config in config["mcpServers"].items():
         command = server_config.get("command")
-        if command in ["npx", "uvx"]:
+        if command == "uv":
+            args = server_config.get("args", [])
+            for index, arg in enumerate(args[:-1]):
+                if arg != "--with":
+                    continue
+                package = args[index + 1]
+                if package.startswith("mcp=="):
+                    continue
+                packages["uvx"].append(package)
+        elif command in ["npx", "uvx"]:
             args = server_config.get("args", [])
             package_arg = None
             index = 0

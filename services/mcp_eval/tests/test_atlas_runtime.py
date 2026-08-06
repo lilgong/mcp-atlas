@@ -100,6 +100,15 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "src/agent_environment/oxylabs_mcp_compat.py",
                 paths,
             )
+            self.assertIn(
+                "src/agent_environment/ddg_mcp_compat.py",
+                paths,
+            )
+            self.assertIn(
+                "src/agent_environment/osm_mcp_compat.py",
+                paths,
+            )
+            self.assertIn("metmuseum_mcp_compat.mjs", paths)
             template = (
                 context
                 / "src/agent_environment/mcp_server_template.json"
@@ -107,6 +116,9 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/opt/mcp-code-venv", template)
             self.assertIn("filesystem_server_compat.mjs", template)
             self.assertIn("oxylabs_mcp_compat", template)
+            self.assertIn("ddg_mcp_compat", template)
+            self.assertIn("osm_mcp_compat", template)
+            self.assertIn("metmuseum_mcp_compat", template)
             self.assertNotIn(
                 "/data/repos/mcp_code_executor_workspace/.venv",
                 template,

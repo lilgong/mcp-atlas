@@ -80,11 +80,18 @@
       }
     },
     "ddg-search": {
-      "command": "uvx",
+      "command": "uv",
       "args": [
+        "run",
+        "--python",
+        "3.12",
+        "--no-project",
         "--with",
         "mcp==1.28.1",
-        "duckduckgo-mcp-server==0.1.1"
+        "--with",
+        "duckduckgo-mcp-server==0.1.1",
+        "python",
+        "/agent-environment/src/agent_environment/ddg_mcp_compat.py"
       ]
     },
     "desktop-commander": {
@@ -201,9 +208,9 @@
       }
     },
     "met-museum": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "metmuseum-mcp@0.9.2"
+        "/agent-environment/metmuseum_mcp_compat.mjs"
       ]
     },
     "mongodb": {
@@ -241,11 +248,18 @@
       ]
     },
     "osm-mcp-server": {
-      "command": "uvx",
+      "command": "uv",
       "args": [
+        "run",
+        "--python",
+        "3.13",
+        "--no-project",
         "--with",
         "mcp==1.28.1",
-        "osm-mcp-server==0.1.1"
+        "--with",
+        "osm-mcp-server==0.1.1",
+        "python",
+        "/agent-environment/src/agent_environment/osm_mcp_compat.py"
       ]
     },
     "oxylabs": {
@@ -325,9 +339,7 @@
       "args": [
         "--with",
         "mcp==1.28.1",
-        "--from",
-        "git+https://github.com/Rudra-ravi/wikipedia-mcp.git@735590286fbe91f705e97eba25f8272cafba5edb",
-        "wikipedia-mcp"
+        "wikipedia-mcp==2.0.1"
       ]
     }
   }
