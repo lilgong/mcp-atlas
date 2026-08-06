@@ -868,8 +868,12 @@ def parse_arguments(model, input_path, output_path, num_task, concurrency):
     parser.add_argument(
         "--extra-body",
         type=str,
-        default=None,
-        help='JSON string of extra body params to pass to the completion service (e.g. \'{"reasoning_effort": "xhigh", "allowed_openai_params": ["reasoning_effort"]}\')',
+        default=os.getenv("MCP_COMPLETION_EXTRA_BODY") or None,
+        help=(
+            "JSON object passed unchanged to the model provider request body; "
+            "defaults to MCP_COMPLETION_EXTRA_BODY "
+            '(e.g. \'{"reasoning_effort":"max"}\')'
+        ),
     )
 
     return parser.parse_args()

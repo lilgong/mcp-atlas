@@ -21,12 +21,12 @@ wheels/
 
 .DS_Store
 
-.env
+.env*
 
 # Local Chinese-annotated copy of env.template, grouped by how often each
 # setting changes. Kept out of the repo; env.template stays the source of truth.
 env.template.zh
-
+MCP-Atlas.jsonl
 # Local runtime material and Slack-free derivatives.
 .runtime/
 services/mcp_eval/MCP-Atlas.slack-aligned.csv
