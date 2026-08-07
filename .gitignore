@@ -39,3 +39,7 @@ services/mcp_eval/completion_results/*
 services/mcp_eval/evaluation_results/*
 !services/mcp_eval/completion_results/.gitkeep
 !services/mcp_eval/evaluation_results/.gitkeep
+
+# MCP/tool API call logs (per-key request counts)
+mcp_usage_log/
+token_usage_log/

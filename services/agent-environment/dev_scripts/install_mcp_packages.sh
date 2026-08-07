@@ -33,7 +33,7 @@ echo "Installing UVX MCP server packages..."
 uv tool install arxiv-mcp-server==0.2.11 --with mcp==1.28.1
 uv tool install mcp-server-calculator==0.2.0 --with mcp==1.28.1
 uv tool install cli-mcp-server==0.2.5 --with mcp==1.28.1
-uv tool install duckduckgo-mcp-server==0.1.1 --with mcp==1.28.1
+uv tool install 'duckduckgo-mcp-server[browser]==0.6.0' --with mcp==1.28.1
 uv tool install mcp-server-fetch==2025.4.7 --with mcp==1.28.1
 # --with pins a transitive dep that would otherwise float: mcp-server-git is pinned
 # but its MCP SDK isn't, and 1.28 asks the client for "roots" on startup, which the

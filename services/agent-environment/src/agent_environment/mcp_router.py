@@ -15,7 +15,10 @@ from .logger import create_logger
 logger = create_logger(__name__)
 
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 30.0
-DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 50.0
+# Three Overpass endpoints may each consume the shim's bounded 45-second
+# attempt before succeeding or falling back. Keep enough room for all three
+# without weakening the outer evaluator's 180-second deadline.
+DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 150.0
 DEFAULT_CLOSE_TIMEOUT_SECONDS = 5.0
 DEFAULT_STARTUP_CONCURRENCY = 12
 DEFAULT_REFRESH_MIN_INTERVAL_SECONDS = 60.0

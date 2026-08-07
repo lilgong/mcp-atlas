@@ -20,33 +20,36 @@ if (actualVersion !== expectedVersion) {
 }
 
 const source = await readFile(sourcePath, "utf8");
-const sectionStart = source.indexOf('server.registerTool("directory_tree"');
-const sectionEnd = source.indexOf('server.registerTool("move_file"', sectionStart);
-if (sectionStart < 0 || sectionEnd < 0) {
-  throw new Error(
-    `filesystem directory_tree patch anchors were not found in ` +
-      `@modelcontextprotocol/server-filesystem@${actualVersion}`,
-  );
-}
-
-const section = source.slice(sectionStart, sectionEnd);
 const buggy = "structuredContent: { content: [contentBlock] }";
-const occurrences = section.split(buggy).length - 1;
-if (occurrences !== 1) {
-  throw new Error(
-    `expected one directory_tree structured-content mismatch in ` +
-      `@modelcontextprotocol/server-filesystem@${actualVersion}, ` +
-      `found ${occurrences}`,
+const correctedValue = "structuredContent: { content: text }";
+const toolsToPatch = ["list_directory_with_sizes", "directory_tree"];
+let correctedSource = source;
+for (const toolName of toolsToPatch) {
+  const sectionStart = correctedSource.indexOf(
+    `server.registerTool("${toolName}"`,
   );
+  const sectionEnd = correctedSource.indexOf(
+    "server.registerTool(", sectionStart + 1,
+  );
+  if (sectionStart < 0 || sectionEnd < 0) {
+    throw new Error(
+      `filesystem ${toolName} patch anchors were not found in ` +
+        `@modelcontextprotocol/server-filesystem@${actualVersion}`,
+    );
+  }
+  const section = correctedSource.slice(sectionStart, sectionEnd);
+  const occurrences = section.split(buggy).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `expected one ${toolName} structured-content mismatch in ` +
+        `@modelcontextprotocol/server-filesystem@${actualVersion}, ` +
+        `found ${occurrences}`,
+    );
+  }
+  correctedSource =
+    correctedSource.slice(0, sectionStart) +
+    section.replace(buggy, correctedValue) +
+    correctedSource.slice(sectionEnd);
 }
-
-const corrected = section.replace(
-  buggy,
-  "structuredContent: { content: text }",
-);
-await writeFile(
-  compatPath,
-  source.slice(0, sectionStart) + corrected + source.slice(sectionEnd),
-  "utf8",
-);
+await writeFile(compatPath, correctedSource, "utf8");
 await import(pathToFileURL(compatPath).href);

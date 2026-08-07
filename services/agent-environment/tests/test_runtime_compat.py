@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from agent_environment.oxylabs_mcp_compat import normalize_scraper_payload
+from agent_environment.mcp_router import DEFAULT_TOOL_CALL_TIMEOUT_SECONDS
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -49,6 +50,7 @@ def test_runtime_templates_use_guarded_compatibility_entrypoints():
         "agent_environment.oxylabs_mcp_compat",
     ]
     assert shared["ddg-search"]["args"][-1].endswith("ddg_mcp_compat.py")
+    assert "duckduckgo-mcp-server[browser]==0.6.0" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
     assert shared["met-museum"]["args"] == [
         "/agent-environment/metmuseum_mcp_compat.mjs",
@@ -59,6 +61,25 @@ def test_runtime_templates_use_guarded_compatibility_entrypoints():
     ]
     assert shared["filesystem"]["args"] == expected_filesystem
     assert local["filesystem"]["args"] == expected_filesystem
+    compat = (
+        ROOT / "services" / "agent-environment" / "filesystem_server_compat.mjs"
+    ).read_text(encoding="utf-8")
+    assert '["list_directory_with_sizes", "directory_tree"]' in compat
+
+
+def test_osm_has_ordered_fallbacks_inside_a_sufficient_router_budget():
+    compat = (
+        AGENT_ROOT / "src" / "agent_environment" / "osm_mcp_compat.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        'f"{UPSTREAM_OVERPASS_URL},{SECONDARY_OVERPASS_URL},"' in compat
+    )
+    assert "OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45" in compat
+    assert '"User-Agent": "mcp-atlas/1.0' in compat
+    assert "{406, 429, 500, 502, 503, 504}" in compat
+    assert DEFAULT_TOOL_CALL_TIMEOUT_SECONDS >= 3 * 45
+    assert "install_neighborhood_optimization()" in compat
+    assert "tool.fn = optimized_analyze_neighborhood" in compat
 
 
 def test_context7_uses_authenticated_schema_compatible_release():

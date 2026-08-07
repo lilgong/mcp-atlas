@@ -33,7 +33,8 @@
         "/mnt/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"
       ],
       "env": {
-        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}",
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
       }
     },
     "calculator": {
@@ -89,7 +90,7 @@
         "--with",
         "mcp==1.28.1",
         "--with",
-        "duckduckgo-mcp-server==0.1.1",
+        "duckduckgo-mcp-server[browser]==0.6.0",
         "python",
         "/agent-environment/src/agent_environment/ddg_mcp_compat.py"
       ]
@@ -115,7 +116,8 @@
         "/mnt/node_modules/exa-mcp-server/build/index.js"
       ],
       "env": {
-        "EXA_API_KEY": "${EXA_API_KEY}"
+        "EXA_API_KEY": "${EXA_API_KEY}",
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
       }
     },
     "fetch": {
@@ -271,7 +273,8 @@
       "env": {
         "OXYLABS_USERNAME": "${OXYLABS_USERNAME}",
         "OXYLABS_PASSWORD": "${OXYLABS_PASSWORD}",
-        "OXYLABS_SCRAPER_URL": "${OXYLABS_SCRAPER_URL}"
+        "OXYLABS_SCRAPER_URL": "${OXYLABS_SCRAPER_URL}",
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
       }
     },
     "pubmed": {

@@ -37,6 +37,10 @@ def main() -> int:
     port = configured_shared_port()
     host = os.getenv("MCP_SHARED_HOST", "0.0.0.0")
     image = os.getenv("MCP_SHARED_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
+    usage_log_dir = Path(
+        os.getenv("MCP_USAGE_LOG_DIR") or ROOT / "mcp_usage_log"
+    ).expanduser().resolve()
+    usage_log_dir.mkdir(parents=True, exist_ok=True)
     inspected = subprocess.run(
         [
             "docker", "image", "inspect", image,
@@ -63,6 +67,8 @@ def main() -> int:
         "--add-host=host.docker.internal:host-gateway",
         "--env-file", str(ENV_FILE),
         "--env", "MCP_ATLAS_SHARED_RUNTIME=true",
+        "--env", "MCP_USAGE_LOG_DIR=/mcp-usage-log",
+        "--volume", f"{usage_log_dir}:/mcp-usage-log:rw",
         image,
         "/agent-environment/.venv/bin/python", "-m", "uvicorn",
         "agent_environment.main:app",
