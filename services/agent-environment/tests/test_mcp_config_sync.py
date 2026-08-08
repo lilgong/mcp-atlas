@@ -124,7 +124,7 @@ def extract_packages_from_script():
         # Only regular packages: uv tool install package==version
         parts = line.split()
         if len(parts) >= 3:
-            package = parts[3]  # The package is the 4th element (index 3)
+            package = parts[3].strip("'\"")  # shell quoting is not package syntax
             if "==" in package:
                 packages["uvx"].append(package)
 

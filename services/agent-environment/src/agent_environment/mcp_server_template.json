@@ -144,10 +144,9 @@
       ]
     },
     "github": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
-        "https://github.com/geobio/smitheryai-mcp-servers-github"
+        "/mnt/node_modules/@smithery/mcp-github/dist/cli.js"
       ],
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"

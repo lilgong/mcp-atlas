@@ -1,7 +1,7 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 LABEL mcp-atlas.runtime="true" \
-      mcp-atlas.runtime-version="20260806" \
+      mcp-atlas.runtime-version="20260808" \
       mcp-atlas.data-contract="external-data-v1" \
       mcp-atlas.contains-fixture="false"
 

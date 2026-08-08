@@ -98,6 +98,29 @@ def test_context7_uses_authenticated_schema_compatible_release():
     }
 
 
+def test_github_uses_prebuilt_pinned_server_instead_of_runtime_npx():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    github = servers["github"]
+    assert github["command"] == "node"
+    assert github["args"] == [
+        "/mnt/node_modules/@smithery/mcp-github/dist/cli.js",
+    ]
+
+    install_script = (
+        AGENT_ROOT / "dev_scripts" / "install_mcp_packages.sh"
+    ).read_text(encoding="utf-8")
+    revision = "68368436034fb0003a6d8ed91afc9d0a64142b84"
+    assert f'GITHUB_MCP_REVISION="{revision}"' in install_script
+    assert "@smithery/mcp-github/dist/cli.js" in install_script
+
+
 def test_python_mcp_servers_pin_their_sdk():
     servers = json.loads(
         (
