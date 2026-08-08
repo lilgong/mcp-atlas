@@ -304,3 +304,69 @@ class MalformedArgumentsTests(unittest.TestCase):
         )
         self.assertEqual((dropped, repaired), (1, 1))
         self.assertEqual(len(kept), 2)
+
+
+class StartupReapResilienceTests(unittest.IsolatedAsyncioTestCase):
+    """Startup cleanup must never stop the service from coming up."""
+
+    async def test_docker_rm_timeout_does_not_fail_startup(self):
+        async def fake_run(*args, **kwargs):
+            if args[:2] == ("docker", "ps"):
+                return "abc123\ndef456", "", 0
+            if args[:3] == ("docker", "rm", "-f"):
+                raise TaskSandboxError("Command timed out after 30s: docker rm -f")
+            return "", "", 0
+
+        with patch.object(task_sandbox, "_run", side_effect=fake_run), patch.object(
+            task_sandbox, "write_runtime_event"
+        ):
+            await task_sandbox.reap_owned_task_sandboxes()  # must not raise
+
+    async def test_one_stuck_container_does_not_skip_the_others(self):
+        attempted = []
+
+        async def fake_run(*args, **kwargs):
+            if args[:2] == ("docker", "ps"):
+                return "c1\nc2\nc3", "", 0
+            if args[:3] == ("docker", "volume", "ls"):
+                return "v1", "", 0
+            if args[:3] == ("docker", "rm", "-f"):
+                attempted.append(args[-1])
+                if args[-1] == "c2":
+                    raise TaskSandboxError("timed out")
+                return "", "", 0
+            if args[:4] == ("docker", "volume", "rm", "-f"):
+                attempted.append(args[-1])
+                return "", "", 0
+            return "", "", 0
+
+        with patch.object(task_sandbox, "_run", side_effect=fake_run), patch.object(
+            task_sandbox, "write_runtime_event"
+        ):
+            await task_sandbox.reap_owned_task_sandboxes()
+
+        # c2 blew up, yet c3 and the volume were still reclaimed.
+        self.assertEqual(attempted, ["c1", "c2", "c3", "v1"])
+
+    async def test_listing_failure_is_survivable(self):
+        async def fake_run(*args, **kwargs):
+            raise TaskSandboxError("docker ps timed out")
+
+        with patch.object(task_sandbox, "_run", side_effect=fake_run), patch.object(
+            task_sandbox, "write_runtime_event"
+        ):
+            await task_sandbox.reap_owned_task_sandboxes()  # must not raise
+
+    async def test_reap_uses_the_configurable_teardown_timeout(self):
+        seen = []
+
+        async def fake_run(*args, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return "", "", 0
+
+        with patch.dict("os.environ", {"MCP_SANDBOX_TEARDOWN_TIMEOUT": "77"}), \
+             patch.object(task_sandbox, "_run", side_effect=fake_run), \
+             patch.object(task_sandbox, "write_runtime_event"):
+            await task_sandbox.reap_owned_task_sandboxes()
+
+        self.assertTrue(seen and all(t == 77.0 for t in seen), seen)

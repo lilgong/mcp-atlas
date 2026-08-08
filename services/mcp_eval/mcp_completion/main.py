@@ -36,7 +36,12 @@ async def lifespan(_app: FastAPI):
     )
     sweeper: Optional[asyncio.Task] = None
     if isolation_enabled:
-        await reap_owned_task_sandboxes()
+        try:
+            await reap_owned_task_sandboxes()
+        except Exception as exc:
+            # Startup cleanup is opportunistic. A congested docker daemon must
+            # not stop the service from coming up; the sweeper retries later.
+            logger.warning("Startup sandbox reaping failed: %s", exc)
         sweeper = asyncio.create_task(
             run_orphan_sweeper(
                 interval_seconds=float(

@@ -899,56 +899,75 @@ class TaskSandbox:
             )
 
 
+async def _reap_one(*args: str) -> bool:
+    """Run one reaping command, absorbing timeouts and docker errors."""
+    try:
+        _, _, code = await _run(
+            *args, timeout=_teardown_timeout(), check=False
+        )
+        return code == 0
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        write_runtime_event(
+            "sandbox",
+            "orphan_reap_step_failed",
+            command=" ".join(args[:3]),
+            target=args[-1],
+            error=str(exc),
+        )
+        return False
+
+
 async def reap_owned_task_sandboxes() -> None:
-    """Remove orphaned resources from a previous process using the same port."""
+    """Remove orphaned resources from a previous process using the same port.
+
+    Every step is best-effort. This runs during application startup, so a
+    congested docker daemon must not keep the service from coming up - the
+    periodic sweeper reclaims whatever is left behind.
+    """
 
     owner = _owner_label()
-    stdout, _, _ = await _run(
-        "docker",
-        "ps",
-        "-aq",
+    label_filters = (
         "--filter",
         "label=mcp-atlas.task-sandbox=true",
         "--filter",
         f"label=mcp-atlas.owner={owner}",
-        timeout=30,
-        check=False,
     )
+
+    try:
+        stdout, _, _ = await _run(
+            "docker", "ps", "-aq", *label_filters,
+            timeout=_teardown_timeout(),
+            check=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        write_runtime_event(
+            "sandbox", "orphan_reap_listing_failed", error=str(exc)
+        )
+        stdout = ""
     containers = [line.strip() for line in stdout.splitlines() if line.strip()]
     for container_id in containers:
-        await _run(
-            "docker",
-            "rm",
-            "-f",
-            "-v",
-            container_id,
-            timeout=30,
+        await _reap_one("docker", "rm", "-f", "-v", container_id)
+
+    try:
+        volumes_out, _, _ = await _run(
+            "docker", "volume", "ls", "-q", *label_filters,
+            timeout=_teardown_timeout(),
             check=False,
         )
-
-    volumes_out, _, _ = await _run(
-        "docker",
-        "volume",
-        "ls",
-        "-q",
-        "--filter",
-        "label=mcp-atlas.task-sandbox=true",
-        "--filter",
-        f"label=mcp-atlas.owner={owner}",
-        timeout=30,
-        check=False,
-    )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        write_runtime_event(
+            "sandbox", "orphan_reap_listing_failed", error=str(exc)
+        )
+        volumes_out = ""
     volumes = [line.strip() for line in volumes_out.splitlines() if line.strip()]
     for volume in volumes:
-        await _run(
-            "docker",
-            "volume",
-            "rm",
-            "-f",
-            volume,
-            timeout=30,
-            check=False,
-        )
+        await _reap_one("docker", "volume", "rm", "-f", volume)
 
     write_runtime_event(
         "sandbox",
