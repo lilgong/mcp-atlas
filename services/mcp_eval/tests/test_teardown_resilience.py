@@ -131,7 +131,7 @@ class MalformedToolCallTests(unittest.TestCase):
     """A null function.name used to fail the whole task."""
 
     def test_null_name_is_dropped_not_raised(self):
-        kept, dropped = _sanitize_tool_calls(
+        kept, dropped, _ = _sanitize_tool_calls(
             [
                 {"id": "1", "type": "function",
                  "function": {"name": None, "arguments": "{}"}},
@@ -144,7 +144,7 @@ class MalformedToolCallTests(unittest.TestCase):
         self.assertEqual(kept[0]["function"]["name"], "search")
 
     def test_all_malformed_yields_none_and_a_count(self):
-        kept, dropped = _sanitize_tool_calls(
+        kept, dropped, _ = _sanitize_tool_calls(
             [
                 {"id": "1", "type": "function",
                  "function": {"name": None, "arguments": "{}"}},
@@ -160,12 +160,12 @@ class MalformedToolCallTests(unittest.TestCase):
             {"id": "1", "type": "function",
              "function": {"name": "search", "arguments": "{}"}}
         ]
-        kept, dropped = _sanitize_tool_calls(calls)
+        kept, dropped, _ = _sanitize_tool_calls(calls)
         self.assertEqual(dropped, 0)
         self.assertEqual(kept, calls)
 
     def test_missing_function_key_is_treated_as_malformed(self):
-        kept, dropped = _sanitize_tool_calls([{"id": "1", "type": "function"}])
+        kept, dropped, _ = _sanitize_tool_calls([{"id": "1", "type": "function"}])
         self.assertIsNone(kept)
         self.assertEqual(dropped, 1)
 
@@ -243,3 +243,64 @@ class MalformedTurnLoopTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MalformedArgumentsTests(unittest.TestCase):
+    """Unbalanced arguments JSON poisons the history and 400s every later turn."""
+
+    @staticmethod
+    def _call(name="search", arguments='{"q": "x"}'):
+        return {"id": "1", "type": "function",
+                "function": {"name": name, "arguments": arguments}}
+
+    def test_missing_outer_brace_is_repaired_not_dropped(self):
+        # Exactly the provider defect: nested final value, outer '}' lost.
+        broken = '{"query": "x", "filter": {"property": "object"}'
+        kept, dropped, repaired = _sanitize_tool_calls(
+            [self._call(arguments=broken)]
+        )
+        self.assertEqual((dropped, repaired), (0, 1))
+        import json as _json
+        self.assertEqual(
+            _json.loads(kept[0]["function"]["arguments"]),
+            {"query": "x", "filter": {"property": "object"}},
+        )
+
+    def test_valid_arguments_are_left_byte_identical(self):
+        good = '{"q": "x", "n": 10}'
+        kept, dropped, repaired = _sanitize_tool_calls(
+            [self._call(arguments=good)]
+        )
+        self.assertEqual((dropped, repaired), (0, 0))
+        self.assertEqual(kept[0]["function"]["arguments"], good)
+
+    def test_unrepairable_arguments_are_dropped(self):
+        kept, dropped, repaired = _sanitize_tool_calls(
+            [self._call(arguments='{"q": "unterminated')]
+        )
+        self.assertIsNone(kept)
+        self.assertEqual((dropped, repaired), (1, 0))
+
+    def test_non_string_arguments_are_dropped(self):
+        kept, dropped, repaired = _sanitize_tool_calls(
+            [self._call(arguments=None)]
+        )
+        self.assertIsNone(kept)
+        self.assertEqual((dropped, repaired), (1, 0))
+
+    def test_repair_does_not_mutate_the_original_call(self):
+        original = self._call(arguments='{"a": {"b": 1}')
+        kept, _, repaired = _sanitize_tool_calls([original])
+        self.assertEqual(repaired, 1)
+        self.assertEqual(original["function"]["arguments"], '{"a": {"b": 1}')
+
+    def test_name_and_argument_defects_are_counted_together(self):
+        kept, dropped, repaired = _sanitize_tool_calls(
+            [
+                self._call(name=None),
+                self._call(arguments='{"a": {"b": 1}'),
+                self._call(),
+            ]
+        )
+        self.assertEqual((dropped, repaired), (1, 1))
+        self.assertEqual(len(kept), 2)
