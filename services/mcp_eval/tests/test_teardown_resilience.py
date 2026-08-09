@@ -1,7 +1,8 @@
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from mcp_completion import main as completion_main
 from mcp_completion import task_sandbox
 from mcp_completion.llm import _sanitize_tool_calls
 from mcp_completion.task_sandbox import ManagedContainer, TaskSandboxError
@@ -370,3 +371,45 @@ class StartupReapResilienceTests(unittest.IsolatedAsyncioTestCase):
             await task_sandbox.reap_owned_task_sandboxes()
 
         self.assertTrue(seen and all(t == 77.0 for t in seen), seen)
+
+
+class ServiceLifespanCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_cleanup_runs_on_shutdown_not_startup(self):
+        cleanup_result = {
+            "containers_removed": 1,
+            "containers_remaining": 0,
+            "volumes_removed": 1,
+            "volumes_remaining": 0,
+            "removal_failures": 0,
+            "listing_failures": 0,
+        }
+        cleanup = AsyncMock(return_value=cleanup_result)
+        sweeper_started = asyncio.Event()
+
+        async def fake_sweeper(**_kwargs):
+            sweeper_started.set()
+            await asyncio.Event().wait()
+
+        with patch.dict(
+            "os.environ", {"MCP_TASK_ISOLATION_ENABLED": "true"}, clear=False
+        ), patch.object(
+            completion_main, "reap_owned_task_sandboxes", cleanup
+        ), patch.object(
+            completion_main, "run_orphan_sweeper", fake_sweeper
+        ), patch.object(completion_main, "write_runtime_event"):
+            async with completion_main.lifespan(None):
+                await sweeper_started.wait()
+                cleanup.assert_not_awaited()
+
+        cleanup.assert_awaited_once_with()
+
+    async def test_isolation_disabled_skips_owner_cleanup(self):
+        cleanup = AsyncMock()
+        with patch.dict(
+            "os.environ", {"MCP_TASK_ISOLATION_ENABLED": "false"}, clear=False
+        ), patch.object(
+            completion_main, "reap_owned_task_sandboxes", cleanup
+        ), patch.object(completion_main, "write_runtime_event"):
+            async with completion_main.lifespan(None):
+                pass
+        cleanup.assert_not_awaited()

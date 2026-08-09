@@ -309,6 +309,7 @@ MCP_TASK_SANDBOX_CPUS=2.0
 MCP_TASK_MONGO_MEMORY=1g
 MCP_TASK_MONGO_CPUS=1.0
 MCP_SANDBOX_OWNER=
+MCP_SANDBOX_REAP_CONCURRENCY=4
 ```
 
 保持：
@@ -323,7 +324,9 @@ MCP_TASK_ISOLATION_ENABLED=true
 `services/agent-environment/data`。
 
 `MCP_SANDBOX_OWNER` 可以留空。代码会用 hostname 和 completion 端口生成 owner，
-并在服务启动时清理相同 owner 遗留的任务容器。
+正常退出时会清理相同 owner 遗留的任务容器。启动阶段不做同步全量清理，避免
+Docker 繁忙或残留较多时阻塞 `/health`；运行中的 age-gated sweeper 会回收已失去
+进程跟踪且超过 `MCP_SANDBOX_ORPHAN_MAX_AGE` 的资源。
 
 ### 5.5 轨迹参数
 
@@ -1262,7 +1265,8 @@ docker volume ls --filter label=mcp-atlas.task-sandbox=true
 make cleanup-task-sandboxes
 ```
 
-该命令只清理与当前 `MCP_SANDBOX_OWNER` 匹配的 MCP-Atlas task sandbox。
+该命令只清理与当前 `MCP_SANDBOX_OWNER` 匹配的 MCP-Atlas task sandbox，并输出
+实际删除量、剩余量和 Docker 失败数；存在残留或无法完成列表检查时返回非零。
 
 ### 16.3 修改配置后重启
 

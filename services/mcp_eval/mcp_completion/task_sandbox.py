@@ -192,6 +192,13 @@ def _teardown_timeout() -> float:
     return float(os.getenv("MCP_SANDBOX_TEARDOWN_TIMEOUT", "90"))
 
 
+def _reap_concurrency() -> int:
+    value = int(os.getenv("MCP_SANDBOX_REAP_CONCURRENCY", "4"))
+    if value < 1:
+        raise ValueError("MCP_SANDBOX_REAP_CONCURRENCY must be positive")
+    return value
+
+
 def _parse_docker_timestamp(value: str) -> Optional[float]:
     """Parse a docker RFC3339 timestamp into an epoch value.
 
@@ -919,12 +926,12 @@ async def _reap_one(*args: str) -> bool:
         return False
 
 
-async def reap_owned_task_sandboxes() -> None:
-    """Remove orphaned resources from a previous process using the same port.
+async def reap_owned_task_sandboxes() -> dict[str, int]:
+    """Best-effort cleanup restricted to this completion service's labels.
 
-    Every step is best-effort. This runs during application startup, so a
-    congested docker daemon must not keep the service from coming up - the
-    periodic sweeper reclaims whatever is left behind.
+    Deletions use bounded concurrency so a backlog does not turn into N serial
+    teardown timeouts on a busy shared Docker daemon. Callers receive verified
+    remaining counts and can decide whether an incomplete cleanup is fatal.
     """
 
     owner = _owner_label()
@@ -935,47 +942,99 @@ async def reap_owned_task_sandboxes() -> None:
         f"label=mcp-atlas.owner={owner}",
     )
 
-    try:
-        stdout, _, _ = await _run(
-            "docker", "ps", "-aq", *label_filters,
-            timeout=_teardown_timeout(),
-            check=False,
+    async def list_owned(kind: str) -> tuple[list[str], bool]:
+        command = (
+            ("docker", "ps", "-aq", *label_filters)
+            if kind == "container"
+            else ("docker", "volume", "ls", "-q", *label_filters)
         )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        write_runtime_event(
-            "sandbox", "orphan_reap_listing_failed", error=str(exc)
+        try:
+            stdout, _, _ = await _run(
+                *command, timeout=_teardown_timeout(), check=False
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            write_runtime_event(
+                "sandbox",
+                "orphan_reap_listing_failed",
+                kind=kind,
+                error=str(exc),
+            )
+            return [], True
+        return (
+            [line.strip() for line in stdout.splitlines() if line.strip()],
+            False,
         )
-        stdout = ""
-    containers = [line.strip() for line in stdout.splitlines() if line.strip()]
-    for container_id in containers:
-        await _reap_one("docker", "rm", "-f", "-v", container_id)
 
-    try:
-        volumes_out, _, _ = await _run(
-            "docker", "volume", "ls", "-q", *label_filters,
-            timeout=_teardown_timeout(),
-            check=False,
+    semaphore = asyncio.Semaphore(_reap_concurrency())
+
+    async def remove_one(kind: str, name: str) -> bool:
+        command = (
+            ("docker", "rm", "-f", "-v", name)
+            if kind == "container"
+            else ("docker", "volume", "rm", "-f", name)
         )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        write_runtime_event(
-            "sandbox", "orphan_reap_listing_failed", error=str(exc)
+        async with semaphore:
+            return await _reap_one(*command)
+
+    async def remove_owned(kind: str) -> tuple[int, int, int, int]:
+        initial, initial_listing_failed = await list_owned(kind)
+        results = await asyncio.gather(
+            *(remove_one(kind, name) for name in initial)
+        ) if initial else []
+        remaining, final_listing_failed = await list_owned(kind)
+        failed_names = {
+            name for name, ok in zip(initial, results) if not ok
+        }
+        if final_listing_failed:
+            # A failed verification cannot be reported as a clean result.
+            remaining_count = len(failed_names)
+            failures = len(failed_names)
+            removed_count = len(initial) - remaining_count
+        else:
+            remaining_count = len(remaining)
+            remaining_names = set(remaining)
+            # A Docker CLI timeout can still finish inside the daemon. Count it
+            # as a failure only when verification says the target survived.
+            failures = len(failed_names & remaining_names)
+            removed_count = len(initial) - len(set(initial) & remaining_names)
+        return (
+            max(0, removed_count),
+            remaining_count,
+            failures,
+            int(initial_listing_failed) + int(final_listing_failed),
         )
-        volumes_out = ""
-    volumes = [line.strip() for line in volumes_out.splitlines() if line.strip()]
-    for volume in volumes:
-        await _reap_one("docker", "volume", "rm", "-f", volume)
+
+    (
+        containers_removed,
+        containers_remaining,
+        container_failures,
+        container_listing_failures,
+    ) = await remove_owned("container")
+    (
+        volumes_removed,
+        volumes_remaining,
+        volume_failures,
+        volume_listing_failures,
+    ) = await remove_owned("volume")
+    listing_failures = container_listing_failures + volume_listing_failures
+    result = {
+        "containers_removed": containers_removed,
+        "containers_remaining": containers_remaining,
+        "volumes_removed": volumes_removed,
+        "volumes_remaining": volumes_remaining,
+        "removal_failures": container_failures + volume_failures,
+        "listing_failures": listing_failures,
+    }
 
     write_runtime_event(
         "sandbox",
         "orphan_reap_completed",
         owner=owner,
-        containers_removed=len(containers),
-        volumes_removed=len(volumes),
+        **result,
     )
+    return result
 
 
 async def _stale_named_resources(

@@ -36,12 +36,11 @@ async def lifespan(_app: FastAPI):
     )
     sweeper: Optional[asyncio.Task] = None
     if isolation_enabled:
-        try:
-            await reap_owned_task_sandboxes()
-        except Exception as exc:
-            # Startup cleanup is opportunistic. A congested docker daemon must
-            # not stop the service from coming up; the sweeper retries later.
-            logger.warning("Startup sandbox reaping failed: %s", exc)
+        # Do not synchronously delete old Docker resources during startup. A
+        # large backlog on a busy shared daemon can otherwise keep /health
+        # unavailable for N serial teardown timeouts. The age-gated sweeper
+        # handles runtime orphans; shutdown performs an immediate owner-scoped
+        # compensation pass after Uvicorn has drained active requests.
         sweeper = asyncio.create_task(
             run_orphan_sweeper(
                 interval_seconds=float(
@@ -70,6 +69,30 @@ async def lifespan(_app: FastAPI):
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        if isolation_enabled:
+            try:
+                cleanup = await reap_owned_task_sandboxes()
+            except Exception as exc:
+                logger.warning("Shutdown sandbox reaping failed: %s", exc)
+                write_runtime_event(
+                    "sandbox",
+                    "shutdown_orphan_reap_failed",
+                    error=str(exc),
+                )
+            else:
+                if (
+                    cleanup["containers_remaining"]
+                    or cleanup["volumes_remaining"]
+                    or cleanup["listing_failures"]
+                ):
+                    logger.warning(
+                        "Shutdown left Atlas sandbox resources: %s", cleanup
+                    )
+                    write_runtime_event(
+                        "sandbox",
+                        "shutdown_orphans_remaining",
+                        **cleanup,
+                    )
         write_runtime_event(
             "service",
             "completion_service_stopped",
