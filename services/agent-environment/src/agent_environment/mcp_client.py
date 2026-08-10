@@ -1,5 +1,9 @@
+from typing import Any, cast
+
 from fastmcp import Client
 from fastmcp.client.logging import LogMessage
+from fastmcp.mcp_config import MCPConfig
+from .mcp_router import RouterClient
 from .logger import create_logger
 import json
 import random
@@ -8,6 +12,18 @@ import re
 from pathlib import Path
 
 logger = create_logger(__name__)
+
+CLIENT_INIT_TIMEOUT_SECONDS = 25.0
+
+
+class DirectMCPClient(Client):
+    """Ensure the direct transport is closed even if session cleanup fails."""
+
+    async def close(self) -> None:
+        try:
+            await super().close()
+        finally:
+            await self.transport.close()
 
 # Load template to check for API key requirements
 template_path = Path(__file__).parent / "mcp_server_template.json"
@@ -149,7 +165,20 @@ async def log_handler(message: LogMessage) -> None:
             logger.info(data)
 
 
-client: Client = Client(
-    config,
-    log_handler=log_handler,
-)
+def create_server_client(
+    server_name: str, server_config: dict[str, Any]
+) -> RouterClient:
+    """Create a direct, single-server client without FastMCP's composite proxy."""
+    parsed_config = MCPConfig.from_dict(
+        {"mcpServers": {server_name: server_config}}
+    )
+    transport = parsed_config.mcpServers[server_name].to_transport()
+    return cast(
+        RouterClient,
+        DirectMCPClient(
+            transport,
+            roots=[],
+            log_handler=log_handler,
+            init_timeout=CLIENT_INIT_TIMEOUT_SECONDS,
+        ),
+    )

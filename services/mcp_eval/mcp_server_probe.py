@@ -1,0 +1,821 @@
+#!/usr/bin/env python3
+"""
+MCP server 数据与连通性探针的共享实现。
+
+与 test_servers.py 的区别：
+    test_servers.py 只要调用不报错就算 PASS —— 返回空数据也会全绿，验不出官方数据是否导入。
+    本脚本对 5 个有状态服务（airtable / google-workspace / mongodb / notion / slack）
+    回放 MCP-Atlas.csv 里的**真实 GT 调用**并断言返回含 GT 的关键事实，
+    从而真正验证"官方数据是否已正确导入"。其余服务沿用原有连通性冒烟测试。
+
+断言只用**内容**（库名/表名/频道名/事件名/文档数），不用 ID：
+    GT 里的 ID 属于录制基准时用的账号，你用自己的账号导入后 ID 必然不同（Airtable base、
+    Notion database、Slack channel 都会变）。所以有 ID 的地方一律先动态发现、再断言内容。
+    评测时模型也是这么做的（先 list_bases/search 再查），因此 ID 不同不影响跑分。
+
+结果分三类：
+    DATA OK    API 通，且数据与 GT 一致
+    DATA BAD   API 通，但数据对不上（多半是没导入 / 导错账号）
+    API FAIL   调用本身失败（key 失效、服务没起、网络不通）
+
+V1 入口把所有调用直接发往旧共享 runtime。V2 入口使用正式评测路由：云端读取走
+共享端口，Git/filesystem/Mongo 等在当前主机创建逐任务容器。两种入口共用相同的内容
+断言和代表调用，避免测试口径漂移。
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import csv
+import datetime as dt
+import io
+import json
+import sys
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+import httpx
+
+from mcp_completion.mcp_client.isolated_client import IsolatedMCPClient
+from mcp_completion.tool_policy import (
+    TASK_LOCAL_SERVERS,
+    TASK_NETWORK_SERVERS,
+)
+from test_servers import (
+    ENV_PATH,
+    TEST_CALLS,
+    read_env_value,
+    resolve_mcp_server_url,
+)
+from prepare_slack_import import ISO_DT
+
+
+class ApiError(RuntimeError):
+    """调用层面的失败（HTTP 错误或 MCP 工具报错），区别于"数据对不上"。"""
+
+
+class DataMismatch(RuntimeError):
+    """API 通，但返回的数据和 GT 对不上。"""
+
+
+# 只对"瞬时"错误重试：限流、超时、网关抖动、连接问题。白名单式判断——不认识的一律
+# 当永久错误立即报，免得把 401 / Unknown tool 之类的配置问题也反复重试掩盖掉。
+_TRANSIENT = ("429", "too many requests", "timeout", "timed out",
+              "502", "503", "504", "connection", "reset", "temporarily",
+              "billing_limit", "billing plan limit")
+# 明确永久：认证/权限/工具没注册——重试永远同样结果
+_PERMANENT = ("401", "403", "unauthorized", "invalid_auth", "invalid api key",
+              "unknown tool")
+
+
+def _is_transient(msg: str) -> bool:
+    m = msg.lower()
+    if any(k in m for k in _PERMANENT):
+        return False
+    # 429/限流类一律可重试——包括 airtable 的 BILLING_LIMIT_EXCEEDED：实测它是间歇的、
+    # 负载一降就恢复，退避重试确实能救回。lara 那种 "HTTP 500 ... exceeded quota" 是硬
+    # 月度字符额度、不含 429 也不在下列关键词里，自然不会被重试。
+    return any(k in m for k in _TRANSIENT)
+
+
+# ── 调用封装 ──────────────────────────────────────────────────────────────────
+def make_caller(client: httpx.AsyncClient, base_url: str, timeout: float,
+                retries: int = 0):
+    async def call(tool: str, args: dict[str, Any]) -> str:
+        attempt = 0
+        while True:
+            try:
+                resp = await client.post(
+                    base_url,
+                    json={
+                        "tool_name": tool,
+                        "tool_args": args,
+                        "use_cache": False,
+                    },
+                    timeout=timeout,
+                )
+                body = resp.text
+                if resp.status_code >= 300:
+                    raise ApiError(f"{tool}: HTTP {resp.status_code}: {_flat(body)[:150]}")
+                if _tool_errored(body):
+                    raise ApiError(f"{tool}: {_flat(body)[:150]}")
+                return body
+            except ApiError as exc:
+                # 只有瞬时错误、且还有重试次数时才退避重试；DataMismatch 不经过这里
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))  # 2s, 4s, ...
+                    attempt += 1
+                    continue
+                raise
+            except Exception as exc:  # httpx 超时/连接异常等
+                wrapped = ApiError(f"{tool}: {exc}")
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise wrapped from exc
+
+    return call
+
+
+def make_isolated_caller(
+    client: IsolatedMCPClient,
+    timeout: float,
+    retries: int = 0,
+):
+    """Adapt the production route-aware client to the probe string interface."""
+
+    async def call(tool: str, args: dict[str, Any]) -> str:
+        attempt = 0
+        while True:
+            try:
+                response = await asyncio.wait_for(
+                    client.call_tool(tool, args),
+                    timeout=timeout,
+                )
+                body = json.dumps(
+                    [
+                        item.model_dump(by_alias=True)
+                        for item in response.content
+                    ],
+                    ensure_ascii=False,
+                )
+                if response.is_error or _tool_errored(body):
+                    raise ApiError(f"{tool}: {_flat(body)[:150]}")
+                return body
+            except ApiError as exc:
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise
+            except Exception as exc:
+                wrapped = ApiError(f"{tool}: {exc}")
+                if attempt < retries and _is_transient(str(exc)):
+                    await asyncio.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise wrapped from exc
+
+    return call
+
+
+def _flat(s: str) -> str:
+    return " ".join(s.split())
+
+
+def _tool_errored(body: str) -> bool:
+    """MCP 工具级错误：[{type:text, text:"Error: ..."}] 或整体含 error。"""
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    if isinstance(data, dict) and "error" in str(data).lower():
+        return True
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                if isinstance(text, str) and text.startswith("Error:"):
+                    return True
+    return False
+
+
+def _texts(body: str) -> str:
+    """把 MCP 的 [{type:text,text:...}] 拼成一段纯文本，便于做内容断言。"""
+    try:
+        data = json.loads(body)
+    except Exception:
+        return body
+    if isinstance(data, list):
+        return "\n".join(
+            str(i.get("text", "")) for i in data if isinstance(i, dict)
+        )
+    return body
+
+
+def _need(haystack: str, needle: str, what: str) -> None:
+    if needle not in haystack:
+        raise DataMismatch(f"{what}：返回里找不到 {needle!r}；实际 {_flat(haystack)[:120]}")
+
+
+# ── 数据探针 ──────────────────────────────────────────────────────────────────
+# 每个探针对应一个有状态服务：先发现 ID，再断言 GT 的内容事实。
+Probe = Callable[[Callable[[str, dict], Awaitable[str]]], Awaitable[str]]
+
+
+async def probe_mongodb(call) -> str:
+    """GT task 68a398aa2f58036e8d45ee2e：2022-06 已送达订单恰好 10 单。
+    库名/集合名/文档值都由 mongorestore 原样保留，可直接断言。"""
+    body = await call("mongodb_count", {
+        "database": "video_game_store",
+        "collection": "Delivery Logistics",
+        "query": {
+            "Delivery Status": "Delivered",
+            "Order Date": {
+                "$gte": {"$date": "2022-06-01T00:00:00.000Z"},
+                "$lt": {"$date": "2022-07-01T00:00:00.000Z"},
+            },
+        },
+    })
+    _need(_texts(body), "Found 10 documents", "2022-06 已送达订单数应为 10")
+    return "video_game_store 已恢复，Delivery Logistics 文档数与 GT 一致"
+
+
+async def _airtable_membership(call, base_id: str) -> str:
+    """会员失效探针：Airtable 免费版每 base 只保留 1000 条记录，超出的（按 base 内创建
+    顺序排在 1000 名之后）会被隐藏。Customer Feedback 表有 3350 条，最后一条的
+    Customer ID=6NbOYtn9 稳落在 1000 之后（Copy base 会原样保留这个字段值）。够得到它
+    → 会员有效；够不到 → base 已被截到 1000，会员失效。
+
+    必须通过 --base-url 对应网关的 airtable_search_records 调用；该 MCP 工具内部用一次
+    filterByFormula 定位记录，既不读取本地 .env，也不需要翻 34 页。"""
+    records = json.loads(_texts(await call("airtable_search_records", {
+        "base_id": base_id,
+        "table_name": "Customer Feedback",
+        "field_name": "Customer ID",
+        "value": "6NbOYtn9",
+    })))
+    if not records:
+        raise DataMismatch(
+            "⚠️ 会员疑似已失效：够不到 Customer Feedback 第 3350 条 (Customer ID=6NbOYtn9)，"
+            "免费版每 base 截到 1000 条、深层记录被隐藏"
+        )
+    return "会员有效（够到第 3350 条深层记录）"
+
+
+async def probe_airtable(call) -> str:
+    """GT task 689bd255c0422b257e7dfcf4：Car Dealership base 的 Digital Analytics 表。
+    base_id 因 Copy base 而变，先按 base 名发现。另外查一条超出免费版 1000 上限的深层
+    记录，顺带检测会员是否失效。"""
+    bases = json.loads(_texts(await call("airtable_list_bases", {})))
+    base = next((b for b in bases if b.get("name") == "Car Dealership"), None)
+    if base is None:
+        raise DataMismatch(
+            f"没找到名为 'Car Dealership' 的 base；现有: {[b.get('name') for b in bases]}"
+        )
+    recs = json.loads(_texts(await call("airtable_list_records", {
+        "base_id": base["id"], "table_name": "Digital Analytics",
+    })))
+    if not recs:
+        raise DataMismatch("Digital Analytics 表存在但没有记录")
+    hit = any(r.get("fields", {}).get("Page Name") == "Inventory" for r in recs)
+    if not hit:
+        raise DataMismatch(f"Digital Analytics 有 {len(recs)} 条记录，但找不到 Page Name='Inventory' 的行")
+    membership = await _airtable_membership(call, base["id"])
+    return (f"Car Dealership({base['id']}) 的 Digital Analytics 含 GT 的 Inventory 行；"
+            f"{membership}")
+
+
+async def probe_notion(call) -> str:
+    """GT task 689cd6f8522029b7ad7b200a：Real Estate 库里 YearBuilt=2010 且未装修的房源。
+    database_id 因重新导入而变，先按库标题发现。"""
+    res = json.loads(_texts(await call(
+        "notion_API-post-search", {"filter": {"property": "object", "value": "database"}}
+    )))
+    dbs = {}
+    for r in res.get("results", []):
+        title = "".join(t.get("plain_text", "") for t in (r.get("title") or []))
+        if title:
+            dbs[title] = r.get("id")
+    if "Real Estate" not in dbs:
+        raise DataMismatch(f"没找到 'Real Estate' 库；现有: {sorted(dbs)}")
+    rows = json.loads(_texts(await call("notion_API-post-database-query", {
+        "database_id": dbs["Real Estate"],
+        "filter": {"and": [
+            {"property": "YearBuilt", "number": {"equals": 2010}},
+            {"property": "FurnishingStatus", "select": {"equals": "Unfurnished"}},
+        ]},
+    })))
+    n = len(rows.get("results", []))
+    if n == 0:
+        raise DataMismatch("Real Estate 库存在，但 GT 的过滤条件(YearBuilt=2010/Unfurnished)查不到任何行")
+    return f"6 张库在位；Real Estate 按 GT 条件命中 {n} 行（共 {len(dbs)} 张库）"
+
+
+async def probe_slack(call) -> str:
+    """GT task 689bd255c0422b257e7dfcc4：#movie-suggestions 频道的历史消息。
+    channel_id 因重建 workspace 而变，先按频道名发现。
+
+    除消息文本外还断言用户名能解析出来：conversations_history 返回
+    UserID,UserName,RealName,...，而 GT claims 里有 'The user "mcpdumple" made a
+    recommendation'、'@mcpdumle sent 4 messages' 这类按名字判定的断言。导入 Slack
+    时若把用户整个排除掉，名字会解析不出来，这些任务就白跑了 —— 正确的导入选项是
+    "请勿导入这些用户，但仅导入其消息"（保留名字、不发邀请、不占席位）。"""
+    # 两种都查：导出里 6 个频道都在 channels.json（无 groups.json）所以本该是公共频道，
+    # 但导入时若选了「创建新的私人频道」就会变私有。GT 里模型也是两种一起查的。
+    csv = _texts(await call(
+        "slack_channels_list", {"channel_types": "public_channel, private_channel"}
+    ))
+    chan_id = None
+    for line in csv.splitlines()[1:]:
+        parts = line.split(",")
+        if len(parts) >= 2 and parts[1].strip() == "#movie-suggestions":
+            chan_id = parts[0].strip()
+            break
+    if not chan_id:
+        found = [
+            line.split(",")[1]
+            for line in csv.splitlines()[1:]
+            if len(line.split(",")) >= 2
+        ]
+        raise DataMismatch(f"没找到 #movie-suggestions 频道（Slack 导出未导入？）；现有: {found}")
+    hist = _texts(await call("slack_conversations_history", {"channel_id": chan_id}))
+    _need(hist, "Akira", "#movie-suggestions 应含 GT 的历史消息")
+    if "Omari West" not in hist and "hiphopluvr1989" not in hist:
+        raise DataMismatch(
+            "消息在，但发送者名字解析不出来（GT 里这条是 hiphopluvr1989 / Omari West）。"
+            "导入时应选『请勿导入这些用户，但仅导入其消息』，不要整个排除用户"
+        )
+    return f"#movie-suggestions({chan_id}) 历史消息在位，且用户名可解析"
+
+
+def resolve_completion_input(explicit: str | None) -> Path:
+    """Resolve the exact CSV used by completion, relative to mcp_eval."""
+    value = explicit or read_env_value(ENV_PATH, "MCP_COMPLETION_INPUT")
+    path = Path(value or "MCP-Atlas.csv").expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"测试集不存在: {path}")
+    return path
+
+
+def _slack_anchor_from_input(input_path: Path) -> dt.datetime:
+    """Read the exact Napoleon-Dynamite timestamp expected by the selected CSV."""
+    csv.field_size_limit(sys.maxsize)
+    with input_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            trajectory = row.get("TRAJECTORY") or ""
+            claims = row.get("GTFA_CLAIMS") or ""
+            if "slack_" not in trajectory or "Napoleon Dynamite" not in claims:
+                continue
+            for match in ISO_DT.finditer(claims):
+                year, month, day, hour, minute, second, fraction = match.groups()
+                if hour is None or fraction is None:
+                    continue
+                microsecond = int(fraction[1:].ljust(6, "0")[:6])
+                return dt.datetime(
+                    int(year),
+                    int(month),
+                    int(day),
+                    int(hour),
+                    int(minute),
+                    int(second),
+                    microsecond,
+                    tzinfo=dt.timezone.utc,
+                )
+    raise DataMismatch(
+        f"{input_path} 中找不到 Slack/Napoleon Dynamite 的精确时间 claim"
+    )
+
+
+def _slack_time(raw: str) -> dt.datetime:
+    seconds, _, fraction = raw.partition(".")
+    microsecond = int(fraction.ljust(6, "0")[:6]) if fraction else 0
+    return dt.datetime.fromtimestamp(
+        int(seconds), dt.timezone.utc
+    ).replace(microsecond=microsecond)
+
+
+async def probe_slack_timestamp_alignment(call, input_path: Path) -> str:
+    """Verify that the selected evaluation CSV matches the imported Slack shift."""
+    channels = _texts(await call(
+        "slack_channels_list", {"channel_types": "public_channel, private_channel"}
+    ))
+    channel_id = None
+    for row in csv.DictReader(io.StringIO(channels)):
+        if (row.get("Name") or "").strip() == "#movie-suggestions":
+            channel_id = (row.get("ID") or "").strip()
+            break
+    if not channel_id:
+        raise DataMismatch("时间对齐检查找不到 #movie-suggestions 频道")
+
+    history = _texts(await call(
+        "slack_conversations_history", {"channel_id": channel_id}
+    ))
+    actual = None
+    for row in csv.DictReader(io.StringIO(history)):
+        if "Napoleon Dynamite" in (row.get("Text") or ""):
+            raw_time = (row.get("Time") or "").strip()
+            if raw_time:
+                actual = _slack_time(raw_time)
+                break
+    if actual is None:
+        raise DataMismatch("Slack 云端找不到 Napoleon Dynamite 时间锚点")
+
+    expected = _slack_anchor_from_input(input_path)
+    if actual != expected:
+        raise DataMismatch(
+            "测试集与 Slack 时间不对应："
+            f"CSV={expected.isoformat()}，Slack={actual.isoformat()}，"
+            f"输入={input_path}"
+        )
+    return (
+        f"测试集 {input_path.name} 与 Slack 时间锚点一致："
+        f"{actual.isoformat()}"
+    )
+
+
+async def probe_google_workspace(call) -> str:
+    """GT task 68993ef3cf3e953b8ab83fa3：2025-07 下半月的日历事件。
+    事件标题由 .ics 导入原样保留，可直接断言。"""
+    body = _texts(await call("google-workspace_list_events", {
+        "timeMin": "2025-07-15T00:00:00Z",
+        "timeMax": "2025-07-31T23:59:59Z",
+        "maxResults": 1000,
+    }))
+    if body.strip() in ("[]", ""):
+        raise DataMismatch("GT 日期范围(2025-07-15~31)内没有任何事件——.ics 未导入或导入到了别的账号")
+    _need(body, "Virtual Jazz Workshop", "2025-07 应含 GT 事件")
+    return "日历含 GT 的 2025-07 事件"
+
+
+PROBES: dict[str, tuple[Probe, str]] = {
+    "mongodb": (probe_mongodb, "video_game_store 的 mongorestore 是否成功"),
+    "airtable": (probe_airtable, "Car Dealership base 是否已 Copy 且有数据"),
+    "notion": (probe_notion, "Notion 导入的 6 张库是否在位"),
+    "slack": (probe_slack, "Slack 导出的频道/消息是否已导入"),
+    "google-workspace": (probe_google_workspace, "Google Calendar 的 .ics 是否已导入"),
+}
+
+PROBE_TOOLS: dict[str, tuple[str, ...]] = {
+    "mongodb": ("mongodb_count",),
+    "airtable": (
+        "airtable_list_bases",
+        "airtable_list_records",
+        "airtable_search_records",
+    ),
+    "notion": (
+        "notion_API-post-search",
+        "notion_API-post-database-query",
+    ),
+    "slack": (
+        "slack_channels_list",
+        "slack_conversations_history",
+    ),
+    "google-workspace": ("google-workspace_list_events",),
+}
+
+
+# ── 结果 ──────────────────────────────────────────────────────────────────────
+OK, BAD, FAIL = "DATA OK", "DATA BAD", "API FAIL"
+
+
+@dataclass
+class Result:
+    server: str
+    kind: str  # "data" | "smoke"
+    status: str
+    elapsed: float = 0.0
+    detail: str = ""
+
+
+async def run_probe(call, server: str, timeout: float) -> Result:
+    t0 = time.monotonic()
+    try:
+        detail = await PROBES[server][0](call)
+        return Result(server, "data", OK, time.monotonic() - t0, detail)
+    except DataMismatch as e:
+        return Result(server, "data", BAD, time.monotonic() - t0, str(e))
+    except ApiError as e:
+        return Result(server, "data", FAIL, time.monotonic() - t0, str(e))
+    except Exception as e:  # 解析失败等，按数据问题报，附类型便于排查
+        return Result(server, "data", BAD, time.monotonic() - t0,
+                      f"{type(e).__name__}: {str(e)[:150]}")
+
+
+async def run_smoke(call, server: str, tool: str, args: dict) -> Result:
+    t0 = time.monotonic()
+    try:
+        await call(tool, args)
+        return Result(server, "smoke", OK, time.monotonic() - t0)
+    except ApiError as e:
+        return Result(server, "smoke", FAIL, time.monotonic() - t0, str(e))
+
+
+async def load_target_servers(
+    client: httpx.AsyncClient,
+    service_url: str,
+    timeout: float,
+) -> list[str]:
+    """从目标网关获取实际配置的 server；不使用运行脚本所在仓库的 .env 判断。"""
+    endpoint = f"{service_url.rstrip('/')}/enabled-servers"
+    try:
+        resp = await client.get(endpoint, timeout=timeout)
+        if resp.status_code >= 300:
+            raise ApiError(
+                f"enabled-servers: HTTP {resp.status_code}: {_flat(resp.text)[:150]}"
+            )
+        payload = resp.json()
+        entries = payload.get("servers")
+        if not isinstance(entries, list):
+            raise ValueError("响应缺少 servers 列表")
+        names = [
+            entry[0]
+            for entry in entries
+            if isinstance(entry, list)
+            and len(entry) >= 1
+            and isinstance(entry[0], str)
+        ]
+        if len(names) != len(entries):
+            raise ValueError("servers 列表格式错误")
+        return names
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(f"enabled-servers: {exc}") from exc
+
+
+def _select_checks(
+    server_names: set[str],
+    *,
+    only: str | None,
+    data_only: bool,
+    smoke_only: bool,
+) -> tuple[list[str], list[str]]:
+    probes: list[str] = []
+    smokes: list[str] = []
+    for name in sorted(server_names):
+        if only and name != only:
+            continue
+        if name in PROBES and not smoke_only:
+            probes.append(name)
+        elif name in TEST_CALLS and not data_only:
+            smokes.append(name)
+    if only and only not in server_names:
+        raise ValueError(f"目标 runtime 未配置或未定义该 server 的检查: {only}")
+    if not probes and not smokes:
+        raise ValueError(
+            "没有可跑的检查（模式过滤后为空，或该 server 没有测试用例）"
+        )
+    return probes, smokes
+
+
+async def _run_checks(
+    call,
+    *,
+    probes: list[str],
+    smokes: list[str],
+    concurrency: int,
+    timeout: float,
+) -> list[Result]:
+    sem = asyncio.Semaphore(concurrency)
+
+    async def guard(coro_fn, *args):
+        async with sem:
+            return await coro_fn(*args)
+
+    tasks = [guard(run_probe, call, name, timeout) for name in probes]
+    tasks += [
+        guard(run_smoke, call, name, *TEST_CALLS[name])
+        for name in smokes
+    ]
+    return list(await asyncio.gather(*tasks))
+
+
+def _render_results(results: list[Result]) -> None:
+    icon = {OK: "✅", BAD: "❌", FAIL: "💥"}
+    data_res = [r for r in results if r.kind == "data"]
+    smoke_res = [r for r in results if r.kind == "smoke"]
+
+    if data_res:
+        print(f"\n{'='*78}\n数据校验（回放 MCP-Atlas GT 调用，验证官方数据是否已导入）\n{'='*78}")
+        for r in sorted(data_res, key=lambda x: x.server):
+            print(f"{icon[r.status]} {r.status:9s} {r.server:18s} {r.elapsed:5.1f}s")
+            if r.server in PROBES:
+                print(f"       └─ 验的是: {PROBES[r.server][1]}")
+            if r.detail:
+                print(f"       └─ {r.detail}")
+
+    if smoke_res:
+        print(f"\n{'='*78}\n连通性冒烟（无专属数据的服务，只验 API 能否调通）\n{'='*78}")
+        for r in sorted(smoke_res, key=lambda x: x.server):
+            print(f"{icon[r.status]} {'OK' if r.status == OK else r.status:9s} {r.server:18s} {r.elapsed:5.1f}s")
+            if r.detail:
+                print(f"       └─ {r.detail}")
+
+    n = {s: sum(1 for r in results if r.status == s) for s in (OK, BAD, FAIL)}
+    print(f"\n{'='*78}")
+    print(
+        f"合计 {len(results)} 项：✅ {n[OK]}   ❌ 数据不符 {n[BAD]}   "
+        f"💥 API 失败 {n[FAIL]}"
+    )
+    if n[BAD]:
+        print("→ ❌ API 通但数据对不上：该服务的官方数据没导入（或导到了别的账号）。")
+        print("   依赖它的评测任务会照跑但拿不到分——注意这类失败会压低分数。")
+    if n[FAIL]:
+        print("→ 💥 调用本身失败：检查 key、服务是否启动、MCP_SERVER_URL 端口。")
+
+
+async def run_legacy(
+    base_url: str,
+    timeout: float,
+    concurrency: int,
+    only: str | None,
+    data_only: bool,
+    smoke_only: bool,
+    retries: int = 0,
+) -> None:
+    """Validate the legacy runtime by sending every call to shared /call-tool."""
+
+    async with httpx.AsyncClient() as client:
+        servers = await load_target_servers(client, base_url, timeout)
+        probes, smokes = _select_checks(
+            set(servers),
+            only=only,
+            data_only=data_only,
+            smoke_only=smoke_only,
+        )
+        call = make_caller(
+            client,
+            f"{base_url.rstrip('/')}/call-tool",
+            timeout,
+            retries,
+        )
+        results = await _run_checks(
+            call,
+            probes=probes,
+            smokes=smokes,
+            concurrency=concurrency,
+            timeout=timeout,
+        )
+    _render_results(results)
+
+
+async def run_isolated(
+    base_url: str,
+    timeout: float,
+    concurrency: int,
+    only: str | None,
+    data_only: bool,
+    smoke_only: bool,
+    retries: int = 0,
+    input_path: Path | None = None,
+) -> None:
+    """Validate tools and data through the production task-isolated routes."""
+
+    async with httpx.AsyncClient() as client:
+        shared_servers = await load_target_servers(client, base_url, timeout)
+
+    # A fixture-free shared runtime is not authoritative for task routes.
+    server_names = set(shared_servers)
+    server_names.update(
+        name
+        for name in (set(TASK_LOCAL_SERVERS) | set(TASK_NETWORK_SERVERS))
+        if name in PROBES or name in TEST_CALLS
+    )
+    probes, smokes = _select_checks(
+        server_names,
+        only=only,
+        data_only=data_only,
+        smoke_only=smoke_only,
+    )
+    requested_tools = {
+        tool
+        for name in probes
+        for tool in PROBE_TOOLS[name]
+    }
+    requested_tools.update(TEST_CALLS[name][0] for name in smokes)
+
+    async with IsolatedMCPClient(
+        task_id=f"connectivity-v2-{uuid.uuid4().hex[:12]}",
+        shared_url=base_url,
+        enabled_tools=sorted(requested_tools),
+    ) as isolated_client:
+        call = make_isolated_caller(
+            isolated_client,
+            timeout,
+            retries,
+        )
+        results = await _run_checks(
+            call,
+            probes=probes,
+            smokes=smokes,
+            concurrency=concurrency,
+            timeout=timeout,
+        )
+        if "slack" in probes:
+            selected_input = input_path or resolve_completion_input(None)
+            slack_result = next(
+                result for result in results if result.server == "slack"
+            )
+            if slack_result.status == OK:
+                try:
+                    alignment = await probe_slack_timestamp_alignment(
+                        call, selected_input
+                    )
+                    slack_result.detail = f"{slack_result.detail}；{alignment}"
+                except DataMismatch as exc:
+                    slack_result.status = BAD
+                    slack_result.detail = str(exc)
+                except ApiError as exc:
+                    slack_result.status = FAIL
+                    slack_result.detail = str(exc)
+    _render_results(results)
+
+
+def _parse_cli(description: str, *, default_concurrency: int):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="MCP 服务地址（否则读取 .env 的 MCP_SERVER_URL；必须显式含端口）",
+    )
+    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=default_concurrency,
+    )
+    parser.add_argument("--server", default=None, help="只测某一个服务")
+    parser.add_argument(
+        "--data-only",
+        action="store_true",
+        help="只跑 5 个有状态服务的数据校验",
+    )
+    parser.add_argument(
+        "--smoke-only",
+        action="store_true",
+        help="只跑连通性冒烟",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help=(
+            "瞬时错误(429/超时/5xx/连接)的重试次数，带退避；"
+            "数据不符和永久错误不重试（默认 2）"
+        ),
+    )
+    parser.add_argument(
+        "--input",
+        default=None,
+        help=(
+            "V2 用于核对 Slack 时间戳的评测 CSV；否则读取 .env 的 "
+            "MCP_COMPLETION_INPUT，未配置时使用 MCP-Atlas.csv"
+        ),
+    )
+    return parser, parser.parse_args()
+
+
+def cli_legacy() -> None:
+    parser, args = _parse_cli(
+        "旧共享 MCP runtime 数据+连通性检查",
+        default_concurrency=5,
+    )
+    try:
+        mcp_url, mcp_port = resolve_mcp_server_url(args.base_url, ENV_PATH)
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(f"MCP 服务: {mcp_url}  (端口 {mcp_port})")
+    print(f"工具端点: {mcp_url}/call-tool")
+    print("测试模式: V1 旧共享 runtime（所有工具直接调用共享端点）")
+    if args.input:
+        parser.error("--input 仅用于 test_server_v2.py")
+    asyncio.run(
+        run_legacy(
+            mcp_url,
+            args.timeout,
+            args.concurrency,
+            args.server,
+            args.data_only,
+            args.smoke_only,
+            args.retries,
+        )
+    )
+
+
+def cli_isolated() -> None:
+    parser, args = _parse_cli(
+        "任务隔离 MCP runtime 数据+连通性检查",
+        default_concurrency=20,
+    )
+    try:
+        mcp_url, mcp_port = resolve_mcp_server_url(args.base_url, ENV_PATH)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        input_path = resolve_completion_input(args.input)
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(f"共享 MCP 服务: {mcp_url}  (端口 {mcp_port})")
+    print("测试模式: V2 正式路由（云端共享，本地/下载/Mongo 使用任务容器）")
+    print(f"评测输入: {input_path}")
+    asyncio.run(
+        run_isolated(
+            mcp_url,
+            args.timeout,
+            args.concurrency,
+            args.server,
+            args.data_only,
+            args.smoke_only,
+            args.retries,
+            input_path,
+        )
+    )

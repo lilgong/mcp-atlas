@@ -2,9 +2,11 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import os
 import datetime
+import time
+import uuid
 
 import httpx
 import litellm
@@ -13,6 +15,7 @@ from pydantic import BaseModel
 from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .pangu_completion import generate_pangu_async
+from .runtime_log import jsonable, write_runtime_event
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,78 @@ class LLMResponse(BaseModel):
 
     message: AssistantMessage
     original_content: Optional[str] = None
+    dropped_tool_calls: int = 0
+    repaired_tool_calls: int = 0
+
+
+# Only braces are ever restored, shortest first. The observed defect drops
+# closing braces when a response is split between calls. A missing quote or
+# bracket means the text itself was cut short instead, and inventing one would
+# fabricate arguments the model never produced.
+_ARGUMENT_CLOSERS = ("}", "}}", "}}}")
+
+
+def _repair_arguments(arguments: str) -> Optional[str]:
+    """Rebalance arguments JSON that lost its outermost closing brace.
+
+    Some providers split a multi-tool-call response by scanning for the first
+    closing brace instead of balancing them, so every call except the last
+    loses one '}' whenever its final value is a nested object. The prefix is
+    otherwise intact, which makes appending the missing closers a faithful
+    reconstruction rather than a guess. Returns None if it cannot be repaired.
+    """
+    for closer in _ARGUMENT_CLOSERS:
+        candidate = arguments + closer
+        try:
+            json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        return candidate
+    return None
+
+
+def _sanitize_tool_calls(
+    raw_calls: List[Dict[str, Any]],
+) -> Tuple[Optional[List[Dict[str, Any]]], int, int]:
+    """Make tool calls representable, and count what was repaired or dropped.
+
+    Two provider defects are handled. A null function.name cannot satisfy
+    ToolCall's Dict[str, str] and the call is unusable, so it is dropped.
+    Arguments that are not valid JSON are worse than unusable: the malformed
+    assistant message lands in the history and every later turn is rejected
+    upstream with a 400, so the task can never recover and each rerun
+    reproduces it. Those are repaired when possible, dropped otherwise.
+    """
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    repaired = 0
+    for call in raw_calls:
+        function = call.get("function") or {}
+        name = function.get("name")
+        if not (isinstance(name, str) and name):
+            dropped += 1
+            continue
+
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str):
+            dropped += 1
+            continue
+
+        try:
+            json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            fixed = _repair_arguments(arguments)
+            if fixed is None:
+                dropped += 1
+                continue
+            call = {
+                **call,
+                "function": {**function, "arguments": fixed},
+            }
+            repaired += 1
+
+        kept.append(call)
+    return (kept or None), dropped, repaired
 
 
 def configure_litellm():
@@ -80,6 +155,8 @@ async def create_completion(
         messages: List[Message],
         tools: List[ToolCallSchema],
         extra_body: Optional[Dict[str, Any]] = None,
+        task_id: str = "unknown",
+        turn: int = 0,
 ) -> LLMResponse:
     """Create a completion using LiteLLM."""
 
@@ -110,16 +187,35 @@ async def create_completion(
     else:
         proxy_model = model
 
-    try:
-        # 慢思考模式：复制一份再改，避免就地修改调用方传入的 dict
-        extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
-        extra_body["thinking"] = {**extra_body.get("thinking", {}), "type": "enabled"}
+    # 慢思考模式：复制一份再改，避免就地修改调用方传入的 dict
+    extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
+    extra_body["thinking"] = {**extra_body.get("thinking", {}), "type": "enabled"}
+    call_id = uuid.uuid4().hex
+    started = time.monotonic()
+    write_runtime_event(
+        "model_calls",
+        "model_call_started",
+        task_id=task_id,
+        turn=turn,
+        call_id=call_id,
+        model=proxy_model,
+        base_url=config.LLM_BASE_URL,
+        request={
+            "messages": litellm_messages,
+            "tools": litellm_tools,
+            "extra_body": extra_body,
+        },
+    )
 
+    try:
         if "pangu" in proxy_model:
             response = await generate_pangu_async(
                 model=proxy_model,
                 messages=litellm_messages,
-                tools=litellm_tools
+                tools=litellm_tools,
+                task_id=task_id,
+                turn=turn,
+                call_id=call_id,
             )
         else:
             response = await litellm.acompletion(
@@ -132,9 +228,28 @@ async def create_completion(
                 **({"extra_body": extra_body} if extra_body else {}),
             )
 
+        usage = None
+        if not isinstance(response, dict):
+            usage = jsonable(getattr(response, "usage", None))
+        elif isinstance(response.get("usage"), dict):
+            usage = response.get("usage")
+        write_runtime_event(
+            "model_calls",
+            "model_call_completed",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            duration_seconds=round(time.monotonic() - started, 3),
+            usage=usage,
+            response=jsonable(response),
+        )
+
         # Convert response back to our format
         # Handle tool_calls conversion from OpenAI format to our format
         tool_calls = None
+        dropped_tool_calls = 0
+        repaired_tool_calls = 0
         if isinstance(response, dict):  # 盘古接口返回的是dict格式
             # 对于盘古思考过程调用工具提前终止的行为做预处理
 
@@ -166,6 +281,25 @@ async def create_completion(
                         }
                     )
 
+        if tool_calls:
+            (
+                tool_calls,
+                dropped_tool_calls,
+                repaired_tool_calls,
+            ) = _sanitize_tool_calls(tool_calls)
+            if dropped_tool_calls or repaired_tool_calls:
+                write_runtime_event(
+                    "model_calls",
+                    "malformed_tool_calls_dropped",
+                    task_id=task_id,
+                    turn=turn,
+                    call_id=call_id,
+                    model=proxy_model,
+                    dropped=dropped_tool_calls,
+                    repaired=repaired_tool_calls,
+                    kept=len(tool_calls or []),
+                )
+
         # 获取助手轮次思考过程
         if isinstance(response, dict):  # 盘古接口返回的是dict格式
             reasoning_content = response["choices"][0]["message"].get("reasoning_content", None)
@@ -186,6 +320,9 @@ async def create_completion(
             pass
         else:  # 开源接口返回的是ModelResponse格式
             token_usage = {
+                "task_id": task_id,
+                "turn": turn,
+                "call_id": call_id,
                 "model": proxy_model,
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
@@ -221,10 +358,25 @@ async def create_completion(
                     original_message=response.choices[0].message,
                 )
 
-        return LLMResponse(message=assistant_message)
+        return LLMResponse(
+            message=assistant_message,
+            dropped_tool_calls=dropped_tool_calls,
+            repaired_tool_calls=repaired_tool_calls,
+        )
 
     except Exception as error:
         logger.error(f"LiteLLM completion failed: {error}")
+        write_runtime_event(
+            "model_calls",
+            "model_call_failed",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            duration_seconds=round(time.monotonic() - started, 3),
+            error_type=type(error).__name__,
+            error=str(error),
+        )
         raise
 
 

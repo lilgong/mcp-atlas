@@ -118,6 +118,7 @@ class RunAgentAPIRequestBody(BaseModel):
     enabled_tools: List[str] = Field(alias="enabledTools")
     max_turns: int = Field(20, alias="maxTurns")
     extra_body: Optional[Dict[str, Any]] = Field(None, alias="extraBody")
+    task_id: Optional[str] = Field(None, alias="taskId")
 
     class Config:
         populate_by_name = True

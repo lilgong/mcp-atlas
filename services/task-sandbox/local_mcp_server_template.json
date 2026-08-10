@@ -1,0 +1,82 @@
+{
+  "mcpServers": {
+    "cli-mcp-server": {
+      "command": "/root/.local/share/uv/tools/cli-mcp-server/bin/cli-mcp-server",
+      "args": [],
+      "env": {
+        "ALLOWED_DIR": "/data",
+        "ALLOWED_COMMANDS": "ls,cat,find",
+        "ALLOWED_FLAGS": "-a,-A,-l,-h,-al,-la,-ah,-ha,-lh,-hl,-lah,-lha,-ahl,-alh,-1,-R,-r,-S,-t,--all,--almost-all,--long,--human-readable,-n,-b,-s,-E,-T,-v,--number,--number-nonblank,--squeeze-blank,--show-ends,--show-tabs,--show-nonprinting,-maxdepth,-mindepth,-name,-iname,-path,-ipath,-regex,-iregex,-type,-size,-mtime,-mmin,-newer,-empty,-readable,-links,-print,-print0,-printf",
+        "MAX_COMMAND_LENGTH": "1024",
+        "COMMAND_TIMEOUT": "30",
+        "ALLOW_SHELL_OPERATORS": "false"
+      }
+    },
+    "desktop-commander": {
+      "command": "node",
+      "args": [
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@wonderwhy-er/desktop-commander@0.2.7",
+        "dist/index.js"
+      ]
+    },
+    "filesystem": {
+      "command": "node",
+      "args": [
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-filesystem@2026.7.10",
+        "dist/index.js",
+        "/data"
+      ]
+    },
+    "git": {
+      "command": "/root/.local/share/uv/tools/mcp-server-git/bin/mcp-server-git",
+      "args": [],
+      "env": {
+        "GIT_CONFIG_GLOBAL": "/data/.atlas-gitconfig"
+      }
+    },
+    "mcp-code-executor": {
+      "command": "node",
+      "args": [
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@geobio/code_execution_server@0.2.1",
+        "build/index.js"
+      ],
+      "env": {
+        "CODE_STORAGE_DIR": "/data/repos/mcp_code_executor_workspace",
+        "ENV_TYPE": "venv-uv",
+        "UV_VENV_PATH": "/opt/mcp-code-venv"
+      }
+    },
+    "mcp-server-code-runner": {
+      "command": "node",
+      "args": [
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "mcp-server-code-runner@0.1.7",
+        "dist/cli.js"
+      ]
+    },
+    "memory": {
+      "command": "node",
+      "args": [
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-memory@2025.8.4",
+        "dist/index.js"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "/data/repos/memory_mcp_server/memories-for-mcp.json"
+      }
+    },
+    "mongodb": {
+      "command": "node",
+      "args": [
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "mongodb-mcp-server@0.2.0",
+        "dist/index.js",
+        "--connectionString",
+        "${MONGODB_CONNECTION_STRING}"
+      ]
+    }
+  }
+}

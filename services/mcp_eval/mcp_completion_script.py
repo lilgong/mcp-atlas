@@ -2,14 +2,15 @@
 # From file:       uv run mcp_completion_script.py --model "openai/gpt-4o" --input "sample_tasks.csv" --output "sample_4o_results.csv"
 # From HuggingFace: uv run mcp_completion_script.py --model "openai/gpt-4o" --input_huggingface "ScaleAI/mcp-eval" --output "results.csv"
 #
-# By default, tasks are filtered to only run those whose ground truth trajectories use MCP servers you have API keys for.
+# By default, tasks are filtered to servers available through either the shared
+# cloud runtime or the configured task-isolated runtime.
 # Use --no-filter to disable this and run all tasks regardless of available servers.
 #
 # The filtering process:
-# 1. Query the agent-environment service (MCP_SERVER_URL) to get the list of enabled servers
-# 2. If no servers are returned, all servers are considered enabled
+# 1. Query the shared service (MCP_SERVER_URL) for online cloud servers
+# 2. Merge task-local/network servers whose required fixture configuration exists
 # 3. If servers are returned, run extract_mcp_servers_per_task.py to extract which servers are used in each task's ground truth TRAJECTORY
-# 4. Filter out tasks whose ground truth trajectories used servers you don't have API keys for
+# 4. Filter out tasks whose ground truth trajectories require an unavailable route
 # 5. Print summary of how many tasks are being run vs skipped
 
 # Note that if rows exist in the output file, it'll skip re-evaluating those already-processed rows
@@ -40,6 +41,11 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from datasets import load_dataset
+from mcp_completion.tool_policy import (
+    effective_enabled_servers,
+    shared_routable_servers,
+)
+from mcp_completion.response_validation import is_completely_empty_agent_response
 
 warnings.filterwarnings("ignore")
 
@@ -61,6 +67,15 @@ SERVER_URL = os.getenv("SERVER_URL", "http://localhost:3000")
 
 # Retry configuration
 MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "20"))
+
+# A long-context task can legitimately run for most of an hour; the timeout is
+# only meant to catch a genuinely wedged request.
+REQUEST_TIMEOUT = float(os.getenv("TASK_REQUEST_TIMEOUT", "3600"))
+
+# Timeouts are deterministic, not flaky: an identical retry re-runs the same
+# turns and blows the same budget. Cap them well below MAX_RETRY_ATTEMPTS so a
+# single slow task cannot hold the run hostage for hours.
+MAX_TIMEOUT_ATTEMPTS = int(os.getenv("MAX_TIMEOUT_ATTEMPTS", "2"))
 
 
 def get_retry_delay(attempt: int) -> float:
@@ -252,6 +267,7 @@ class AsyncMCPTrajectoryGenerator:
             "model": self.llm_model,
             "messages": messages,
             "enabledTools": enabled_tools,
+            "taskId": str(taskId) if taskId is not None else uuid14(),
             "enableThinkingTokens": True,
             **({"extraBody": self.extra_body} if self.extra_body else {}),
         }
@@ -259,10 +275,11 @@ class AsyncMCPTrajectoryGenerator:
 
         url = f"{SERVER_URL}/v2/mcp_eval/run_agent"
 
+        timeouts = 0
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
                 async with self.session.post(
-                    url, json=payload, headers=headers, timeout=1800
+                    url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
                 ) as resp:
                     if resp.status == 200:
                         try:
@@ -271,8 +288,17 @@ class AsyncMCPTrajectoryGenerator:
                             text = await resp.text()
                             messages = json.loads(text)
 
-                        response = json.dumps(messages) if messages else None
-                        return response, attempt + 1
+                        if is_completely_empty_agent_response(messages):
+                            logging.warning(
+                                "HTTP 200 returned a completely empty agent "
+                                "response on attempt %d/%d for task %s",
+                                attempt + 1,
+                                MAX_RETRY_ATTEMPTS,
+                                taskId,
+                            )
+                        else:
+                            response = json.dumps(messages) if messages else None
+                            return response, attempt + 1
                     else:
                         error_text = await resp.text()
                         logging.error(
@@ -280,9 +306,26 @@ class AsyncMCPTrajectoryGenerator:
                         )
 
             except Exception as e:
+                # asyncio.TimeoutError stringifies to "", so name the type too.
                 logging.error(
-                    f"Error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for task {taskId}: {e}"
+                    "Error on attempt %d/%d for task %s: %s: %s",
+                    attempt + 1,
+                    MAX_RETRY_ATTEMPTS,
+                    taskId,
+                    type(e).__name__,
+                    e or "<no detail>",
                 )
+                if isinstance(e, asyncio.TimeoutError):
+                    timeouts += 1
+                    if timeouts >= MAX_TIMEOUT_ATTEMPTS:
+                        logging.error(
+                            "Giving up on task %s after %d timeouts at %.0fs; "
+                            "retrying would re-run the same turns",
+                            taskId,
+                            timeouts,
+                            REQUEST_TIMEOUT,
+                        )
+                        return None, attempt + 1
 
             if attempt < MAX_RETRY_ATTEMPTS - 1:
                 delay = get_retry_delay(attempt)
@@ -557,12 +600,12 @@ def load_tool_map(tool_map_path: str) -> Dict[str, List[str]]:
 def filter_tasks_by_enabled_servers(
     df: pd.DataFrame, tool_map: Dict[str, List[str]], enabled_servers: List[str]
 ) -> tuple[pd.DataFrame, List[tuple[str, List[str]]]]:
-    """Filter dataframe to only include tasks whose ground truth trajectories used servers you have enabled.
+    """Keep tasks whose trajectory servers are available through a runtime route.
 
     Args:
         df: DataFrame with tasks
         tool_map: Dict mapping task_id -> list of servers used in that task's ground truth TRAJECTORY
-        enabled_servers: List of servers you have API keys for (from /enabled-servers endpoint)
+        enabled_servers: Route-aware shared and task-isolated server list
 
     Returns:
         Tuple of (filtered_df, excluded_tasks) where excluded_tasks is a list of (task_id, missing_servers)
@@ -614,7 +657,9 @@ def write_exclusion_report(
         f.write(
             "Tasks were filtered out because their ground truth trajectories used MCP servers\n"
         )
-        f.write("that are not currently enabled (missing API keys).\n\n")
+        f.write(
+            "that are not available through the configured shared or task-isolated runtime.\n\n"
+        )
 
         f.write(f"Available servers ({len(enabled_servers)}):\n")
         f.write(", ".join(sorted(enabled_servers)) + "\n\n")
@@ -638,7 +683,7 @@ def write_exclusion_report(
 
 
 def get_enabled_servers() -> List[str]:
-    """Get enabled servers by querying the agent-environment service.
+    """Get route-aware enabled servers for the isolated evaluation runtime.
 
     Supports both old and new response formats:
     - Old: {"enabled_servers": ["server1", "server2"], "count": 2}
@@ -647,30 +692,94 @@ def get_enabled_servers() -> List[str]:
     mcp_server_url = os.getenv("MCP_SERVER_URL", "http://localhost:1984")
     # mcp_server_url = "http://localhost:1985"
 
+    attempts = max(1, int(os.getenv("MCP_ROUTE_PREFLIGHT_ATTEMPTS", "3")))
+    retry_delay = max(
+        0.0, float(os.getenv("MCP_ROUTE_PREFLIGHT_RETRY_DELAY", "1"))
+    )
+
     try:
-        response = requests.get(f"{mcp_server_url}/enabled-servers", timeout=10)
-        response.raise_for_status()
+        data = None
+        last_request_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.get(
+                    f"{mcp_server_url}/enabled-servers", timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+                offline = [
+                    name
+                    for name, status in data.get("servers", [])
+                    if status != "OK"
+                ]
+                if not offline or attempt == attempts:
+                    break
+                logging.warning(
+                    "MCP route preflight %d/%d has degraded servers: %s; "
+                    "retrying in %.1fs",
+                    attempt,
+                    attempts,
+                    ", ".join(sorted(offline)),
+                    retry_delay,
+                )
+            except requests.exceptions.RequestException as exc:
+                last_request_error = exc
+                if attempt == attempts:
+                    raise
+                logging.warning(
+                    "MCP route preflight %d/%d failed: %s; retrying in %.1fs",
+                    attempt,
+                    attempts,
+                    exc,
+                    retry_delay,
+                )
+            if retry_delay:
+                time.sleep(retry_delay)
 
-        data = response.json()
+        if data is None:
+            assert last_request_error is not None
+            raise last_request_error
 
-        # New format: servers is list of [name, status] tuples
-        if "servers" in data:
-            enabled_servers = [
-                name for name, status in data["servers"] if status == "OK"
-            ]
-        # Old format: enabled_servers is list of names
-        else:
-            enabled_servers = data.get("enabled_servers", [])
+        (
+            shared_enabled_servers,
+            reconnectable_servers,
+            shared_online_count,
+        ) = shared_routable_servers(data)
+        shared_configured_count = len(data.get("servers", shared_enabled_servers))
+        if reconnectable_servers:
+            logging.warning(
+                "Keeping transiently degraded but reconnectable MCP routes: %s",
+                ", ".join(reconnectable_servers),
+            )
+
+        isolation_enabled = (
+            os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+            not in {"0", "false", "no"}
+        )
+        task_data_configured = bool(
+            (os.getenv("MCP_TASK_DATA_DIR") or "").strip()
+        )
+        task_mongo_configured = bool(
+            (os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip()
+        )
+        enabled_servers = effective_enabled_servers(
+            shared_enabled_servers,
+            isolation_enabled=isolation_enabled,
+            task_data_configured=task_data_configured,
+            task_mongo_configured=task_mongo_configured,
+        )
 
         logging.info(
-            f"Retrieved {len(enabled_servers)} enabled servers from agent-environment service"
+            "Resolved %d enabled routes: %d shared-configured "
+            "(%d online, %d reconnectable), "
+            "task_data=%s, task_mongo=%s",
+            len(enabled_servers),
+            shared_configured_count,
+            shared_online_count,
+            len(reconnectable_servers),
+            task_data_configured,
+            task_mongo_configured,
         )
-        # enabled_servers = ['airtable', 'alchemy', 'arxiv', 'calculator', 'cli-mcp-server',
-        #                    'clinicaltrialsgov-mcp-server', 'context7', 'ddg-search', 'desktop-commander', 'fetch',
-        #                    'filesystem', 'git', 'github', 'google-maps', 'mcp-code-executor',
-        #                    'mcp-server-code-runner', 'memory', 'met-museum', 'mongodb', 'national-parks', 'notion',
-        #                    'open-library', 'osm-mcp-server', 'pubmed', 'slack', 'twelvedata', 'weather',
-        #                    'weather-data', 'whois', 'wikipedia']
         return enabled_servers
 
     except requests.exceptions.RequestException as e:
@@ -759,8 +868,12 @@ def parse_arguments(model, input_path, output_path, num_task, concurrency):
     parser.add_argument(
         "--extra-body",
         type=str,
-        default=None,
-        help='JSON string of extra body params to pass to the completion service (e.g. \'{"reasoning_effort": "xhigh", "allowed_openai_params": ["reasoning_effort"]}\')',
+        default=os.getenv("MCP_COMPLETION_EXTRA_BODY") or None,
+        help=(
+            "JSON object passed unchanged to the model provider request body; "
+            "defaults to MCP_COMPLETION_EXTRA_BODY "
+            '(e.g. \'{"reasoning_effort":"max"}\')'
+        ),
     )
 
     return parser.parse_args()
@@ -831,11 +944,12 @@ async def main():
         enabled_servers = get_enabled_servers()
 
         if not enabled_servers:
-            logging.info(
-                "🌐 No enabled servers returned from agent-environment service - all servers are enabled, skipping filter"
+            raise RuntimeError(
+                "No MCP servers are available through the configured shared "
+                "or task-isolated runtime; refusing to disable filtering"
             )
         else:
-            logging.info("🔍 Filtering tasks by enabled servers...")
+            logging.info("🔍 Filtering tasks by route-aware server availability...")
 
             # Validate that TRAJECTORY column exists
             if "TRAJECTORY" not in df.columns:
@@ -876,7 +990,8 @@ async def main():
             skipped_count = original_count - filtered_count
             if skipped_count > 0:
                 logging.info(
-                    f"⚠️  Skipped {skipped_count} tasks because their ground truth trajectories used MCP servers you don't have API keys for"
+                    f"⚠️  Skipped {skipped_count} tasks because their ground "
+                    "truth trajectories require unavailable MCP routes"
                 )
 
             # Write exclusion report

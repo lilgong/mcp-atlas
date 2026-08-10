@@ -7,7 +7,7 @@ A Docker container with ~40 pre-configured Model Context Protocol (MCP) servers 
 1. **Set up environment variables:**
    This depends on `.env` that should be passed in from the root level directory of this repo (copied from env.template).
 
-   Setup the API keys for the MCP servers you want to use. You'll have to get your own API keys.
+   Setup the API keys for the MCP servers you want to use. You'll have to get your own API keys. Context7 can run anonymously for small checks, but batch runs should set `CONTEXT7_API_KEY` to avoid the anonymous quota.
    
    For quick start, modify `.env` to set a few servers that don't need API keys:
    `ENABLED_SERVERS=calculator,wikipedia,filesystem,git,fetch`

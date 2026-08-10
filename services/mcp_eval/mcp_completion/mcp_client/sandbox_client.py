@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from .base_client import MCPClient
+from ..docker_http import docker_post_json
 from ..errors import MCPClientToolExecutionError
 from ..schema import ToolDefinition, CallToolResponse, TextContent
 from ..config import config
@@ -22,30 +23,69 @@ class SandboxMCPClient(MCPClient):
         self,
         sandbox_url: str,
         enabled_tools: Optional[List[str]] = None,  # if None, all tools are enabled
+        container_name: Optional[str] = None,
     ):
         self.sandbox_url = sandbox_url
         self.enabled_tools = enabled_tools
+        self.container_name = container_name
+        self._enabled_tool_set = (
+            set(enabled_tools) if enabled_tools is not None else None
+        )
+        self._canonical_to_backend: Dict[str, str] = {}
         self.tool_call_timeout = config.TOOL_CALL_TIMEOUT
         self.list_tools_timeout = config.LIST_TOOLS_TIMEOUT
 
     async def list_tools(self) -> List[ToolDefinition]:
         """List available tools from the sandbox."""
         try:
-            async with httpx.AsyncClient(timeout=self.list_tools_timeout) as client:
-                response = await client.post(
-                    f"{self.sandbox_url}/list-tools",
-                    headers={"Content-Type": "application/json"},
+            if self.container_name:
+                status_code, response_text = await docker_post_json(
+                    self.container_name,
+                    "/list-tools",
+                    {},
+                    timeout=self.list_tools_timeout,
                 )
-                response.raise_for_status()
+                if status_code >= 400:
+                    raise RuntimeError(
+                        f"HTTP {status_code}: {response_text[:500]}"
+                    )
+                tools_data = json.loads(response_text)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=self.list_tools_timeout
+                ) as client:
+                    response = await client.post(
+                        f"{self.sandbox_url}/list-tools",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    response.raise_for_status()
+                    tools_data = response.json()
 
-                tools_data = response.json()
-                tools = [ToolDefinition(**tool) for tool in tools_data]
+            backend_tools = [ToolDefinition(**tool) for tool in tools_data]
+            tools: List[ToolDefinition] = []
 
-                # Filter by enabled tools if specified
-                if self.enabled_tools:
-                    tools = [tool for tool in tools if tool.name in self.enabled_tools]
+            # A FastMCP client with exactly one configured server may expose
+            # raw names (``read_text_file``) instead of the multi-server
+            # canonical name (``filesystem_read_text_file``). Resolve each
+            # raw name back to the requested canonical name by unique suffix.
+            for tool in backend_tools:
+                canonical_name = tool.name
+                if self._enabled_tool_set is not None:
+                    if canonical_name not in self._enabled_tool_set:
+                        candidates = [
+                            name
+                            for name in self._enabled_tool_set
+                            if name.endswith(f"_{tool.name}")
+                        ]
+                        if len(candidates) != 1:
+                            continue
+                        canonical_name = candidates[0]
+                self._canonical_to_backend[canonical_name] = tool.name
+                if canonical_name != tool.name:
+                    tool = tool.model_copy(update={"name": canonical_name})
+                tools.append(tool)
 
-                return tools
+            return tools
 
         except Exception as error:
             logger.error(f"Failed to list tools from sandbox: {error}")
@@ -53,31 +93,61 @@ class SandboxMCPClient(MCPClient):
 
     async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
         """Call a tool in the sandbox."""
+        if (
+            self._enabled_tool_set is not None
+            and tool_name not in self._enabled_tool_set
+        ):
+            raise MCPClientToolExecutionError(
+                f"Tool is not enabled for this client: {tool_name}"
+            )
+        if (
+            self._enabled_tool_set is not None
+            and tool_name not in self._canonical_to_backend
+        ):
+            await self.list_tools()
         try:
+            backend_tool_name = self._canonical_to_backend.get(
+                tool_name, tool_name
+            )
             body = {
-                "tool_name": tool_name,
+                "tool_name": backend_tool_name,
                 "tool_args": args,
             }
 
-            async with httpx.AsyncClient(timeout=self.tool_call_timeout) as client:
-                response = await client.post(
-                    f"{self.sandbox_url}/call-tool",
-                    json=body,
-                    headers={"Content-Type": "application/json"},
+            if self.container_name:
+                status_code, response_text = await docker_post_json(
+                    self.container_name,
+                    "/call-tool",
+                    body,
+                    timeout=self.tool_call_timeout,
                 )
-
-                if response.status_code != 200:
-                    error_text = response.text
+                if status_code != 200:
                     return CallToolResponse(
-                        content=[TextContent(type="text", text=error_text)],
+                        content=[TextContent(type="text", text=response_text)],
                         is_error=True,
                     )
+                response_data = json.loads(response_text)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=self.tool_call_timeout
+                ) as client:
+                    response = await client.post(
+                        f"{self.sandbox_url}/call-tool",
+                        json=body,
+                        headers={"Content-Type": "application/json"},
+                    )
 
-                response_data = response.json()
-                return CallToolResponse(
-                    content=response_data,
-                    is_error=False,
-                )
+                    if response.status_code != 200:
+                        error_text = response.text
+                        return CallToolResponse(
+                            content=[TextContent(type="text", text=error_text)],
+                            is_error=True,
+                        )
+                    response_data = response.json()
+            return CallToolResponse(
+                content=response_data,
+                is_error=False,
+            )
 
         except httpx.ReadTimeout:
             logger.error(f"Tool {tool_name} timed out after {self.tool_call_timeout}s")
@@ -95,4 +165,5 @@ class SandboxMCPClient(MCPClient):
         """Get sandbox information."""
         return {
             "sandbox_url": self.sandbox_url,
+            "container_name": self.container_name,
         }

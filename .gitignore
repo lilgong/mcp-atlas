@@ -8,16 +8,32 @@ wheels/
 
 # Virtual environments
 .venv
+node_modules/
 
 # Ruff
 .ruff_cache
 
 .DS_Store
 
-.env
+.env*
+
+# Local Chinese-annotated copy of env.template, grouped by how often each
+# setting changes. Kept out of the repo; env.template stays the source of truth.
+env.template.zh
+MCP-Atlas.jsonl
+# Local runtime material and Slack-free derivatives.
+.runtime/
+services/mcp_eval/MCP-Atlas.slack-aligned.csv
+services/mcp_eval/MCP-Atlas*.csv.bak
+services/mcp_eval/MCP-Atlas.origin.csv
+data_exports/slack_mcp_eval_export_[0-9]*.zip
 
 # Eval results (keep folders, ignore contents)
 services/mcp_eval/completion_results/*
 services/mcp_eval/evaluation_results/*
 !services/mcp_eval/completion_results/.gitkeep
 !services/mcp_eval/evaluation_results/.gitkeep
+
+# MCP/tool API call logs (per-key request counts)
+mcp_usage_log/
+token_usage_log/

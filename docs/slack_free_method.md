@@ -2,7 +2,7 @@
 
 官方 Slack 导出的时间戳早已超出免费版的 90 天可见期。本文说明**每次**要跑什么、怎么导入、怎么验证。
 
-> 一句话：跑 `uv run prepare_slack_import.py --fix-claims` → 浏览器手动导入生成的 zip → 跑 `test_server_v1.py --server slack` 验收。
+> 一句话：跑 `uv run prepare_slack_import.py --fix-claims` → 浏览器手动导入生成的 zip → 跑 `test_server_v2.py --server slack` 验收。
 > 免费版下每 ~3 个月要重复一次。
 
 ---
@@ -55,7 +55,8 @@ uv run prepare_slack_import.py --fix-claims
 2. 自动算平移量：让**最新一条消息落到今天前 3 天**（吃满 90 天窗口）
 3. 平移所有 `ts` / `edited.ts` / `files[].created|timestamp`，并把按日期命名的 JSON 改名到新日期
 4. 产出 → **`data_exports/slack_mcp_eval_export_<MMDD>.zip`**
-5. `--fix-claims`：修正 `MCP-Atlas.csv` 里绑定 slack 日期的 claim（**自动备份为 `MCP-Atlas.csv.bak`**）
+5. `--fix-claims`：从官方 `MCP-Atlas.csv` 派生
+   `MCP-Atlas.slack-aligned.csv`，同步修正绑定 slack 日期的 claim
 6. 打印**下次到期日**
 
 常用参数：
@@ -71,29 +72,27 @@ uv run prepare_slack_import.py --fix-claims
 两个输入都是**官方原版、只读、永不修改**，每次运行都从它们重新派生出目标文件：
 
 ```
-data_exports/slack_mcp_eval_export.zip   →  ..._<MMDD>.zip  （平移时间戳）
-services/mcp_eval/MCP-Atlas.origin.csv   →  MCP-Atlas.csv     （平移 claim 日期）
+data_exports/slack_mcp_eval_export.zip → ..._<MMDD>.zip             （平移时间戳）
+services/mcp_eval/MCP-Atlas.csv        → MCP-Atlas.slack-aligned.csv（平移 claim 日期）
 ```
 
-**不在上一轮的结果上叠加**，所以重复运行是幂等的：跑几次 md5 都一样，不会二次平移。
+**不在上一轮结果上叠加**，所以同一天用相同参数重复运行是幂等的，不会二次平移。
 偏移量也始终是官方那次的 **+161 天**（脚本用微秒指纹从原版推导，不写死）。
 
-> `MCP-Atlas.origin.csv` 是这条链的基准，**别动它**。md5 应为 `28edad761f29`。
-> 它丢了的话，`--fix-claims` 会跳过 claim 处理并提示。
+> Git 中的 `MCP-Atlas.csv` 是这条链的只读基准，SHA256 应为
+> `065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad`。
+> 不要手改它；文件缺失或 hash 不符时先恢复 Git 文件。
 
-### ⚠️ `--fix-claims` 会改动基准数据集
+### 官方原版和免费 Slack 对齐版不会混在一起
 
-- `MCP-Atlas.csv` **不在 git 里**（53MB 未跟踪），所以**改动不会随 git 同步**
-- 改完后**必须手动同步到另一台/另一份**，否则两边跑分不可比：
-  ```bash
-  cp /home/lny/mcp-atlas/services/mcp_eval/MCP-Atlas.csv \
-     /mnt/hzp/mcp-atlas/services/mcp_eval/MCP-Atlas.csv
-  # 同步后两边 md5 应一致
-  md5sum /home/lny/mcp-atlas/services/mcp_eval/MCP-Atlas.csv \
-         /mnt/hzp/mcp-atlas/services/mcp_eval/MCP-Atlas.csv
-  ```
-- 改完就和**官方基准分叉**了，跨团队/论文对比时要说明
-- 实际改动极小：500×5=2500 格里**只有 2 格**（均在 `GTFA_CLAIMS`），`TASK`/`PROMPT`/`TRAJECTORY`/`ENABLED_TOOLS` 100% 未变
+- `MCP-Atlas.csv`：Git 跟踪的官方原版，严格官方复测使用。
+- `MCP-Atlas.slack-aligned.csv`：本机生成、Git 忽略的免费 Slack 对齐版。
+- 对齐版与官方原版相比只改 2 个 `GTFA_CLAIMS` 单元格；另外四列完全相同。
+- 免费 Slack 运行时在 `.env` 设置
+  `MCP_COMPLETION_INPUT=MCP-Atlas.slack-aligned.csv`。
+- 严格官方原版运行时设置 `MCP_COMPLETION_INPUT=MCP-Atlas.csv`。
+- 跨机器比较免费 Slack 结果时，两台机器要在同一天用相同 `--days-ago`
+  参数生成，并记录对齐版 SHA256。
 
 ---
 
@@ -263,29 +262,33 @@ make run-docker          # 或 make run-docker-host
 
 ```bash
 cd services/mcp_eval
-uv run test_server_v1.py --server slack --base-url http://localhost:1984
+uv run test_server_v2.py --server slack --base-url http://localhost:1984
 ```
+
+脚本默认读取仓库根 `.env` 的 `MCP_COMPLETION_INPUT`；未配置时回退到当前仓库的
+`services/mcp_eval/MCP-Atlas.csv`。也可用 `--input /绝对路径/MCP-Atlas.csv`
+临时指定另一份测试集。
 
 期望：
 
 ```
 ✅ DATA OK   slack                0.7s
        └─ 验的是: Slack 导出的频道/消息是否已导入
-       └─ #movie-suggestions(C...) 历史消息在位，且用户名可解析
+       └─ #movie-suggestions(C...) 历史消息在位，且用户名可解析；测试集 ... 与 Slack 时间锚点一致
 ```
 
-它依次断言三件事：
+它依次断言四件事：
 
 1. `slack_channels_list` 里能找到 **`#movie-suggestions`** 频道 → 频道导进来了
 2. 该频道的 `slack_conversations_history` 里含 GT 的消息文本 **`Akira`** → 消息可见（没被 90 天窗口挡掉）
 3. 同一条消息的发送者能解析出 **`hiphopluvr1989` / `Omari West`** → 用户映射选对了（见 3.4）
-
-**断言的全是频道名、消息文本、用户名，不含任何时间戳**，所以平移时间戳后**不需要改这个脚本**。
+4. 当前评测 CSV 中 Napoleon Dynamite 的精确 UTC claim 与 Slack 云端消息时间戳一致
+   → 导入的 zip 与实际使用的测试集属于同一轮平移。
 
 顺带把 5 个有状态服务一起验：
 
 ```bash
-uv run test_server_v1.py --data-only --base-url http://localhost:1984
+uv run test_server_v2.py --data-only --base-url http://localhost:1984
 ```
 
 常见失败：
@@ -294,7 +297,8 @@ uv run test_server_v1.py --data-only --base-url http://localhost:1984
 |---|---|
 | `❌ DATA BAD ... 没找到 #movie-suggestions 频道` | zip 没导入，或导到了别的 workspace |
 | `❌ DATA BAD ... 返回里找不到 'Akira'` | 频道建出来了但消息不可见 → 多半是**时间戳超期**，重跑第 2 节的平移脚本 |
-| `❌ DATA BAD ... 发送者名字解析不出来` | 导入时**用户映射选错了**（把用户整个排除了）→ 见 3.4，应选「请勿导入这些用户，但仅导入其消息」 |
+| `❌ DATA BAD ... 发送者名字解析不出来` | 导入时**用户映射选错了**（把用户整个排除了）→ 见 3.4，应选“导入为已注销账户” |
+| `❌ DATA BAD ... 测试集与 Slack 时间不对应` | `.env` 的 `MCP_COMPLETION_INPUT` 与本次导入的 Slack zip 不配套；重新生成/导入并使用同轮派生 CSV |
 | `💥 API FAIL ... channel_not_found` | 同上，或 token 指向了别的 workspace |
 | `💥 API FAIL` 且 token 刚换过 | **忘了重启容器** |
 
@@ -315,22 +319,23 @@ uv run test_server_v1.py --data-only --base-url http://localhost:1984
 
 | 方案 | 代价 | 维护 |
 |---|---|---|
-| **免费 + 平移** | 0 | 每 ~3 个月重跑+重导一次，且每次要同步 CSV |
-| **付费 $9/月** | $9/月 | **一劳永逸**：直接导原始 zip，不用平移、不用改 claims、不用同步 CSV |
+| **免费 + 平移** | 无 Slack 订阅费 | 每 ~3 个月重跑、重导并重新生成对齐版 CSV |
+| **支持完整历史的付费方案** | 以 Slack 当前价格为准 | 可直接导原始 zip，不需要周期性平移 |
 
-如果这个基准要长期反复跑，**付费更省事**——顺带还能避免 `--fix-claims` 带来的基准分叉问题。
+如果这个基准要长期反复跑，支持完整历史的方案维护成本更低。无论采用哪种方案，
+都要记录实际使用的任务 CSV SHA256。
 
 ---
 
-## 6. 回滚
+## 6. 切回官方原版
 
 ```bash
-# 还原 MCP-Atlas.csv（--fix-claims 每次都会自动生成 .bak）
-cd services/mcp_eval
-cp MCP-Atlas.csv.bak MCP-Atlas.csv
+# .env
+MCP_COMPLETION_INPUT=MCP-Atlas.csv
 ```
 
-平移产生的 `slack_mcp_eval_export_<MMDD>.zip` 是**新文件**，原始的 `slack_mcp_eval_export.zip` 从不被修改，可随时重新生成。
+不需要复制或还原文件。平移产生的 `MCP-Atlas.slack-aligned.csv` 和
+`slack_mcp_eval_export_<MMDD>.zip` 都是新文件；官方 CSV 和原始 zip 从不修改。
 
 ---
 
@@ -341,6 +346,7 @@ cp MCP-Atlas.csv.bak MCP-Atlas.csv
 | `data_exports/slack_mcp_eval_export.zip` | 官方原始导出（只读，不修改） |
 | `data_exports/slack_mcp_eval_export_<MMDD>.zip` | 脚本产出，用它导入 |
 | `services/mcp_eval/prepare_slack_import.py` | 平移 + 修 claims |
-| `services/mcp_eval/test_server_v1.py` | 验证数据是否真的导入了 |
-| `services/mcp_eval/MCP-Atlas.csv` | 基准数据集（未跟踪，需手动同步） |
+| `services/mcp_eval/test_server_v2.py` | 按任务隔离正式路由验证数据是否真的导入 |
+| `services/mcp_eval/MCP-Atlas.csv` | Git 跟踪的官方原版评测集（只读） |
+| `services/mcp_eval/MCP-Atlas.slack-aligned.csv` | 免费 Slack 对齐版（脚本生成、Git 忽略） |
 | `data_exports/README.md` | 官方的 5 个有状态服务数据设置说明 |

@@ -19,7 +19,7 @@ To reproduce test results or run evaluations against known data states, you'll n
 | Airtable | https://airtable.com/appIF9byLfQwdHqE2/shr1KTZOgPl0qQmA8 | At that URL, click "Copy base" button to clone the DB |
 | Google Calendar | `calendar_mcp_eval_export.zip` | Sample calendar events (unzip as .ics) (8KB) |
 | Notion | `notion_mcp_eval_export.zip` | Sample pages and databases (13MB) |
-| MongoDB | `mongo_dump_video_game_store.zip` | Sample video game store database (unzip as folder) (486KB) |
+| MongoDB | `mongo_dump_video_game_store-UNZIP-FIRST.zip` | Official video game store mongodump |
 | Slack | `slack_mcp_eval_export.zip` | Sample workspace data (27KB) events timestamped for early Dec 2025 (slack free accounts hide messages older than 90 days) |
 
 ## Setup
@@ -38,10 +38,31 @@ https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?proje
 Create a Notion account, then go into Settings > Import, and import `mcp-atlas-notion-data.zip`. This should take maximum a few minutes, and upload 6 tables and 1 page. Confirm that all 6 tables have data after a few minutes (Notion will load the data async). If any table is empty, delete the page, and re-upload the individual CSV. Next, go to [https://www.notion.so/profile/integrations](https://www.notion.so/profile/integrations) and add a new integration (type is Internal) and get the `Internal Integration Secret` and save it as `NOTION_TOKEN` in `.env`
 
 ### MongoDB
-Create a MongoDB account, get your MongoDB connection URI, unzip `mongo_dump_video_game_store.zip`. Then upload the folder by doing like `mongorestore --uri="mongodb+srv://<username>:<password>@<cluster-url>" mongo_dump_video_game_store` . You may need to [install the mongodb CLI](https://www.mongodb.com/docs/mongocli/current/install/) if you don't have it yet. Save the connection URI as `MONGODB_CONNECTION_STRING` in `.env`
+
+The isolated evaluation runtime does not restore this dump into a shared host or
+cloud MongoDB. From the repository root, unzip it directly into `data_exports`:
+
+```bash
+unzip data_exports/mongo_dump_video_game_store-UNZIP-FIRST.zip -d data_exports
+```
+
+The resulting database directory is:
+
+```text
+data_exports/mongo_dump_video_game_store/video_game_store
+```
+
+Build the per-task Mongo fixture image by following §9 of the root
+[`README.md`](../README.md). Each Mongo task then gets its own disposable
+container and logical database `store`; no host `mongorestore` is required.
 
 ### Slack
-Create a new slack workspace, then go to https://<your-slack-workspace-name>.slack.com/services/import and import `slack_mcp_eval_export.zip` . Note that free slack accounts have a 90-day limit, and messages sent older than that unfortunately won't be visible. You can modify the contents to have timestamps that are newer, or have a paid Slack account for $9 USD/month. You'll need to get `SLACK_MCP_XOXC_TOKEN` and `SLACK_MCP_XOXD_TOKEN` by following these instructions [https://github.com/korotovsky/slack-mcp-server/blob/HEAD/docs/01-authentication-setup.md](https://github.com/korotovsky/slack-mcp-server/blob/HEAD/docs/01-authentication-setup.md)
+
+Follow §6.4 of the root [`README.md`](../README.md). Free Slack requires the
+repository's `prepare_slack_import.py` workflow so that message timestamps and
+the two date-bound claims stay aligned; do not edit the export by hand. The
+detailed import and user-mapping guide is
+[`docs/slack_free_method.md`](../docs/slack_free_method.md).
 
 ## Note
 

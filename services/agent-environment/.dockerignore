@@ -5,9 +5,10 @@ __pycache__/
 build/
 dist/
 
-# Virtual environments (will create fresh in Docker)
+# Virtual environments and repository-local Node installs (Docker recreates both)
 .venv/
 venv/
+node_modules/
 
 # Test and dev files
 tests/
@@ -32,6 +33,11 @@ htmlcov/
 .env
 .env.*
 
+# Locally generated/backup MCP configs are not runtime sources. The entrypoint
+# renders mcp_server_config.json from the tracked template inside each container.
+src/agent_environment/mcp_server_config_docker.json
+src/agent_environment/mcp_server_template_backup.json
+
 # MCP servers' runtime caches. slack-mcp-server writes its channel/user list to
 # these in its working directory; if you've run it here they sit in the build
 # context and COPY . . bakes them into the image. Every container then starts
@@ -40,4 +46,3 @@ htmlcov/
 # imported channels are invisible and every slack task silently scores zero.
 .channels_cache_v2.json
 .users_cache.json
-

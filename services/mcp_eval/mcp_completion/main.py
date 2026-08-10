@@ -1,9 +1,11 @@
 """Main FastAPI application for MCP eval."""
 
+import asyncio
 import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Dict, List, Optional
 
 import uvicorn
@@ -13,6 +15,12 @@ from .agent_eval import handle_run_mcp_eval
 from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
+from .runtime_log import write_runtime_event
+from .task_sandbox import (
+    DEFAULT_RUNTIME_IMAGE,
+    reap_owned_task_sandboxes,
+    run_orphan_sweeper,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -20,10 +28,84 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    isolation_enabled = (
+        os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+        not in {"0", "false", "no"}
+    )
+    sweeper: Optional[asyncio.Task] = None
+    if isolation_enabled:
+        # Do not synchronously delete old Docker resources during startup. A
+        # large backlog on a busy shared daemon can otherwise keep /health
+        # unavailable for N serial teardown timeouts. The age-gated sweeper
+        # handles runtime orphans; shutdown performs an immediate owner-scoped
+        # compensation pass after Uvicorn has drained active requests.
+        sweeper = asyncio.create_task(
+            run_orphan_sweeper(
+                interval_seconds=float(
+                    os.getenv("MCP_SANDBOX_SWEEP_INTERVAL", "300")
+                ),
+                min_age_seconds=float(
+                    os.getenv("MCP_SANDBOX_ORPHAN_MAX_AGE", "1800")
+                ),
+            )
+        )
+    write_runtime_event(
+        "service",
+        "completion_service_started",
+        host=config.HOST,
+        port=config.PORT,
+        shared_mcp_url=config.MCP_SERVER_URL,
+        task_isolation_enabled=isolation_enabled,
+        task_agent_image=os.getenv(
+            "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
+        ),
+    )
+    try:
+        yield
+    finally:
+        if sweeper is not None:
+            sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
+        if isolation_enabled:
+            try:
+                cleanup = await reap_owned_task_sandboxes()
+            except Exception as exc:
+                logger.warning("Shutdown sandbox reaping failed: %s", exc)
+                write_runtime_event(
+                    "sandbox",
+                    "shutdown_orphan_reap_failed",
+                    error=str(exc),
+                )
+            else:
+                if (
+                    cleanup["containers_remaining"]
+                    or cleanup["volumes_remaining"]
+                    or cleanup["listing_failures"]
+                ):
+                    logger.warning(
+                        "Shutdown left Atlas sandbox resources: %s", cleanup
+                    )
+                    write_runtime_event(
+                        "sandbox",
+                        "shutdown_orphans_remaining",
+                        **cleanup,
+                    )
+        write_runtime_event(
+            "service",
+            "completion_service_stopped",
+            host=config.HOST,
+            port=config.PORT,
+        )
+
+
 app = FastAPI(
     title="MCP Eval",
     description="Standalone MCP evaluation environment",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -52,7 +134,14 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "task_isolation_enabled": (
+            os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+            not in {"0", "false", "no"}
+        ),
+        "shared_mcp_url": config.MCP_SERVER_URL,
+    }
 
 
 @app.post("/v2/mcp_eval/run_agent")
@@ -63,7 +152,11 @@ async def run_agent(
     """
     MCP evaluation endpoint. The main entrypoint. For simplicity, no authentication or rate limiting is used.
     """
-    logger.info(f"v2 API /run_agent called with model: {body.model}")
+    logger.info(
+        "v2 API /run_agent called with model=%s task_id=%s",
+        body.model,
+        body.task_id or "generated",
+    )
 
     try:
         # Process agent outputs and return results

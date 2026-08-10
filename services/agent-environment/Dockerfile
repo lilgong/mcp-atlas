@@ -3,28 +3,17 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 RUN apt-get update && apt-get install -y npm bash git procps curl gettext-base && rm -rf /var/lib/apt/lists/*
 
 # Need to install nodejs from elsewhere, because bookworm-slim is based on debian, and the available version of nodejs is 18, which is too old
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get update
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get update
 RUN apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 
-# Pre-install all MCP server packages (NPX and UVX), saves approx 1 minute of startup time
+# Install published Node MCPs from the repository lock, then install UV/Git MCPs.
+WORKDIR /agent-environment
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 COPY dev_scripts/install_mcp_packages.sh /
 RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
 
-# mcp_server_template.json runs the node servers from /mnt/node_modules, which npm's
-# global prefix (/usr/lib/node_modules) doesn't provide. Copy rather than symlink:
-# the next step overwrites files in here, and a symlink would corrupt the npm tree.
-RUN cp -r /usr/lib/node_modules /mnt/node_modules
-
-# Our LLM traffic goes through a third-party gateway, and three of the node servers
-# hard-code their vendor's endpoint and auth header. vendor/yibu-patched holds the
-# handful of files with those rewritten (api.search.brave.com -> the gateway,
-# X-Subscription-Token -> Authorization: Bearer, and the same for exa). Without them
-# the servers start and report healthy while sending gateway keys to the vendors'
-# real endpoints, which answer 401/422 — reads exactly like an expired key.
-COPY vendor/yibu-patched/node_modules/ /mnt/node_modules/
-
 # Copy project files and set up workspace
-WORKDIR /agent-environment
 COPY . .
 
 # Don't trust the checkout to have survived intact. COPY carries the build host's

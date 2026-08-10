@@ -4,6 +4,9 @@ import json
 import copy
 import uuid
 import asyncio
+import time
+
+from .runtime_log import write_runtime_event
 
 import requests
 
@@ -83,7 +86,15 @@ def pangu_response_refiner(response):
     return response_result
 
 
-def generate_pangu(model, messages, tools):
+def generate_pangu(
+    model,
+    messages,
+    tools,
+    *,
+    task_id: str = "unknown",
+    turn: int = 0,
+    call_id: str = "",
+):
     assert model.startswith("pangu/"), "盘古模型命名错误"
     model = model.replace("pangu/", "")
 
@@ -106,6 +117,17 @@ def generate_pangu(model, messages, tools):
 
     last_exception = None
     for attempt in range(1, PANGU_MAX_RETRIES + 1):
+        attempt_started = time.monotonic()
+        write_runtime_event(
+            "model_calls",
+            "model_provider_attempt_started",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            provider="pangu",
+            attempt=attempt,
+            model=model,
+        )
         try:
             response = requests.post(api_url, headers=headers, json=payload, timeout=PANGU_TIMEOUT)
             if response.status_code == 200:
@@ -117,6 +139,18 @@ def generate_pangu(model, messages, tools):
                 #     pass
                 with open(get_pangu_log_path(), 'a+', encoding='utf-8') as out_file:
                     out_file.write(json.dumps({"messages": messages, "response": result}, ensure_ascii=False) + '\n')
+                write_runtime_event(
+                    "model_calls",
+                    "model_provider_attempt_completed",
+                    task_id=task_id,
+                    turn=turn,
+                    call_id=call_id,
+                    provider="pangu",
+                    attempt=attempt,
+                    model=model,
+                    duration_seconds=round(time.monotonic() - attempt_started, 3),
+                    status_code=200,
+                )
                 return result
             last_exception = Exception(f"Pangu Response status code is not 200 (got {response.status_code})")
         except requests.exceptions.Timeout:
@@ -124,16 +158,45 @@ def generate_pangu(model, messages, tools):
         except requests.exceptions.RequestException as e:
             last_exception = e
 
+        write_runtime_event(
+            "model_calls",
+            "model_provider_attempt_failed",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            provider="pangu",
+            attempt=attempt,
+            model=model,
+            duration_seconds=round(time.monotonic() - attempt_started, 3),
+            error=str(last_exception),
+        )
+
         if attempt < PANGU_MAX_RETRIES:
             time.sleep(PANGU_RETRY_DELAY)
 
     raise Exception(f"Pangu request failed after {PANGU_MAX_RETRIES} attempts: {last_exception}")
 
 
-async def generate_pangu_async(model, messages, tools):
+async def generate_pangu_async(
+    model,
+    messages,
+    tools,
+    *,
+    task_id: str = "unknown",
+    turn: int = 0,
+    call_id: str = "",
+):
     # generate_pangu 内部用同步 requests + time.sleep + 文件写入，直接 await 会冻住
     # uvicorn 的 asyncio 事件循环、卡掉整个 server。放到线程里跑才能让 32 路并发真正并行。
-    return await asyncio.to_thread(generate_pangu, model, messages, tools)
+    return await asyncio.to_thread(
+        generate_pangu,
+        model,
+        messages,
+        tools,
+        task_id=task_id,
+        turn=turn,
+        call_id=call_id,
+    )
 
 
 if __name__ == "__main__":

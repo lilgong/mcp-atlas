@@ -66,7 +66,8 @@ else
       "tool_args": {
         "context7CompatibleLibraryID": "'"$selected_library_id"'",
         "topic": "'"$selected_topic"'",
-        "tokens": 5000
+        "mode": "code",
+        "page": 1
       }
     }'
-fi 
+fi

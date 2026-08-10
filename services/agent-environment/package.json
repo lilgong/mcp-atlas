@@ -1,0 +1,28 @@
+{
+  "name": "mcp-atlas-node-runtime",
+  "private": true,
+  "dependencies": {
+    "@alchemy/mcp-server": "0.1.8",
+    "@bharathvaj/whois-mcp": "1.0.1",
+    "@e2b/mcp-server": "0.2.0",
+    "@felores/airtable-mcp-server": "0.3.0",
+    "@geobio/code_execution_server": "0.2.1",
+    "@geobio/google-workspace-server": "0.1.0",
+    "@geobio/mcp-open-library": "0.1.6",
+    "@modelcontextprotocol/server-brave-search": "0.6.2",
+    "@modelcontextprotocol/server-filesystem": "2026.7.10",
+    "@modelcontextprotocol/server-google-maps": "0.6.2",
+    "@modelcontextprotocol/server-memory": "2025.8.4",
+    "@notionhq/notion-mcp-server": "1.8.1",
+    "@translated/lara-mcp": "0.0.11",
+    "@upstash/context7-mcp": "1.0.33",
+    "@wonderwhy-er/desktop-commander": "0.2.7",
+    "clinicaltrialsgov-mcp-server": "1.9.3",
+    "exa-mcp-server": "3.2.1",
+    "mcp-server-code-runner": "0.1.7",
+    "mcp-server-nationalparks": "1.0.1",
+    "metmuseum-mcp": "1.0.0",
+    "mongodb-mcp-server": "0.2.0",
+    "slack-mcp-server": "1.1.23"
+  }
+}

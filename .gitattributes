@@ -18,3 +18,6 @@ git_submodule_info.csv text eol=lf
 # Data files are content read by the eval, not parsed as structure — leave their
 # bytes exactly as shipped (some cells may legitimately contain CR).
 services/agent-environment/data/**  -text
+
+# Preserve the published benchmark byte-for-byte, including CRLF line endings.
+services/mcp_eval/MCP-Atlas.csv -text

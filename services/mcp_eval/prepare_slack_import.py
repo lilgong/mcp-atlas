@@ -16,12 +16,12 @@
 
 --fix-claims 就是补上官方漏掉的那一步：把绑定 slack 消息日期的 claim 一起平移。
 只改能对上导出消息的日期，git commit 日期、电影上映日期等一律不碰。
-⚠️ 它会改动基准：MCP-Atlas.csv 不在 git 里，改完要手动同步到另一份，否则两边跑分不可比。
+官方 MCP-Atlas.csv 始终只读；派生结果写到 MCP-Atlas.slack-aligned.csv。
 
 两个输入都是官方原版、只读、永不修改，每次运行都从它们重新派生：
 
     data_exports/slack_mcp_eval_export.zip  →  ..._<MMDD>.zip  （平移时间戳）
-    services/mcp_eval/MCP-Atlas.origin.csv  →  MCP-Atlas.csv   （平移 claim 日期）
+    services/mcp_eval/MCP-Atlas.csv  →  MCP-Atlas.slack-aligned.csv（平移 claim 日期）
 
 不在上一轮结果上叠加，所以重复运行幂等：跑几次 md5 都一样，不会二次平移。
 
@@ -51,10 +51,10 @@ REPO_ROOT = SCRIPT_DIR.parents[1]
 SRC_ZIP = REPO_ROOT / "data_exports/slack_mcp_eval_export.zip"
 # 产出带当天日期（MMDD），这样一眼看出手里/传上去的是哪一轮生成的
 OUT_ZIP = REPO_ROOT / f"data_exports/slack_mcp_eval_export_{dt.date.today():%m%d}.zip"
-# 和 zip 同样的路数：原版只读，每次从它派生出目标文件，绝不在改过的结果上再叠加。
-# 这样重复运行是幂等的 —— 偏移量始终是官方那次的 +161，不会累积、不会二次平移。
-ORIGIN_CSV = SCRIPT_DIR / "MCP-Atlas.origin.csv"
-CSV_PATH = SCRIPT_DIR / "MCP-Atlas.csv"
+# 和 zip 同样的路数：Git 中的官方原版只读，每次从它派生出目标文件，
+# 绝不在改过的结果上再叠加。这样重复运行是幂等的。
+ORIGIN_CSV = SCRIPT_DIR / "MCP-Atlas.csv"
+CSV_PATH = SCRIPT_DIR / "MCP-Atlas.slack-aligned.csv"
 
 DAY = 86400
 UTC = dt.timezone.utc
@@ -228,13 +228,15 @@ def fix_claims(origin_path: Path, out_path: Path, msg_files: dict, legacy: int,
             row["GTFA_CLAIMS"] = new
 
     if apply:
+        backup_note = ""
         if out_path.exists():
             shutil.copy2(out_path, out_path.with_suffix(out_path.suffix + ".bak"))
+            backup_note = f"（上一版备份为 {out_path.name}.bak）"
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
             w.writerows(rows)
-        print(f"  {origin_path.name} → {out_path.name}（上一版备份为 {out_path.name}.bak）")
+        print(f"  {origin_path.name} → {out_path.name}{backup_note}")
     return changes
 
 
@@ -244,12 +246,13 @@ def main() -> int:
     ap.add_argument("--days-ago", type=int, default=3,
                     help="让最新一条消息落到几天前（默认 3，尽量吃满 90 天窗口）")
     ap.add_argument("--fix-claims", action="store_true",
-                    help="同步修正 MCP-Atlas.csv 里绑定 slack 日期的 claim（会改基准，自动备份）")
+                    help="从官方 CSV 派生 Slack 对齐版并同步修正绑定消息日期的 claim")
     ap.add_argument("--src", type=Path, default=SRC_ZIP, help="官方原版导出 zip（只读）")
     ap.add_argument("--out", type=Path, default=OUT_ZIP, help="产出的 zip，用它导入 Slack")
     ap.add_argument("--origin", type=Path, default=ORIGIN_CSV,
-                    help="官方原版 CSV（只读）。claim 每次都从它派生，保证幂等")
-    ap.add_argument("--csv", type=Path, default=CSV_PATH, help="产出的 CSV，评测用它")
+                    help="官方原版 CSV（只读）；每次都从它派生，保证幂等")
+    ap.add_argument("--csv", type=Path, default=CSV_PATH,
+                    help="产出的 Slack 对齐版 CSV，免费 Slack 评测使用")
     a = ap.parse_args()
 
     if not a.src.exists():
@@ -318,7 +321,9 @@ def main() -> int:
      选 "Slack" 导入方式，上传这个 zip
   3. ⚠️ 若之前导入过旧数据，先清掉频道里的旧消息，否则会重复
   4. 重启 MCP 容器（--env-file 只在启动时读一次），然后验收:
-       uv run test_server_v1.py --server slack --base-url http://localhost:1984
+       uv run test_server_v2.py --server slack --base-url http://localhost:1984
+  5. 免费 Slack 评测把 .env 设为:
+       MCP_COMPLETION_INPUT={a.csv.name}
 """)
     return 0
 
