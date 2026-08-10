@@ -6,15 +6,9 @@ dist/
 wheels/
 *.egg-info
 
-# These are source-controlled runtime overlays despite living below package
-# directories named "build" and "dist".
-!services/agent-environment/vendor/yibu-patched/node_modules/@modelcontextprotocol/server-brave-search/dist/
-!services/agent-environment/vendor/yibu-patched/node_modules/@modelcontextprotocol/server-brave-search/dist/**
-!services/agent-environment/vendor/yibu-patched/node_modules/exa-mcp-server/build/
-!services/agent-environment/vendor/yibu-patched/node_modules/exa-mcp-server/build/**
-
 # Virtual environments
 .venv
+node_modules/
 
 # Ruff
 .ruff_cache

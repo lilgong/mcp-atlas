@@ -30,10 +30,13 @@
     "brave-search": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-brave-search@0.6.2",
+        "dist/index.js"
       ],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}",
+        "MCP_YIBU_SERVICE": "brave",
         "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
       }
     },
@@ -112,10 +115,13 @@
     "exa": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/exa-mcp-server/build/index.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "exa-mcp-server@3.2.1",
+        "smithery/stdio/index.cjs"
       ],
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}",
+        "MCP_YIBU_SERVICE": "exa",
         "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
       }
     },
@@ -130,7 +136,9 @@
     "filesystem": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-filesystem@2026.7.10",
+        "dist/index.js",
         "/data"
       ]
     },
@@ -145,7 +153,9 @@
     "github": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@smithery/mcp-github/dist/cli.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@smithery/mcp-github#68368436034fb0003a6d8ed91afc9d0a64142b84",
+        "dist/cli.js"
       ],
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"
@@ -210,7 +220,9 @@
     "met-museum": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/metmuseum-mcp/dist/index.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "metmuseum-mcp@1.0.0",
+        "dist/index.js"
       ]
     },
     "mongodb": {
@@ -288,9 +300,11 @@
       ]
     },
     "slack": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "/mnt/node_modules/slack-mcp-server/bin/index.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "slack-mcp-server@1.1.23",
+        "bin/index.js",
         "--transport",
         "stdio"
       ],

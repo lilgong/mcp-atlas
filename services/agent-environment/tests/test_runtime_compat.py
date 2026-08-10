@@ -53,10 +53,14 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert "duckduckgo-mcp-server[browser]==0.6.1" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
     assert shared["met-museum"]["args"] == [
-        "/mnt/node_modules/metmuseum-mcp/dist/index.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "metmuseum-mcp@1.0.0",
+        "dist/index.js",
     ]
     expected_filesystem = [
-        "/mnt/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-filesystem@2026.7.10",
+        "dist/index.js",
         "/data",
     ]
     assert shared["filesystem"]["args"] == expected_filesystem
@@ -161,7 +165,9 @@ def test_github_uses_prebuilt_pinned_server_instead_of_runtime_npx():
     github = servers["github"]
     assert github["command"] == "node"
     assert github["args"] == [
-        "/mnt/node_modules/@smithery/mcp-github/dist/cli.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@smithery/mcp-github#68368436034fb0003a6d8ed91afc9d0a64142b84",
+        "dist/cli.js",
     ]
 
     install_script = (

@@ -15,13 +15,17 @@
     "desktop-commander": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@wonderwhy-er/desktop-commander/dist/index.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@wonderwhy-er/desktop-commander@0.2.7",
+        "dist/index.js"
       ]
     },
     "filesystem": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-filesystem@2026.7.10",
+        "dist/index.js",
         "/data"
       ]
     },
@@ -35,7 +39,9 @@
     "mcp-code-executor": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@geobio/code_execution_server/build/index.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@geobio/code_execution_server@0.2.1",
+        "build/index.js"
       ],
       "env": {
         "CODE_STORAGE_DIR": "/data/repos/mcp_code_executor_workspace",
@@ -46,13 +52,17 @@
     "mcp-server-code-runner": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/mcp-server-code-runner/dist/cli.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "mcp-server-code-runner@0.1.7",
+        "dist/cli.js"
       ]
     },
     "memory": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/@modelcontextprotocol/server-memory/dist/index.js"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-memory@2025.8.4",
+        "dist/index.js"
       ],
       "env": {
         "MEMORY_FILE_PATH": "/data/repos/memory_mcp_server/memories-for-mcp.json"
@@ -61,7 +71,9 @@
     "mongodb": {
       "command": "node",
       "args": [
-        "/mnt/node_modules/mongodb-mcp-server/dist/index.js",
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "mongodb-mcp-server@0.2.0",
+        "dist/index.js",
         "--connectionString",
         "${MONGODB_CONNECTION_STRING}"
       ]

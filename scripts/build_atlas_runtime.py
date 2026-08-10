@@ -20,6 +20,8 @@ SOURCE_FILES = (
     "README.md",
     "pyproject.toml",
     "uv.lock",
+    "package.json",
+    "package-lock.json",
     "dev_scripts/install_mcp_packages.sh",
     "src/agent_environment/__init__.py",
     "src/agent_environment/logger.py",
@@ -28,6 +30,8 @@ SOURCE_FILES = (
     "src/agent_environment/mcp_router.py",
     "src/agent_environment/osm_mcp_compat.py",
     "src/agent_environment/oxylabs_mcp_compat.py",
+    "src/agent_environment/run_node_mcp.cjs",
+    "src/agent_environment/yibu_fetch_preload.cjs",
     "src/agent_environment/mcp_server_template.json",
 )
 
@@ -63,8 +67,8 @@ def stage_build_context(context: Path) -> None:
         encoding="utf-8",
     )
 
-    patches = SOURCE / "vendor/yibu-patched"
-    shutil.copytree(patches, context / "vendor/yibu-patched")
+    patches = SOURCE / "vendor/yibu-patched" / "oxylabs_mcp"
+    shutil.copytree(patches, context / "vendor/yibu-patched/oxylabs_mcp")
 
     forbidden = [
         path for path in context.rglob("*")

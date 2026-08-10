@@ -89,11 +89,13 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             }
             self.assertNotIn("data", paths)
             self.assertFalse(any(path.startswith("data/") for path in paths))
+            self.assertIn("package.json", paths)
+            self.assertIn("package-lock.json", paths)
             self.assertIn(
-                "vendor/yibu-patched/"
-                "node_modules/@modelcontextprotocol/"
-                "server-brave-search/dist/index.js",
-                paths,
+                "src/agent_environment/yibu_fetch_preload.cjs", paths
+            )
+            self.assertFalse(
+                any(path.startswith("vendor/yibu-patched/node_modules/") for path in paths)
             )
             self.assertNotIn("filesystem_server_compat.mjs", paths)
             self.assertIn(

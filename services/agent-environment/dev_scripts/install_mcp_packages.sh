@@ -1,32 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "Installing NPX MCP server packages globally..."
-
-# Pre-install all NPX MCP server packages globally to eliminate download time during runtime
-npm install -g \
-    @felores/airtable-mcp-server@0.3.0 \
-    @alchemy/mcp-server@0.1.8 \
-    @modelcontextprotocol/server-brave-search@0.6.2 \
-    clinicaltrialsgov-mcp-server@1.9.3 \
-    @upstash/context7-mcp@1.0.33 \
-    @wonderwhy-er/desktop-commander@0.2.7 \
-    @e2b/mcp-server@0.2.0 \
-    exa-mcp-server@0.3.10 \
-    @modelcontextprotocol/server-filesystem@2026.7.10 \
-    @modelcontextprotocol/server-google-maps@0.6.2 \
-    @geobio/google-workspace-server@0.1.0 \
-    @translated/lara-mcp@0.0.11 \
-    @geobio/code_execution_server@0.2.1 \
-    mcp-server-code-runner@0.1.7 \
-    @modelcontextprotocol/server-memory@2025.8.4 \
-    metmuseum-mcp@1.0.0 \
-    mongodb-mcp-server@0.2.0 \
-    mcp-server-nationalparks@1.0.1 \
-    @notionhq/notion-mcp-server@1.8.1 \
-    @geobio/mcp-open-library@0.1.6 \
-    slack-mcp-server@1.1.23 \
-    @bharathvaj/whois-mcp@1.0.1
+# Published Node servers are installed by `npm ci` from the repository-owned
+# package.json/package-lock.json. Keep this script for non-npm and Git sources.
 
 # This server is not published at the schema used by MCP-Atlas.  Pin the
 # audited git revision and build it once into the runtime image; invoking the
@@ -48,10 +24,13 @@ git -C "${GITHUB_MCP_BUILD_DIR}" checkout --detach FETCH_HEAD
     npm run build
     npm prune --omit=dev --ignore-scripts
     rm -rf .git src
+    printf '%s\n' "${GITHUB_MCP_REVISION}" > .atlas-revision
 )
-mkdir -p /usr/lib/node_modules/@smithery
-mv "${GITHUB_MCP_BUILD_DIR}" /usr/lib/node_modules/@smithery/mcp-github
-test -f /usr/lib/node_modules/@smithery/mcp-github/dist/cli.js
+mkdir -p /agent-environment/node_modules/@smithery
+mv "${GITHUB_MCP_BUILD_DIR}" /agent-environment/node_modules/@smithery/mcp-github
+test -f /agent-environment/node_modules/@smithery/mcp-github/dist/cli.js
+test "$(cat /agent-environment/node_modules/@smithery/mcp-github/.atlas-revision)" = \
+    "${GITHUB_MCP_REVISION}"
 
 echo "Installing UVX MCP server packages..."
 # Pre-install all UVX MCP server packages to eliminate download time during runtime
@@ -69,4 +48,4 @@ uv tool install osm-mcp-server==0.1.1 --with mcp==1.28.1
 uv tool install mcp-server-twelve-data==0.2.5 --with mcp==1.28.1
 uv tool install wikipedia-mcp==2.0.1 --with mcp==1.28.1
 
-echo "All UVX/NPX MCP packages installation complete."
+echo "Git-backed and UVX MCP package installation complete."

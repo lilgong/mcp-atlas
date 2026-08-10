@@ -5,9 +5,10 @@ __pycache__/
 build/
 dist/
 
-# Virtual environments (will create fresh in Docker)
+# Virtual environments and repository-local Node installs (Docker recreates both)
 .venv/
 venv/
+node_modules/
 
 # Test and dev files
 tests/

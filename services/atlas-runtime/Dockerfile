@@ -17,19 +17,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /agent-environment
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 COPY install_mcp_packages.sh /install_mcp_packages.sh
 RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
-
-RUN cp -r /usr/lib/node_modules /mnt/node_modules
-COPY vendor/yibu-patched/node_modules/ /mnt/node_modules/
-
-WORKDIR /agent-environment
 COPY pyproject.toml uv.lock README.md entrypoint.sh ./
 COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/main.py src/agent_environment/mcp_client.py \
      src/agent_environment/mcp_router.py \
      src/agent_environment/osm_mcp_compat.py \
      src/agent_environment/oxylabs_mcp_compat.py \
+     src/agent_environment/run_node_mcp.cjs \
+     src/agent_environment/yibu_fetch_preload.cjs \
      src/agent_environment/
 COPY src/agent_environment/mcp_server_template.json \
      src/agent_environment/mcp_server_template.json
