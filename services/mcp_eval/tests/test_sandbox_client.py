@@ -1,8 +1,11 @@
+import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from mcp_completion.errors import MCPClientToolExecutionError
+from mcp_completion.mcp_client import isolated_client
 from mcp_completion.mcp_client.isolated_client import IsolatedMCPClient
 from mcp_completion.mcp_client.sandbox_client import SandboxMCPClient
 from mcp_completion.task_sandbox import (
@@ -46,6 +49,46 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             "mongodb_find",
             {"database": "store", "collection": "Inventory"},
         )
+
+    async def test_public_arxiv_calls_are_paced_across_tasks(self):
+        starts = []
+
+        async def record_call(*_args):
+            starts.append(time.monotonic())
+            return SimpleNamespace(is_error=False)
+
+        clients = []
+        for index in range(2):
+            client = IsolatedMCPClient(
+                task_id=f"arxiv-rate-test-{index}",
+                shared_url="http://127.0.0.1:1",
+                enabled_tools=["arxiv_search_papers"],
+            )
+            backend = AsyncMock(side_effect=record_call)
+            client._entered = True
+            client.allowed_tools = {"arxiv_search_papers"}
+            client._clients[ToolRoute.TASK_NETWORK] = SimpleNamespace(
+                call_tool=backend
+            )
+            clients.append(client)
+
+        test_gate = isolated_client.ServerCallGate(1, 0.02)
+        with (
+            patch.dict(
+                isolated_client._SERVER_CALL_GATES,
+                {"arxiv": test_gate},
+                clear=False,
+            ),
+            patch(
+                "mcp_completion.mcp_client.isolated_client.write_runtime_event"
+            ),
+        ):
+            await asyncio.gather(
+                *(client.call_tool("arxiv_search_papers", {}) for client in clients)
+            )
+
+        self.assertEqual(2, len(starts))
+        self.assertGreaterEqual(starts[1] - starts[0], 0.018)
 
     async def test_mongo_fixture_contract_requires_content_digest(self):
         labels = (

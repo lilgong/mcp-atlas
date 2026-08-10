@@ -6,7 +6,7 @@
       "env": {
         "ALLOWED_DIR": "/data",
         "ALLOWED_COMMANDS": "ls,cat,find",
-        "ALLOWED_FLAGS": "",
+        "ALLOWED_FLAGS": "-a,-A,-l,-h,-al,-la,-ah,-ha,-lh,-hl,-lah,-lha,-ahl,-alh,-1,-R,-r,-S,-t,--all,--almost-all,--long,--human-readable,-n,-b,-s,-E,-T,-v,--number,--number-nonblank,--squeeze-blank,--show-ends,--show-tabs,--show-nonprinting,-maxdepth,-mindepth,-name,-iname,-path,-ipath,-regex,-iregex,-type,-size,-mtime,-mmin,-newer,-empty,-readable,-links,-print,-print0,-printf",
         "MAX_COMMAND_LENGTH": "1024",
         "COMMAND_TIMEOUT": "30",
         "ALLOW_SHELL_OPERATORS": "false"

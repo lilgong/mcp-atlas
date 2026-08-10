@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from .base_client import MCPClient
@@ -29,6 +31,54 @@ class ToolPolicyError(RuntimeError):
 _SANDBOX_SEMAPHORE = asyncio.Semaphore(
     int(os.getenv("MCP_TASK_SANDBOX_CONCURRENCY", "20"))
 )
+
+
+# Public services publish aggregate client limits.  All concurrent evaluations
+# in this process pass through this client, so pace them here without changing
+# MCP schemas or wrapping the server implementation.
+SERVER_CALL_POLICIES: dict[str, tuple[int, float]] = {
+    "arxiv": (1, 3.0),
+    "osm-mcp-server": (1, 1.0),
+}
+
+
+@dataclass
+class ServerCallGate:
+    concurrency: int
+    min_interval: float
+    semaphore: asyncio.Semaphore = field(init=False)
+    schedule_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_started: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.semaphore = asyncio.Semaphore(self.concurrency)
+
+    @contextlib.asynccontextmanager
+    async def slot(self):
+        queued_at = time.monotonic()
+        async with self.semaphore:
+            async with self.schedule_lock:
+                delay = self.min_interval - (time.monotonic() - self.last_started)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self.last_started = time.monotonic()
+            yield int((time.monotonic() - queued_at) * 1000)
+
+
+_SERVER_CALL_GATES = {
+    server: ServerCallGate(concurrency, min_interval)
+    for server, (concurrency, min_interval) in SERVER_CALL_POLICIES.items()
+}
+
+
+@contextlib.asynccontextmanager
+async def _server_call_slot(tool_name: str):
+    gate = _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
+    if gate is None:
+        yield 0
+        return
+    async with gate.slot() as queued_ms:
+        yield queued_ms
 
 
 class IsolatedMCPClient(MCPClient):
@@ -236,30 +286,32 @@ class IsolatedMCPClient(MCPClient):
             args = {**args, "database": TASK_MONGODB_DATABASE}
 
         call_id = uuid.uuid4().hex
-        started = time.monotonic()
-        write_runtime_event(
-            "tools",
-            "tool_call_started",
-            task_id=self.task_id,
-            call_id=call_id,
-            tool_name=tool_name,
-            route=route.value,
-            arguments=args,
-        )
-        try:
-            response = await client.call_tool(tool_name, args)
-        except Exception as exc:
+        async with _server_call_slot(tool_name) as rate_limit_queued_ms:
+            started = time.monotonic()
             write_runtime_event(
                 "tools",
-                "tool_call_failed",
+                "tool_call_started",
                 task_id=self.task_id,
                 call_id=call_id,
                 tool_name=tool_name,
                 route=route.value,
-                duration_seconds=round(time.monotonic() - started, 3),
-                error=str(exc),
+                arguments=args,
+                rate_limit_queued_ms=rate_limit_queued_ms,
             )
-            raise
+            try:
+                response = await client.call_tool(tool_name, args)
+            except Exception as exc:
+                write_runtime_event(
+                    "tools",
+                    "tool_call_failed",
+                    task_id=self.task_id,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    route=route.value,
+                    duration_seconds=round(time.monotonic() - started, 3),
+                    error=str(exc),
+                )
+                raise
 
         serialized = jsonable(response)
         write_runtime_event(

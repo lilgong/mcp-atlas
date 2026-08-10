@@ -64,7 +64,7 @@ uv tool install mcp-server-fetch==2025.4.7 --with mcp==1.28.1
 # but its MCP SDK isn't, and 1.28 asks the client for "roots" on startup, which the
 # agent-environment client doesn't implement — the server then dies with -32603 and
 # every git task fails. 1.25 is the version the working image shipped.
-uv tool install mcp-server-git==2025.7.1 --with mcp==1.25.0
+uv tool install mcp-server-git==2026.7.10 --with mcp==1.25.0
 uv tool install osm-mcp-server==0.1.1 --with mcp==1.28.1
 uv tool install mcp-server-twelve-data==0.2.5 --with mcp==1.28.1
 uv tool install wikipedia-mcp==2.0.1 --with mcp==1.28.1

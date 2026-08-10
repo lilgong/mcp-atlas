@@ -63,12 +63,50 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert local["filesystem"]["args"] == expected_filesystem
 
 
+def test_cli_uses_read_only_flag_allowlist_and_git_matches_official_release():
+    shared = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    local = json.loads(
+        (
+            ROOT
+            / "services"
+            / "task-sandbox"
+            / "local_mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    for servers in (shared, local):
+        flags = set(servers["cli-mcp-server"]["env"]["ALLOWED_FLAGS"].split(","))
+        assert "-al" in flags
+        assert "-maxdepth" in flags
+        assert "-exec" not in flags
+        assert "-delete" not in flags
+        assert flags != {"ALL"}
+    assert "mcp-server-git==2026.7.10" in shared["git"]["args"]
+    install_script = (
+        AGENT_ROOT / "dev_scripts" / "install_mcp_packages.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        "mcp-server-git==2026.7.10 --with mcp==1.25.0"
+        in install_script
+    )
+
+
 def test_osm_has_ordered_fallbacks_inside_a_sufficient_router_budget():
     compat = (
         AGENT_ROOT / "src" / "agent_environment" / "osm_mcp_compat.py"
     ).read_text(encoding="utf-8")
     assert (
         'f"{UPSTREAM_OVERPASS_URL},{SECONDARY_OVERPASS_URL},"' in compat
+    )
+    assert (
+        'SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"'
+        in compat
     )
     assert "OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45" in compat
     assert '"User-Agent": "mcp-atlas/1.0' in compat

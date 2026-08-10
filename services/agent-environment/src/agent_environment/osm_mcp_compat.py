@@ -16,7 +16,7 @@ from osm_mcp_server import server
 
 EXPECTED_VERSION = "0.1.1"
 UPSTREAM_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-SECONDARY_OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
+SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"
 FALLBACK_OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 RETRYABLE_STATUSES = frozenset({406, 429, 500, 502, 503, 504})
 OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45
