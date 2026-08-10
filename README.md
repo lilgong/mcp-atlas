@@ -353,7 +353,6 @@ USE_SYSTEM_PROMPT_IN_COMPLETION=
 ```dotenv
 TOKEN_LOG_DIR=token_usage_log
 EVAL_TOKEN_LOG_DIR=token_usage_log
-VERIFY_TOKEN_LOG_DIR=token_usage_log
 PANGU_LOG_DIR=completion_results
 PANGU_LOG_PATH=
 MCP_RUNTIME_LOG_DIR=completion_results/runtime_logs
