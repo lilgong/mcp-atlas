@@ -8,19 +8,19 @@ npm install -g \
     @felores/airtable-mcp-server@0.3.0 \
     @alchemy/mcp-server@0.1.8 \
     @modelcontextprotocol/server-brave-search@0.6.2 \
-    clinicaltrialsgov-mcp-server@1.0.8 \
+    clinicaltrialsgov-mcp-server@1.9.3 \
     @upstash/context7-mcp@1.0.33 \
     @wonderwhy-er/desktop-commander@0.2.7 \
     @e2b/mcp-server@0.2.0 \
     exa-mcp-server@0.3.10 \
-    @modelcontextprotocol/server-filesystem@2025.11.25 \
+    @modelcontextprotocol/server-filesystem@2026.7.10 \
     @modelcontextprotocol/server-google-maps@0.6.2 \
     @geobio/google-workspace-server@0.1.0 \
     @translated/lara-mcp@0.0.11 \
     @geobio/code_execution_server@0.2.1 \
     mcp-server-code-runner@0.1.7 \
     @modelcontextprotocol/server-memory@2025.8.4 \
-    metmuseum-mcp@0.9.2 \
+    metmuseum-mcp@1.0.0 \
     mongodb-mcp-server@0.2.0 \
     mcp-server-nationalparks@1.0.1 \
     @notionhq/notion-mcp-server@1.8.1 \
@@ -58,7 +58,7 @@ echo "Installing UVX MCP server packages..."
 uv tool install arxiv-mcp-server==0.2.11 --with mcp==1.28.1
 uv tool install mcp-server-calculator==0.2.0 --with mcp==1.28.1
 uv tool install cli-mcp-server==0.2.5 --with mcp==1.28.1
-uv tool install 'duckduckgo-mcp-server[browser]==0.6.0' --with mcp==1.28.1
+uv tool install 'duckduckgo-mcp-server[browser]==0.6.1' --with mcp==1.28.1
 uv tool install mcp-server-fetch==2025.4.7 --with mcp==1.28.1
 # --with pins a transitive dep that would otherwise float: mcp-server-git is pinned
 # but its MCP SDK isn't, and 1.28 asks the client for "roots" on startup, which the

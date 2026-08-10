@@ -135,8 +135,8 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
         {"command": "ls /data"},
     ),
     "clinicaltrialsgov-mcp-server": (
-        "clinicaltrialsgov-mcp-server_clinicaltrials_list_studies",
-        {"query": {"term": "diabetes"}, "pageSize": 1},
+        "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies",
+        {"query": "diabetes", "pageSize": 1},
     ),
     "context7": (
         "context7_resolve-library-id",

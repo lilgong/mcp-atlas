@@ -27,7 +27,7 @@ def test_oxylabs_search_and_explicit_source_are_unchanged():
     assert normalize_scraper_payload(explicit) is explicit
 
 
-def test_runtime_templates_use_guarded_compatibility_entrypoints():
+def test_runtime_templates_use_only_required_compatibility_entrypoints():
     shared = json.loads(
         (
             AGENT_ROOT
@@ -49,22 +49,18 @@ def test_runtime_templates_use_guarded_compatibility_entrypoints():
         "-m",
         "agent_environment.oxylabs_mcp_compat",
     ]
-    assert shared["ddg-search"]["args"][-1].endswith("ddg_mcp_compat.py")
-    assert "duckduckgo-mcp-server[browser]==0.6.0" in shared["ddg-search"]["args"]
+    assert shared["ddg-search"]["args"][-1] == "duckduckgo-mcp-server"
+    assert "duckduckgo-mcp-server[browser]==0.6.1" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
     assert shared["met-museum"]["args"] == [
-        "/agent-environment/metmuseum_mcp_compat.mjs",
+        "/mnt/node_modules/metmuseum-mcp/dist/index.js",
     ]
     expected_filesystem = [
-        "/agent-environment/filesystem_server_compat.mjs",
+        "/mnt/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
         "/data",
     ]
     assert shared["filesystem"]["args"] == expected_filesystem
     assert local["filesystem"]["args"] == expected_filesystem
-    compat = (
-        ROOT / "services" / "agent-environment" / "filesystem_server_compat.mjs"
-    ).read_text(encoding="utf-8")
-    assert '["list_directory_with_sizes", "directory_tree"]' in compat
 
 
 def test_osm_has_ordered_fallbacks_inside_a_sufficient_router_budget():
@@ -96,6 +92,23 @@ def test_context7_uses_authenticated_schema_compatible_release():
     assert context7["env"] == {
         "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}",
     }
+
+
+def test_clinicaltrials_uses_fixed_upstream_release_without_wrapper():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    clinicaltrials = servers["clinicaltrialsgov-mcp-server"]
+    assert clinicaltrials["command"] == "npx"
+    assert clinicaltrials["args"] == [
+        "clinicaltrialsgov-mcp-server@1.9.3",
+    ]
+    assert not any("compat" in arg for arg in clinicaltrials["args"])
 
 
 def test_github_uses_prebuilt_pinned_server_instead_of_runtime_npx():

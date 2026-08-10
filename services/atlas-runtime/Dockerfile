@@ -1,7 +1,7 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 LABEL mcp-atlas.runtime="true" \
-      mcp-atlas.runtime-version="20260808" \
+      mcp-atlas.runtime-version="20260810" \
       mcp-atlas.data-contract="external-data-v1" \
       mcp-atlas.contains-fixture="false"
 
@@ -10,9 +10,9 @@ RUN apt-get update \
         bash curl gettext-base git nodejs npm procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Node 20 is required by several MCP packages. The Debian package is only used
+# ClinicalTrials.gov 1.9.3 requires Node 22. The Debian package is only used
 # to bootstrap npm before NodeSource replaces it.
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -28,17 +28,11 @@ COPY pyproject.toml uv.lock README.md entrypoint.sh ./
 COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/main.py src/agent_environment/mcp_client.py \
      src/agent_environment/mcp_router.py \
-     src/agent_environment/ddg_mcp_compat.py \
      src/agent_environment/osm_mcp_compat.py \
      src/agent_environment/oxylabs_mcp_compat.py \
      src/agent_environment/
 COPY src/agent_environment/mcp_server_template.json \
      src/agent_environment/mcp_server_template.json
-COPY filesystem_server_compat.mjs \
-     /agent-environment/filesystem_server_compat.mjs
-COPY metmuseum_mcp_compat.mjs \
-     /agent-environment/metmuseum_mcp_compat.mjs
-
 RUN sed -i 's/\r$//' entrypoint.sh \
     && chmod 0755 entrypoint.sh \
     && uv sync --frozen

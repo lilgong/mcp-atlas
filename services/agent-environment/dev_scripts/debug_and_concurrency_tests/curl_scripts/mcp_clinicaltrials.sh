@@ -52,18 +52,16 @@ nct_ids=(
 operation=$((RANDOM % 2))
 
 if [ $operation -eq 0 ]; then
-  # clinicaltrials_list_studies operation with search term only
+  # clinicaltrials_search_studies operation with search term only
   random_term_index=$((RANDOM % ${#search_terms[@]}))
   selected_term="${search_terms[$random_term_index]}"
   
   curl -w " HTTP_STATUS:%{http_code}\n" -X POST http://localhost:1984/call-tool \
     -H 'Content-Type: application/json' \
     -d '{
-      "tool_name": "clinicaltrialsgov-mcp-server_clinicaltrials_list_studies",
+      "tool_name": "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies",
       "tool_args": {
-        "query": {
-          "term": "'"$selected_term"'"
-        },
+        "query": "'"$selected_term"'",
         "pageSize": 5
       }
     }'
@@ -81,4 +79,4 @@ else
         "nctIds": "'"$selected_nct_id"'"
       }
     }'
-fi 
+fi

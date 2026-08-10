@@ -95,34 +95,33 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "server-brave-search/dist/index.js",
                 paths,
             )
-            self.assertIn("filesystem_server_compat.mjs", paths)
+            self.assertNotIn("filesystem_server_compat.mjs", paths)
             self.assertIn(
                 "src/agent_environment/oxylabs_mcp_compat.py",
                 paths,
             )
-            self.assertIn(
-                "src/agent_environment/ddg_mcp_compat.py",
-                paths,
-            )
+            self.assertNotIn("src/agent_environment/ddg_mcp_compat.py", paths)
             self.assertIn(
                 "src/agent_environment/osm_mcp_compat.py",
                 paths,
             )
-            self.assertIn("metmuseum_mcp_compat.mjs", paths)
+            self.assertNotIn("metmuseum_mcp_compat.mjs", paths)
             template = (
                 context
                 / "src/agent_environment/mcp_server_template.json"
             ).read_text(encoding="utf-8")
             self.assertIn("/opt/mcp-code-venv", template)
-            self.assertIn("filesystem_server_compat.mjs", template)
+            self.assertNotIn("filesystem_server_compat.mjs", template)
             self.assertIn("oxylabs_mcp_compat", template)
-            self.assertIn("ddg_mcp_compat", template)
+            self.assertNotIn("ddg_mcp_compat", template)
             self.assertIn("osm_mcp_compat", template)
-            self.assertIn("metmuseum_mcp_compat", template)
+            self.assertNotIn("metmuseum_mcp_compat", template)
             self.assertNotIn(
                 "/data/repos/mcp_code_executor_workspace/.venv",
                 template,
             )
+            dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("nodesource.com/setup_22.x", dockerfile)
 
     def test_git_trust_is_scoped_to_task_repositories(self):
         template = json.loads(
