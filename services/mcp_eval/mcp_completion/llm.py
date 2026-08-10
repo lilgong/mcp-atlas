@@ -187,9 +187,11 @@ async def create_completion(
     else:
         proxy_model = model
 
-    # 慢思考模式：复制一份再改，避免就地修改调用方传入的 dict
+    # Copy the caller-owned mapping, but preserve its provider-specific fields
+    # exactly.  In particular, callers must be able to switch between
+    # ``thinking.type=enabled`` and ``thinking.type=disabled`` without the
+    # completion service silently overriding the requested mode.
     extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
-    extra_body["thinking"] = {**extra_body.get("thinking", {}), "type": "enabled"}
     call_id = uuid.uuid4().hex
     started = time.monotonic()
     write_runtime_event(

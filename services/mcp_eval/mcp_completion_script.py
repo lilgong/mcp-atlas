@@ -872,7 +872,7 @@ def parse_arguments(model, input_path, output_path, num_task, concurrency):
         help=(
             "JSON object passed unchanged to the model provider request body; "
             "defaults to MCP_COMPLETION_EXTRA_BODY "
-            '(e.g. \'{"reasoning_effort":"max"}\')'
+            '(e.g. \'{"thinking":{"type":"enabled"},"reasoning_effort":"max"}\')'
         ),
     )
 
