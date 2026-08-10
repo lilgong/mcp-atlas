@@ -607,7 +607,16 @@ make build-atlas-runtime \
   ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
 ```
 
-构建需要访问系统软件源、npm 和 Python package index。
+这条命令就是完整的 runtime 镜像构建入口：它会把
+`services/agent-environment/package.json` 和 `package-lock.json` 放入隔离的
+Docker build context，并在镜像内执行 `npm ci`。不要在宿主机另外全局安装 Node MCP，
+也不要再维护 `/mnt/node_modules` 副本。Brave、Exa 的 Yibu 鉴权和 usage log 由仓库内
+transport preload 加载，Oxylabs 仍使用版本绑定的 Python transport patch；这些适配都
+不会改 MCP 工具 schema。
+
+构建需要访问系统软件源、npm 和 Python package index。构建只生成/更新镜像 tag，
+不会替换已经运行的容器或进程。构建完成后，需要正常停止并重新启动使用该 tag 的共享
+runtime、completion 或 data-synthesis runtime；已经启动的进程不会热更新。
 
 构建完成后执行同样的 inspect 命令：
 
