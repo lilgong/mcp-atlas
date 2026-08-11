@@ -319,6 +319,7 @@ def get_single_claim_evaluation_schema():
     """Define the response schema for single claim evaluation"""
     return {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "claim_text": {"type": "string"},
             "coverage_outcome": {
@@ -402,14 +403,20 @@ class AsyncLiteLLMClient(AsyncLLMClient):
             async with self.semaphore:
                 self.request_count += 1
 
-                # LiteLLM uses OpenAI-compatible format
-                # Pass response_schema for structured output (Gemini supports this natively)
+                # Use the standard OpenAI-compatible strict structured-output
+                # envelope. Putting ``response_schema`` next to
+                # ``type=json_object`` is a Gemini-style extension and leaves
+                # the schema unenforced on OpenAI-compatible gateways.
                 response = await litellm.acompletion(
                     model=self.config.evaluator_model,
                     messages=[{"role": "user", "content": prompt}],
                     response_format={
-                        "type": "json_object",
-                        "response_schema": response_schema,
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "single_claim_evaluation",
+                            "strict": True,
+                            "schema": response_schema,
+                        },
                     },
                     temperature=(
                         1
@@ -516,7 +523,7 @@ class CoverageEvaluator:
 "claim_text": "str type",
 "confidence_level": "float type",
 "coverage_outcome": "should be one of ['fulfilled', 'partially_fulfilled', 'not_fulfilled']",
-"justification": "str type",
+"justification": "str type"
 }"""
 
         return f"""You are evaluating how well a model's response addresses a specific expert-defined claim.
@@ -588,12 +595,13 @@ ONLY output RAW JSON string directly. No any other text. No formatting. No code 
                 f"Single claim evaluation failed: task_id={task_id} "
                 f"claim={claim_index}/{claim_count} error={e}"
             )
-            return {
-                "claim_text": claim,
-                "coverage_outcome": "not_fulfilled",
-                "justification": f"Evaluation failed: {e}",
-                "confidence_level": 0.1,
-            }
+            # An evaluator/infrastructure failure is not evidence that the
+            # model failed the claim. A task score is only comparable when all
+            # of its claims were judged, so let the row-level guard mark the
+            # entire row unscored (coverage_score=None). Downstream statistics
+            # exclude such rows instead of silently converting the failure
+            # into a zero or averaging only a subset of claims.
+            raise
 
     async def evaluate(
         self, claims: List[str], response: str, task_id: str = "unknown"
@@ -667,29 +675,6 @@ ONLY output RAW JSON string directly. No any other text. No formatting. No code 
             "explanation": "Evaluation complete",
             "confidence": avg_confidence,
         }
-
-    def _create_fallback_result(
-        self, claims: List[str], response: str, error_msg: str
-    ) -> Dict[str, Any]:
-        """Simple heuristic fallback"""
-        return {
-            "per_claim": [
-                {
-                    "claim": c,
-                    "covered": False,
-                    "score": 0.0,
-                    "reason": "Fallback due to error",
-                }
-                for c in claims
-            ],
-            "coverage_score": 0.0,
-            "total_claims": len(claims),
-            "fully_covered_claims": 0,
-            "partially_covered_claims": 0,
-            "explanation": f"Fallback evaluation used: {error_msg}",
-            "confidence": 0.1,
-        }
-
 
 async def evaluate_dataframe_async(
     df: pd.DataFrame, evaluator: CoverageEvaluator
@@ -931,6 +916,12 @@ async def main(args):
 
         logger.info(f"✅ Saved scored file to '{scored_path}'")
         valid_scores = df_scored["coverage_score"].dropna()
+        unscored_count = len(df_scored) - len(valid_scores)
+        if unscored_count:
+            logger.warning(
+                f"{unscored_count}/{len(df_scored)} rows unscored; excluded "
+                "from statistics. Inspect coverage_details_json for each reason."
+            )
         if len(valid_scores) > 0:
             logger.info(f"Evaluation complete. Average coverage: {valid_scores.mean():.3f}")
         else:
