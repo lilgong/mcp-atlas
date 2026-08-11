@@ -38,6 +38,7 @@ _SANDBOX_SEMAPHORE = asyncio.Semaphore(
 # MCP schemas or wrapping the server implementation.
 SERVER_CALL_POLICIES: dict[str, tuple[int, float]] = {
     "arxiv": (1, 3.0),
+    "brave-search": (1, 1.0),
     "osm-mcp-server": (1, 1.0),
 }
 

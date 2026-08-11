@@ -27,6 +27,25 @@ def test_oxylabs_search_and_explicit_source_are_unchanged():
     assert normalize_scraper_payload(explicit) is explicit
 
 
+def test_oxylabs_vendor_patch_accepts_synchronous_responses_and_preserves_http_errors():
+    source = (
+        AGENT_ROOT
+        / "vendor"
+        / "yibu-patched"
+        / "oxylabs_mcp"
+        / "utils.py"
+    ).read_text(encoding="utf-8")
+    scrape = source[source.index("    async def scrape("):source.index(
+        "\n\n\n@asynccontextmanager"
+    )]
+
+    assert scrape.index("response.raise_for_status()") < scrape.index(
+        "response_json: dict[str, typing.Any] = response.json()"
+    )
+    assert 'job = response_json.get("job")' in scrape
+    assert "response_json['job']" not in scrape
+
+
 def test_runtime_templates_use_only_required_compatibility_entrypoints():
     shared = json.loads(
         (

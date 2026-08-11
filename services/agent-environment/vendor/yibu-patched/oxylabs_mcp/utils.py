@@ -178,15 +178,21 @@ class _OxylabsClientWrapper:
                 int((_mcp_time.monotonic() - _mcp_started_at) * 1000),
                 _mcp_error,
             )
+        response.raise_for_status()
         response_json: dict[str, typing.Any] = response.json()
 
-        await self._ctx.info(
-            f"Job info: "
-            f"job_id={response_json['job']['id']} "
-            f"job_status={response_json['job']['status']}"
-        )
-
-        response.raise_for_status()
+        # The Realtime/Yibu-compatible endpoint may return a synchronous
+        # ``results`` response without Oxylabs' asynchronous ``job`` metadata.
+        # Treat that metadata as optional.  For non-2xx responses, raising
+        # before inspecting the body also preserves the real HTTP status and
+        # response text instead of masking them as KeyError("job").
+        job = response_json.get("job")
+        if isinstance(job, dict):
+            await self._ctx.info(
+                f"Job info: "
+                f"job_id={job.get('id')} "
+                f"job_status={job.get('status')}"
+            )
 
         return response_json
 

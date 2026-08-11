@@ -16,6 +16,12 @@ from mcp_completion.tool_policy import ToolRoute
 
 
 class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
+    def test_public_server_policies_match_upstream_limits(self):
+        self.assertEqual(
+            (1, 1.0),
+            isolated_client.SERVER_CALL_POLICIES["brave-search"],
+        )
+
     async def test_call_time_allowlist_blocks_before_http(self):
         client = SandboxMCPClient(
             "http://127.0.0.1:1",
