@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 import os
 import datetime
@@ -43,6 +44,90 @@ def build_token_log_path(api_key: str, env_name: str = "TOKEN_LOG_DIR") -> str:
 
 
 TOKEN_LOG_PATH = build_token_log_path(config.LLM_API_KEY)
+
+THINKING_CONTRACT_MAX_ATTEMPTS = 3
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
+
+
+class ThinkingContractViolation(RuntimeError):
+    """A provider returned reasoning after thinking was explicitly disabled."""
+
+
+def _thinking_is_disabled(extra_body: Dict[str, Any]) -> bool:
+    thinking = extra_body.get("thinking")
+    return (
+        isinstance(thinking, dict)
+        and str(thinking.get("type") or "").strip().casefold() == "disabled"
+    )
+
+
+def _strip_empty_think_blocks(content: Any) -> str:
+    text = "" if content is None else str(content)
+    return _THINK_BLOCK_RE.sub(
+        lambda match: "" if not match.group(1).strip() else match.group(0),
+        text,
+    )
+
+
+def _contains_nonempty_think_block(content: Any) -> bool:
+    text = "" if content is None else str(content)
+    return any(match.group(1).strip() for match in _THINK_BLOCK_RE.finditer(text))
+
+
+def _response_message(response: Any) -> Any:
+    if isinstance(response, dict):
+        return response["choices"][0]["message"]
+    return response.choices[0].message
+
+
+def _message_value(message: Any, field: str) -> Any:
+    if isinstance(message, dict):
+        return message.get(field)
+    return getattr(message, field, None)
+
+
+def _reasoning_and_content(response: Any) -> Tuple[Any, str]:
+    message = _response_message(response)
+    reasoning = _message_value(message, "reasoning_content")
+    content = _strip_empty_think_blocks(_message_value(message, "content"))
+    return reasoning, content
+
+
+def _format_assistant_content(reasoning: Any, content: str) -> str:
+    if isinstance(reasoning, str) and reasoning.strip():
+        return f"<think>{reasoning}</think>{content}"
+    return content
+
+
+def _write_token_usage(
+    response: Any,
+    *,
+    task_id: str,
+    turn: int,
+    call_id: str,
+    model: str,
+    messages: List[Message],
+    answer: str,
+) -> None:
+    if isinstance(response, dict):
+        return
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    token_usage = {
+        "task_id": task_id,
+        "turn": turn,
+        "call_id": call_id,
+        "model": model,
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+        "prompt": [item.role + str(item.content) for item in messages],
+        "answer": answer,
+    }
+    os.makedirs(os.path.dirname(TOKEN_LOG_PATH) or ".", exist_ok=True)
+    with open(TOKEN_LOG_PATH, "a+", encoding="utf-8") as log_out:
+        log_out.write(json.dumps(token_usage, ensure_ascii=False) + "\n")
 
 
 class LLMResponse(BaseModel):
@@ -192,43 +277,67 @@ async def create_completion(
     # ``thinking.type=enabled`` and ``thinking.type=disabled`` without the
     # completion service silently overriding the requested mode.
     extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
-    call_id = uuid.uuid4().hex
-    started = time.monotonic()
-    write_runtime_event(
-        "model_calls",
-        "model_call_started",
-        task_id=task_id,
-        turn=turn,
-        call_id=call_id,
-        model=proxy_model,
-        base_url=config.LLM_BASE_URL,
-        request={
-            "messages": litellm_messages,
-            "tools": litellm_tools,
-            "extra_body": extra_body,
-        },
-    )
+    thinking_disabled = _thinking_is_disabled(extra_body)
+    response = None
+    reasoning_content = None
+    content = ""
+    call_id = ""
 
-    try:
-        if "pangu" in proxy_model:
-            response = await generate_pangu_async(
-                model=proxy_model,
-                messages=litellm_messages,
-                tools=litellm_tools,
+    for attempt in range(1, THINKING_CONTRACT_MAX_ATTEMPTS + 1):
+        call_id = uuid.uuid4().hex
+        started = time.monotonic()
+        write_runtime_event(
+            "model_calls",
+            "model_call_started",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            attempt=attempt,
+            max_attempts=THINKING_CONTRACT_MAX_ATTEMPTS,
+            base_url=config.LLM_BASE_URL,
+            request={
+                "messages": litellm_messages,
+                "tools": litellm_tools,
+                "extra_body": extra_body,
+            },
+        )
+
+        try:
+            if "pangu" in proxy_model:
+                response = await generate_pangu_async(
+                    model=proxy_model,
+                    messages=litellm_messages,
+                    tools=litellm_tools,
+                    task_id=task_id,
+                    turn=turn,
+                    call_id=call_id,
+                )
+            else:
+                response = await litellm.acompletion(
+                    model=proxy_model,
+                    messages=litellm_messages,
+                    tools=litellm_tools,
+                    api_key=config.LLM_API_KEY,
+                    api_base=config.LLM_BASE_URL,
+                    timeout=config.DEFAULT_TIMEOUT,
+                    **({"extra_body": extra_body} if extra_body else {}),
+                )
+        except Exception as error:
+            logger.error(f"LiteLLM completion failed: {error}")
+            write_runtime_event(
+                "model_calls",
+                "model_call_failed",
                 task_id=task_id,
                 turn=turn,
                 call_id=call_id,
-            )
-        else:
-            response = await litellm.acompletion(
                 model=proxy_model,
-                messages=litellm_messages,
-                tools=litellm_tools,
-                api_key=config.LLM_API_KEY,
-                api_base=config.LLM_BASE_URL,
-                timeout=config.DEFAULT_TIMEOUT,
-                **({"extra_body": extra_body} if extra_body else {}),
+                attempt=attempt,
+                duration_seconds=round(time.monotonic() - started, 3),
+                error_type=type(error).__name__,
+                error=str(error),
             )
+            raise
 
         usage = None
         if not isinstance(response, dict):
@@ -242,10 +351,52 @@ async def create_completion(
             turn=turn,
             call_id=call_id,
             model=proxy_model,
+            attempt=attempt,
             duration_seconds=round(time.monotonic() - started, 3),
             usage=usage,
             response=jsonable(response),
         )
+
+        reasoning_content, raw_content = _reasoning_and_content(response)
+        content = _format_assistant_content(reasoning_content, raw_content)
+        _write_token_usage(
+            response,
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            messages=messages,
+            answer=content,
+        )
+        leaked_reasoning = (
+            isinstance(reasoning_content, str)
+            and bool(reasoning_content.strip())
+        )
+        leaked_think_block = _contains_nonempty_think_block(raw_content)
+        if not (thinking_disabled and (leaked_reasoning or leaked_think_block)):
+            break
+
+        write_runtime_event(
+            "model_calls",
+            "thinking_contract_violation",
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+            model=proxy_model,
+            attempt=attempt,
+            max_attempts=THINKING_CONTRACT_MAX_ATTEMPTS,
+            leaked_reasoning_content=leaked_reasoning,
+            leaked_think_block=leaked_think_block,
+            will_retry=attempt < THINKING_CONTRACT_MAX_ATTEMPTS,
+        )
+        if attempt == THINKING_CONTRACT_MAX_ATTEMPTS:
+            raise ThinkingContractViolation(
+                "provider returned non-empty thinking while thinking.type=disabled "
+                f"for {THINKING_CONTRACT_MAX_ATTEMPTS} consecutive attempts"
+            )
+
+    try:
+        assert response is not None
 
         # Convert response back to our format
         # Handle tool_calls conversion from OpenAI format to our format
@@ -302,40 +453,6 @@ async def create_completion(
                     kept=len(tool_calls or []),
                 )
 
-        # 获取助手轮次思考过程
-        if isinstance(response, dict):  # 盘古接口返回的是dict格式
-            reasoning_content = response["choices"][0]["message"].get("reasoning_content", None)
-            if isinstance(reasoning_content, str):
-                content = "<think>" + reasoning_content + "</think>" + str(response["choices"][0]["message"]["content"])
-            else:
-                content = response["choices"][0]["message"]["content"]
-        else:  # 开源接口返回的是ModelResponse格式
-            reasoning_content = getattr(response.choices[0].message, "reasoning_content", None)
-            if isinstance(reasoning_content, str):
-                content = "<think>" + reasoning_content + "</think>" + str(response.choices[0].message.content)
-            else:
-                content = response.choices[0].message.content
-
-        # 记录token使用量
-        if isinstance(response, dict):  # 盘古接口返回的是dict格式
-            # todo 这里记录每一轮的盘古的回复，用于debug，分析是否存在格式错误
-            pass
-        else:  # 开源接口返回的是ModelResponse格式
-            token_usage = {
-                "task_id": task_id,
-                "turn": turn,
-                "call_id": call_id,
-                "model": proxy_model,
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-                "prompt": [item.role + str(item.content) for item in messages],
-                "answer": content,
-            }
-            os.makedirs(os.path.dirname(TOKEN_LOG_PATH) or ".", exist_ok=True)
-            with open(TOKEN_LOG_PATH, 'a+', encoding="utf-8") as log_out:
-                log_out.write(json.dumps(token_usage, ensure_ascii=False) + "\n")
-
         if isinstance(response, dict):  # 盘古接口返回的是dict格式
             assistant_message = AssistantMessage(
                 role="assistant",
@@ -367,15 +484,14 @@ async def create_completion(
         )
 
     except Exception as error:
-        logger.error(f"LiteLLM completion failed: {error}")
+        logger.error(f"LiteLLM response parsing failed: {error}")
         write_runtime_event(
             "model_calls",
-            "model_call_failed",
+            "model_response_parsing_failed",
             task_id=task_id,
             turn=turn,
             call_id=call_id,
             model=proxy_model,
-            duration_seconds=round(time.monotonic() - started, 3),
             error_type=type(error).__name__,
             error=str(error),
         )
