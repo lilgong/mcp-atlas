@@ -240,6 +240,7 @@ async def create_completion(
         messages: List[Message],
         tools: List[ToolCallSchema],
         extra_body: Optional[Dict[str, Any]] = None,
+        retry_thinking_contract_violations: bool = False,
         task_id: str = "unknown",
         turn: int = 0,
 ) -> LLMResponse:
@@ -278,12 +279,17 @@ async def create_completion(
     # completion service silently overriding the requested mode.
     extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
     thinking_disabled = _thinking_is_disabled(extra_body)
+    max_attempts = (
+        THINKING_CONTRACT_MAX_ATTEMPTS
+        if retry_thinking_contract_violations
+        else 1
+    )
     response = None
     reasoning_content = None
     content = ""
     call_id = ""
 
-    for attempt in range(1, THINKING_CONTRACT_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         call_id = uuid.uuid4().hex
         started = time.monotonic()
         write_runtime_event(
@@ -294,7 +300,7 @@ async def create_completion(
             call_id=call_id,
             model=proxy_model,
             attempt=attempt,
-            max_attempts=THINKING_CONTRACT_MAX_ATTEMPTS,
+            max_attempts=max_attempts,
             base_url=config.LLM_BASE_URL,
             request={
                 "messages": litellm_messages,
@@ -384,15 +390,18 @@ async def create_completion(
             call_id=call_id,
             model=proxy_model,
             attempt=attempt,
-            max_attempts=THINKING_CONTRACT_MAX_ATTEMPTS,
+            max_attempts=max_attempts,
             leaked_reasoning_content=leaked_reasoning,
             leaked_think_block=leaked_think_block,
-            will_retry=attempt < THINKING_CONTRACT_MAX_ATTEMPTS,
+            retry_enabled=retry_thinking_contract_violations,
+            will_retry=retry_thinking_contract_violations and attempt < max_attempts,
         )
-        if attempt == THINKING_CONTRACT_MAX_ATTEMPTS:
+        if not retry_thinking_contract_violations:
+            break
+        if attempt == max_attempts:
             raise ThinkingContractViolation(
                 "provider returned non-empty thinking while thinking.type=disabled "
-                f"for {THINKING_CONTRACT_MAX_ATTEMPTS} consecutive attempts"
+                f"for {max_attempts} consecutive attempts"
             )
 
     try:

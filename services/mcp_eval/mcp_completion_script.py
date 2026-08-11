@@ -112,9 +112,17 @@ class GenerationResult:
 class AsyncMCPTrajectoryGenerator:
     """Fully async MCP trajectory generator - each task is independent"""
 
-    def __init__(self, llm_model: str, extra_body: dict = None):
+    def __init__(
+        self,
+        llm_model: str,
+        extra_body: dict = None,
+        retry_thinking_contract_violations: bool = False,
+    ):
         self.llm_model = llm_model
         self.extra_body = extra_body or {}
+        self.retry_thinking_contract_violations = (
+            retry_thinking_contract_violations
+        )
         self.csv_lock = asyncio.Lock()  # For thread-safe CSV writing
 
     async def __aenter__(self):
@@ -269,6 +277,9 @@ class AsyncMCPTrajectoryGenerator:
             "enabledTools": enabled_tools,
             "taskId": str(taskId) if taskId is not None else uuid14(),
             "enableThinkingTokens": True,
+            "retryThinkingContractViolations": (
+                self.retry_thinking_contract_violations
+            ),
             **({"extraBody": self.extra_body} if self.extra_body else {}),
         }
         headers = {"Content-Type": "application/json"}
@@ -809,6 +820,17 @@ def parse_int(value: str | None, default: int) -> int:
     return int(value)
 
 
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    if value is None or value.strip() == "":
+        return default
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}")
+
+
 def parse_arguments(model, input_path, output_path, num_task, concurrency):
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
@@ -875,6 +897,19 @@ def parse_arguments(model, input_path, output_path, num_task, concurrency):
             '(e.g. \'{"thinking":{"type":"enabled"},"reasoning_effort":"max"}\')'
         ),
     )
+    parser.add_argument(
+        "--retry-thinking-contract-violations",
+        type=parse_bool,
+        default=parse_bool(
+            os.getenv("MCP_COMPLETION_RETRY_THINKING_CONTRACT_VIOLATIONS"),
+            False,
+        ),
+        metavar="BOOL",
+        help=(
+            "Retry a model turn when thinking is returned despite being "
+            "disabled. Defaults to false; false preserves the first response."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -904,6 +939,10 @@ async def main():
     logging.info(f"  concurrency        = {args.concurrency}")
     logging.info(f"  filter_by_servers  = {not args.no_filter}")
     logging.info(f"  extra_body         = {extra_body}")
+    logging.info(
+        "  retry_thinking_contract_violations = %s",
+        args.retry_thinking_contract_violations,
+    )
     logging.info(f"  completion_service = {SERVER_URL}")
     logging.info(f"  mcp_servers_url    = {os.getenv('MCP_SERVER_URL', 'http://localhost:1984')}")
     logging.info(f"  use_system_prompt  = {USE_SYSTEM_PROMPT}")
@@ -1018,7 +1057,13 @@ async def main():
             logging.warning(f"Warning: Could not read existing output: {e}")
 
     # Run evaluation（extra_body 已在上方解析，这里复用同一变量）
-    async with AsyncMCPTrajectoryGenerator(args.model, extra_body=extra_body) as generator:
+    async with AsyncMCPTrajectoryGenerator(
+        args.model,
+        extra_body=extra_body,
+        retry_thinking_contract_violations=(
+            args.retry_thinking_contract_violations
+        ),
+    ) as generator:
         results_df = await generator.evaluate_dataset_async(
             df, output_csv, processed_ids, args.concurrency
         )

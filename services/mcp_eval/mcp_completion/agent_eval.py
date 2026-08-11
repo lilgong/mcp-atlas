@@ -117,6 +117,7 @@ async def run_mcp_eval(
     messages: List[Message],
     max_turns: int,
     extra_body: Optional[Dict[str, Any]] = None,
+    retry_thinking_contract_violations: bool = False,
     task_id: str = "unknown",
 ) -> AsyncGenerator[AgentOutput, None]:
     """
@@ -139,6 +140,7 @@ async def run_mcp_eval(
                 messages=all_messages,
                 tools=transformed_tools,
                 extra_body=extra_body,
+                retry_thinking_contract_violations=retry_thinking_contract_violations,
                 task_id=task_id,
                 turn=i + 1,
             )
@@ -278,6 +280,7 @@ async def handle_run_mcp_eval(
             messages=body.messages,
             max_turns=body.max_turns,
             extra_body=body.extra_body,
+            retry_thinking_contract_violations=body.retry_thinking_contract_violations,
             task_id=task_id,
         ):
             yield output

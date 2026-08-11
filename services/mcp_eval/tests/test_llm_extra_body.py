@@ -74,7 +74,12 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
 
-    async def _call(self, responses, extra_body=None):
+    async def _call(
+        self,
+        responses,
+        extra_body=None,
+        retry_thinking_contract_violations=False,
+    ):
         completion = AsyncMock(side_effect=responses)
         with (
             patch("mcp_completion.llm.litellm.acompletion", completion),
@@ -86,6 +91,9 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
                 messages=[UserMessage(role="user", content="test")],
                 tools=[],
                 extra_body=extra_body or {"thinking": {"type": "disabled"}},
+                retry_thinking_contract_violations=(
+                    retry_thinking_contract_violations
+                ),
                 task_id="thinking-contract-test",
             )
         return result, completion, runtime_event, token_usage
@@ -134,7 +142,7 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
         result, completion, runtime_event, token_usage = await self._call([
             self._response(reasoning_content="private reasoning"),
             self._response(reasoning_content=""),
-        ])
+        ], retry_thinking_contract_violations=True)
 
         self.assertEqual(result.message.content, "ok")
         self.assertEqual(completion.await_count, 2)
@@ -146,7 +154,7 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
         result, completion, _, _ = await self._call([
             self._response(content="<think>private reasoning</think>answer"),
             self._response(content="answer"),
-        ])
+        ], retry_thinking_contract_violations=True)
 
         self.assertEqual(result.message.content, "answer")
         self.assertEqual(completion.await_count, 2)
@@ -168,6 +176,7 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
                     messages=[UserMessage(role="user", content="test")],
                     tools=[],
                     extra_body={"thinking": {"type": "disabled"}},
+                    retry_thinking_contract_violations=True,
                     task_id="thinking-contract-test",
                 )
 
@@ -185,6 +194,24 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
             "<think>visible reasoning</think>ok",
         )
         self.assertEqual(completion.await_count, 1)
+
+    async def test_retry_disabled_preserves_first_leaking_response(self):
+        result, completion, runtime_event, token_usage = await self._call([
+            self._response(reasoning_content="provider reasoning"),
+        ])
+
+        self.assertEqual(
+            result.message.content,
+            "<think>provider reasoning</think>ok",
+        )
+        self.assertEqual(completion.await_count, 1)
+        self.assertEqual(token_usage.call_count, 1)
+        violation = next(
+            call for call in runtime_event.call_args_list
+            if call.args[1] == "thinking_contract_violation"
+        )
+        self.assertFalse(violation.kwargs["retry_enabled"])
+        self.assertFalse(violation.kwargs["will_retry"])
 
 
 if __name__ == "__main__":
