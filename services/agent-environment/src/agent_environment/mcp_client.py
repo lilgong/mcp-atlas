@@ -13,7 +13,19 @@ from pathlib import Path
 
 logger = create_logger(__name__)
 
-CLIENT_INIT_TIMEOUT_SECONDS = 25.0
+CLIENT_INIT_TIMEOUT_SECONDS = 45.0
+
+
+def configured_client_init_timeout_seconds() -> float:
+    value = float(
+        os.getenv(
+            "MCP_CLIENT_INIT_TIMEOUT_SECONDS",
+            str(CLIENT_INIT_TIMEOUT_SECONDS),
+        )
+    )
+    if value <= 0:
+        raise ValueError("MCP_CLIENT_INIT_TIMEOUT_SECONDS must be positive")
+    return value
 
 
 class DirectMCPClient(Client):
@@ -179,6 +191,6 @@ def create_server_client(
             transport,
             roots=[],
             log_handler=log_handler,
-            init_timeout=CLIENT_INIT_TIMEOUT_SECONDS,
+            init_timeout=configured_client_init_timeout_seconds(),
         ),
     )

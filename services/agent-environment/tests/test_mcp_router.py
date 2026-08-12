@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import patch
 
 import mcp.types
 from fastmcp.client.transports import StdioTransport
@@ -12,12 +14,15 @@ from mcp.shared.exceptions import McpError
 
 from agent_environment.mcp_client import (
     CLIENT_INIT_TIMEOUT_SECONDS,
+    configured_client_init_timeout_seconds,
     create_server_client,
 )
 from agent_environment.mcp_router import (
+    DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
     DirectMCPRouter,
     RouterTimeoutError,
     UnknownToolError,
+    configured_discovery_timeout_seconds,
 )
 
 
@@ -396,6 +401,32 @@ class DirectMCPRouterTests(unittest.IsolatedAsyncioTestCase):
         roots_result = await roots_callback(None)
         self.assertEqual([], roots_result.roots)
         await client.close()
+
+    def test_startup_timeouts_are_configurable_and_positive(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MCP_CLIENT_INIT_TIMEOUT_SECONDS": "47.5",
+                "MCP_DISCOVERY_TIMEOUT_SECONDS": "53.5",
+            },
+        ):
+            self.assertEqual(47.5, configured_client_init_timeout_seconds())
+            self.assertEqual(53.5, configured_discovery_timeout_seconds())
+
+        with patch.dict(
+            os.environ,
+            {
+                "MCP_CLIENT_INIT_TIMEOUT_SECONDS": "",
+                "MCP_DISCOVERY_TIMEOUT_SECONDS": "",
+            },
+        ):
+            with self.assertRaises(ValueError):
+                configured_client_init_timeout_seconds()
+            with self.assertRaises(ValueError):
+                configured_discovery_timeout_seconds()
+
+        self.assertEqual(45.0, CLIENT_INIT_TIMEOUT_SECONDS)
+        self.assertEqual(50.0, DEFAULT_DISCOVERY_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":

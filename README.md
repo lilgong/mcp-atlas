@@ -294,6 +294,17 @@ SERVER_URL=http://localhost:3500
 
 task-local 和 task-Mongo 容器没有需要配置的宿主端口。
 
+共享 runtime 并发冷启动 MCP 子进程时，使用以下两级超时：
+
+```dotenv
+MCP_CLIENT_INIT_TIMEOUT_SECONDS=45
+MCP_DISCOVERY_TIMEOUT_SECONDS=50
+```
+
+外层 discovery 必须大于 client initialize。若某个 Git 源 MCP 只在冷启动时出现
+`Failed to initialize server session`，可适度增加这两个值；只在 `.env` 增加旧的
+`CLIENT_INIT_TIMEOUT_SECONDS` 不会生效。
+
 ### 5.4 隔离 runtime
 
 ```dotenv

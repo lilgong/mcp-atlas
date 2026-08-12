@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -14,7 +15,7 @@ from .logger import create_logger
 
 logger = create_logger(__name__)
 
-DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 30.0
+DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 50.0
 # Three Overpass endpoints may each consume the shim's bounded 45-second
 # attempt before succeeding or falling back. Keep enough room for all three
 # without weakening the outer evaluator's 180-second deadline.
@@ -24,6 +25,18 @@ DEFAULT_STARTUP_CONCURRENCY = 12
 DEFAULT_REFRESH_MIN_INTERVAL_SECONDS = 60.0
 DEFAULT_FAILED_REFRESH_RETRY_SECONDS = 5.0
 RETIRE_MCP_ERROR_CODES = {408, mcp.types.CONNECTION_CLOSED}
+
+
+def configured_discovery_timeout_seconds() -> float:
+    value = float(
+        os.getenv(
+            "MCP_DISCOVERY_TIMEOUT_SECONDS",
+            str(DEFAULT_DISCOVERY_TIMEOUT_SECONDS),
+        )
+    )
+    if value <= 0:
+        raise ValueError("MCP_DISCOVERY_TIMEOUT_SECONDS must be positive")
+    return value
 
 
 class RouterClient(Protocol):
@@ -102,7 +115,7 @@ class DirectMCPRouter:
         config: dict[str, Any],
         client_factory: ClientFactory,
         *,
-        discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
+        discovery_timeout: float | None = None,
         tool_call_timeout: float = DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
         close_timeout: float = DEFAULT_CLOSE_TIMEOUT_SECONDS,
         startup_concurrency: int = DEFAULT_STARTUP_CONCURRENCY,
@@ -129,7 +142,11 @@ class DirectMCPRouter:
         self._live_generations = {
             state.current for state in self._states.values()
         }
-        self._discovery_timeout = discovery_timeout
+        self._discovery_timeout = (
+            configured_discovery_timeout_seconds()
+            if discovery_timeout is None
+            else discovery_timeout
+        )
         self._tool_call_timeout = tool_call_timeout
         self._close_timeout = close_timeout
         self._startup_concurrency = max(1, startup_concurrency)
