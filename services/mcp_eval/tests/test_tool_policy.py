@@ -63,10 +63,10 @@ class ToolPolicyTests(unittest.TestCase):
                 route_for_tool(name), ToolRoute.BLOCKED_CLOUD_WRITE, name
             )
 
-    def test_offline_dependency_install_is_not_advertised(self):
+    def test_dependency_install_matches_official_tool_surface(self):
         self.assertEqual(
             route_for_tool("mcp-code-executor_install_dependencies"),
-            ToolRoute.BLOCKED_UNSUPPORTED,
+            ToolRoute.TASK_LOCAL,
         )
 
     def test_e2b_remains_available_for_official_evaluation(self):

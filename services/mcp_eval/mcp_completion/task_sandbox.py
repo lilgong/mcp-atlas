@@ -226,6 +226,7 @@ class TaskSandbox:
     cpu_limit: str
     task_data_source: str
     owner: str = field(default_factory=_owner_label)
+    task_network: Optional[str] = None
     mongo_socket_volume: Optional[str] = None
     mongo_fixture: Optional[dict[str, str]] = None
     runtime_image: Optional[dict[str, str]] = None
@@ -342,13 +343,17 @@ class TaskSandbox:
                 runtime_image_id=self.runtime_image["image_id"],
                 runtime_version=self.runtime_image["runtime_version"],
             )
+            if self.local_servers or self.network_servers:
+                await self._create_task_network()
+            if not self.task_network:
+                raise TaskSandboxError("task network was not created")
             if self.local_servers:
                 await self._start_local_stack()
             if self.network_servers:
                 await self._start_agent_container(
                     kind="network",
                     enabled_servers=self.network_servers,
-                    network="bridge",
+                    network=self.task_network,
                     extra_env={},
                 )
         except BaseException:
@@ -364,6 +369,37 @@ class TaskSandbox:
             duration_seconds=round(time.monotonic() - self._started_at, 3),
         )
         return self
+
+    async def _create_task_network(self) -> None:
+        name = self._claim_name(
+            f"mcp-atlas-net-{_safe_fragment(self.task_id, 20)}-"
+            f"{uuid.uuid4().hex[:10]}"
+        )
+        await _run(
+            "docker",
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--opt",
+            "com.docker.network.bridge.enable_icc=false",
+            "--label",
+            "mcp-atlas.task-sandbox=true",
+            "--label",
+            f"mcp-atlas.owner={self.owner}",
+            "--label",
+            f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            name,
+        )
+        self.task_network = name
+        write_runtime_event(
+            "sandbox",
+            "task_network_created",
+            task_id=self.task_id,
+            network=name,
+            driver="bridge",
+            inter_container_communication=False,
+        )
 
     async def _start_local_stack(self) -> None:
         extra_env: dict[str, str] = {}
@@ -385,7 +421,7 @@ class TaskSandbox:
         await self._start_agent_container(
             kind="local",
             enabled_servers=self.local_servers,
-            network="none",
+            network=self.task_network or "",
             extra_env=extra_env,
         )
 
@@ -629,7 +665,10 @@ class TaskSandbox:
                         f"{self.mongo_socket_volume}:/run/mcp-atlas-mongo",
                     ]
                 )
-        if network == "bridge":
+        # task-network services are reached over a loopback-published random
+        # port.  task-local services use docker-exec HTTP, so they need outbound
+        # networking but must not publish a host port.
+        if kind == "network":
             command.extend(["--publish", "127.0.0.1::1984"])
         for key, value in sorted(extra_env.items()):
             command.extend(["--env", f"{key}={value}"])
@@ -693,27 +732,10 @@ class TaskSandbox:
         if kind == "local":
             container.url = "http://127.0.0.1:1984"
         else:
-            container.url = await self._container_url(name, network)
+            container.url = await self._container_url(name)
         await self._wait_for_agent(container)
 
-    async def _container_url(self, name: str, network: str) -> str:
-        if network != "bridge":
-            stdout, stderr, code = await _run(
-                "docker",
-                "inspect",
-                name,
-                "--format",
-                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-                timeout=10,
-                check=False,
-            )
-            address = stdout.strip()
-            if code == 0 and address:
-                return f"http://{address}:1984"
-            raise TaskSandboxError(
-                f"No task-internal address for {name}: {stderr or stdout}"
-            )
-
+    async def _container_url(self, name: str) -> str:
         deadline = time.monotonic() + 30
         last = ""
         while time.monotonic() < deadline:
@@ -862,6 +884,18 @@ class TaskSandbox:
             )
             self.mongo_socket_volume = None
 
+        if self.task_network:
+            network = self.task_network
+            await self._remove_resource(
+                "docker",
+                "network",
+                "rm",
+                network,
+                event="task_network_removed",
+                network=network,
+            )
+            self.task_network = None
+
         if self.task_workspace:
             workspace = self.task_workspace
             await asyncio.to_thread(shutil.rmtree, workspace, True)
@@ -943,11 +977,12 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
     )
 
     async def list_owned(kind: str) -> tuple[list[str], bool]:
-        command = (
-            ("docker", "ps", "-aq", *label_filters)
-            if kind == "container"
-            else ("docker", "volume", "ls", "-q", *label_filters)
-        )
+        if kind == "container":
+            command = ("docker", "ps", "-aq", *label_filters)
+        elif kind == "volume":
+            command = ("docker", "volume", "ls", "-q", *label_filters)
+        else:
+            command = ("docker", "network", "ls", "-q", *label_filters)
         try:
             stdout, _, _ = await _run(
                 *command, timeout=_teardown_timeout(), check=False
@@ -970,11 +1005,12 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
     semaphore = asyncio.Semaphore(_reap_concurrency())
 
     async def remove_one(kind: str, name: str) -> bool:
-        command = (
-            ("docker", "rm", "-f", "-v", name)
-            if kind == "container"
-            else ("docker", "volume", "rm", "-f", name)
-        )
+        if kind == "container":
+            command = ("docker", "rm", "-f", "-v", name)
+        elif kind == "volume":
+            command = ("docker", "volume", "rm", "-f", name)
+        else:
+            command = ("docker", "network", "rm", name)
         async with semaphore:
             return await _reap_one(*command)
 
@@ -1018,13 +1054,27 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
         volume_failures,
         volume_listing_failures,
     ) = await remove_owned("volume")
-    listing_failures = container_listing_failures + volume_listing_failures
+    (
+        networks_removed,
+        networks_remaining,
+        network_failures,
+        network_listing_failures,
+    ) = await remove_owned("network")
+    listing_failures = (
+        container_listing_failures
+        + volume_listing_failures
+        + network_listing_failures
+    )
     result = {
         "containers_removed": containers_removed,
         "containers_remaining": containers_remaining,
         "volumes_removed": volumes_removed,
         "volumes_remaining": volumes_remaining,
-        "removal_failures": container_failures + volume_failures,
+        "networks_removed": networks_removed,
+        "networks_remaining": networks_remaining,
+        "removal_failures": (
+            container_failures + volume_failures + network_failures
+        ),
         "listing_failures": listing_failures,
     }
 
@@ -1107,7 +1157,21 @@ async def reap_orphan_task_sandboxes(min_age_seconds: float) -> dict[str, int]:
     for name in volumes:
         await _run("docker", "volume", "rm", "-f", name, timeout=30, check=False)
 
-    if containers or volumes:
+    networks = await _stale_named_resources(
+        ("docker", "network", "ls", "-q", *label_filters),
+        (
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            "{{.Name}}\t{{.Created}}",
+        ),
+        min_age_seconds=min_age_seconds,
+    )
+    for name in networks:
+        await _run("docker", "network", "rm", name, timeout=30, check=False)
+
+    if containers or volumes or networks:
         write_runtime_event(
             "sandbox",
             "orphan_sweep_reclaimed",
@@ -1115,8 +1179,13 @@ async def reap_orphan_task_sandboxes(min_age_seconds: float) -> dict[str, int]:
             min_age_seconds=min_age_seconds,
             containers=containers,
             volumes=volumes,
+            networks=networks,
         )
-    return {"containers": len(containers), "volumes": len(volumes)}
+    return {
+        "containers": len(containers),
+        "volumes": len(volumes),
+        "networks": len(networks),
+    }
 
 
 async def run_orphan_sweeper(

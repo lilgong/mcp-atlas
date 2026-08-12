@@ -380,6 +380,8 @@ class ServiceLifespanCleanupTests(unittest.IsolatedAsyncioTestCase):
             "containers_remaining": 0,
             "volumes_removed": 1,
             "volumes_remaining": 0,
+            "networks_removed": 1,
+            "networks_remaining": 0,
             "removal_failures": 0,
             "listing_failures": 0,
         }

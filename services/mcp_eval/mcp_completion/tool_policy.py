@@ -61,7 +61,9 @@ KNOWN_SERVERS = (
 )
 
 # These servers may execute arbitrary local code or mutate files/database state.
-# They are never run in the credentialed shared cloud container for an agent task.
+# They run in a disposable, credential-free container for each agent task.  The
+# container has outbound networking, matching the official tool behavior, while
+# the host control APIs remain bound to loopback.
 TASK_LOCAL_SERVERS = frozenset(
     {
         "cli-mcp-server",
@@ -79,12 +81,7 @@ TASK_LOCAL_SERVERS = frozenset(
 # access, so they are kept separate from the no-network arbitrary-code sandbox.
 TASK_NETWORK_SERVERS = frozenset({"arxiv", "pubmed"})
 TASK_MONGODB_DATABASE = "store"
-UNSUPPORTED_TOOLS = frozenset(
-    {
-        # Task-local containers deliberately have no network access.
-        "mcp-code-executor_install_dependencies",
-    }
-)
+UNSUPPORTED_TOOLS: frozenset[str] = frozenset()
 
 
 class ToolRoute(str, Enum):

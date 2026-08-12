@@ -14,12 +14,15 @@ if __name__ == "__main__":
         f"remaining={result['containers_remaining']}; "
         f"volumes removed={result['volumes_removed']} "
         f"remaining={result['volumes_remaining']}; "
+        f"networks removed={result['networks_removed']} "
+        f"remaining={result['networks_remaining']}; "
         f"removal failures={result['removal_failures']}; "
         f"listing failures={result['listing_failures']}"
     )
     if (
         result["containers_remaining"]
         or result["volumes_remaining"]
+        or result["networks_remaining"]
         or result["removal_failures"]
         or result["listing_failures"]
     ):

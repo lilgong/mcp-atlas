@@ -45,13 +45,14 @@ completion 服务（PORT）
 隔离规则：
 
 - 每道题拥有独立的 `/data` 副本，题内写入不会修改 fixture 源目录。
-- task-local 容器使用 `network=none`，且不会收到 `.env` 中的云端凭证。
+- task-local 与 task-network 容器使用每题独立的 bridge 网络，允许访问公网，
+  但关闭容器间通信，且不会收到 `.env` 中的云端凭证。
 - MongoDB 数据为每道题单独恢复，题目结束后容器和 socket volume 被删除。
 - Arxiv/PubMed 容器允许联网，但不会收到共享云端账号凭证。
 - Airtable、GitHub、Google Workspace、Lara、Notion、Slack 的共享账号写工具被拒绝。
 - filesystem、Git、Memory、MongoDB、Desktop Commander 等任务本地写工具可以在一次性容器中执行。
 - `e2b-server_run_code` 通过共享 E2B 云端沙箱执行，与官方评测工具面保持一致。
-- `mcp-code-executor_install_dependencies` 不进入评测工具列表。
+- `mcp-code-executor_install_dependencies` 可用，与官方工具面一致。
 - 模型请求、工具调用、容器生命周期和容器日志写入 `MCP_RUNTIME_LOG_DIR`。
 
 运行时镜像只包含程序和依赖，不包含评测 `/data`。文件 fixture 和 Mongo fixture
@@ -266,11 +267,11 @@ EVAL_LLM_BASE_URL=<evaluator-base-url>
 默认端口：
 
 ```dotenv
-MCP_SHARED_HOST=0.0.0.0
+MCP_SHARED_HOST=127.0.0.1
 MCP_SHARED_PORT=1984
 MCP_SERVER_URL=http://localhost:1984
 
-HOST=0.0.0.0
+HOST=127.0.0.1
 PORT=3000
 SERVER_URL=http://localhost:3000
 ```
@@ -280,15 +281,16 @@ SERVER_URL=http://localhost:3000
 `PORT` 与 `SERVER_URL` 也必须一致。比如把 completion 改到 3500：
 
 ```dotenv
-HOST=0.0.0.0
+HOST=127.0.0.1
 PORT=3500
 SERVER_URL=http://localhost:3500
 ```
 
 只改 `PORT` 不改 `SERVER_URL` 会导致轨迹脚本继续请求 3000。
 
-如果所有进程都在同一台机器，可以把两个监听 host 设置为 `127.0.0.1`。如果需要从
-其他机器访问，使用 `0.0.0.0`，并通过防火墙限制来源。
+隔离模式要求两个控制面只监听 `127.0.0.1`，防止可联网任务容器经 Docker 网关
+绕过工具白名单。需要从其他机器访问时使用 SSH 端口转发；服务会拒绝以
+`0.0.0.0` 启动。
 
 task-local 和 task-Mongo 容器没有需要配置的宿主端口。
 
@@ -959,7 +961,7 @@ make check-task-isolation
 - Arxiv/PubMed task-network server 能加载。
 - 云端写工具不可见、不可调用。
 - local 容器没有云端凭证。
-- local 容器使用 `network=none`。
+- local/network 容器使用每题独立 bridge、可出网且关闭 ICC。
 - filesystem 写入只在当前任务可见。
 - Mongo 写入只在当前任务可见。
 - 20 个 task sandbox 可以并发启动。
@@ -1253,7 +1255,7 @@ docker ps -a --filter label=mcp-atlas.task-sandbox=true
 docker volume ls --filter label=mcp-atlas.task-sandbox=true
 ```
 
-正常完成后不应持续积累任务容器和 volume。
+正常完成后不应持续积累任务容器、volume 和专属 bridge network。
 
 ---
 

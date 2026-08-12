@@ -17,6 +17,15 @@ ENV_FILE = ROOT / ".env"
 DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
 
 
+def validate_shared_bind_host(host: str) -> None:
+    if host.strip().lower() not in {"127.0.0.1", "::1", "localhost"}:
+        raise ValueError(
+            "MCP_SHARED_HOST must be a loopback address when task isolation is "
+            "enabled; use 127.0.0.1 so networked task containers cannot bypass "
+            "their tool allowlist"
+        )
+
+
 def configured_shared_port() -> int:
     explicit = (os.getenv("MCP_SHARED_PORT") or "").strip()
     if explicit:
@@ -35,7 +44,13 @@ def main() -> int:
         raise RuntimeError(f"missing environment file: {ENV_FILE}")
     load_dotenv(ENV_FILE, override=False)
     port = configured_shared_port()
-    host = os.getenv("MCP_SHARED_HOST", "0.0.0.0")
+    host = os.getenv("MCP_SHARED_HOST", "127.0.0.1")
+    isolation_enabled = (
+        os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+        not in {"0", "false", "no"}
+    )
+    if isolation_enabled:
+        validate_shared_bind_host(host)
     image = os.getenv("MCP_SHARED_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
     usage_log_dir = Path(
         os.getenv("MCP_USAGE_LOG_DIR") or ROOT / "mcp_usage_log"

@@ -21,7 +21,9 @@ from mcp_completion.task_data import (  # noqa: E402
     write_git_safe_directory_config,
 )
 from mcp_completion.task_sandbox import (  # noqa: E402
+    TaskSandbox,
     TaskSandboxError,
+    _release_sandbox_names,
     inspect_runtime_image,
 )
 
@@ -78,6 +80,32 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(TaskSandboxError, "fixture-free"):
                 await inspect_runtime_image("agent-environment:latest")
+
+    async def test_task_network_is_private_and_disables_icc(self):
+        sandbox = TaskSandbox(
+            task_id="network-policy",
+            local_servers={"filesystem"},
+            network_servers=set(),
+            agent_image="image",
+            mongo_image="",
+            startup_timeout=1.0,
+            memory_limit="1g",
+            cpu_limit="1.0",
+            task_data_source="/tmp/data",
+        )
+        with patch(
+            "mcp_completion.task_sandbox._run",
+            new=AsyncMock(return_value=("", "", 0)),
+        ) as run, patch(
+            "mcp_completion.task_sandbox.write_runtime_event"
+        ):
+            await sandbox._create_task_network()
+        command = run.await_args.args
+        self.assertEqual(command[:3], ("docker", "network", "create"))
+        self.assertIn("com.docker.network.bridge.enable_icc=false", command)
+        self.assertIn("mcp-atlas.task-sandbox=true", command)
+        self.assertTrue(sandbox.task_network.startswith("mcp-atlas-net-"))
+        _release_sandbox_names(sandbox.owned_names)
 
     def test_build_context_contains_runtime_but_no_fixture_data(self):
         with tempfile.TemporaryDirectory() as raw:

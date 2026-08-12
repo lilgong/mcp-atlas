@@ -15,6 +15,7 @@ from .agent_eval import handle_run_mcp_eval
 from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
+from .config import validate_isolated_control_plane
 from .runtime_log import write_runtime_event
 from .account_guard import FatalAccountError, describe_fatal_account_error
 from .task_sandbox import (
@@ -37,6 +38,7 @@ async def lifespan(_app: FastAPI):
     )
     sweeper: Optional[asyncio.Task] = None
     if isolation_enabled:
+        validate_isolated_control_plane(config.HOST, config.MCP_SERVER_URL)
         # Do not synchronously delete old Docker resources during startup. A
         # large backlog on a busy shared daemon can otherwise keep /health
         # unavailable for N serial teardown timeouts. The age-gated sweeper
@@ -84,6 +86,7 @@ async def lifespan(_app: FastAPI):
                 if (
                     cleanup["containers_remaining"]
                     or cleanup["volumes_remaining"]
+                    or cleanup["networks_remaining"]
                     or cleanup["listing_failures"]
                 ):
                     logger.warning(

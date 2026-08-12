@@ -87,6 +87,23 @@ def _container_network_mode(container_name: str) -> str:
     return result.stdout.strip()
 
 
+def _network_icc(network_name: str) -> str:
+    result = subprocess.run(
+        [
+            "docker",
+            "network",
+            "inspect",
+            network_name,
+            "--format",
+            '{{index .Options "com.docker.network.bridge.enable_icc"}}',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip().lower()
+
+
 async def _write_then_destroy(shared_url: str, marker: str) -> None:
     path = f"/data/{marker}.txt"
     tools = ["filesystem_write_file", "filesystem_read_text_file"]
@@ -109,8 +126,16 @@ async def _write_then_destroy(shared_url: str, marker: str) -> None:
             raise RuntimeError(
                 f"Task-local container received cloud credentials: {sorted(leaked)}"
             )
-        if _container_network_mode(local.name) != "none":
-            raise RuntimeError("Task-local arbitrary-code container has network access")
+        if (
+            not client._sandbox.task_network
+            or _container_network_mode(local.name)
+            != client._sandbox.task_network
+        ):
+            raise RuntimeError(
+                "Task-local container is not attached to its private task network"
+            )
+        if _network_icc(client._sandbox.task_network) != "false":
+            raise RuntimeError("Task network permits inter-container communication")
         write_result = await client.call_tool(
             "filesystem_write_file",
             {"path": path, "content": marker},

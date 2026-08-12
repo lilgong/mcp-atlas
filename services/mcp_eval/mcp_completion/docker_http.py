@@ -1,4 +1,4 @@
-"""HTTP-over-docker-exec transport for containers with ``network=none``."""
+"""HTTP-over-docker-exec transport for loopback-only task containers."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ async def docker_post_json(
     *,
     timeout: float,
 ) -> tuple[int, str]:
-    """POST to a loopback-only service inside a no-network container."""
+    """POST to a loopback-only service inside a task container."""
 
     process = await asyncio.create_subprocess_exec(
         "docker",
