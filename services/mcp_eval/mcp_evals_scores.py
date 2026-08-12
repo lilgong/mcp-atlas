@@ -30,12 +30,18 @@ from abc import ABC, abstractmethod
 
 # Third-party libraries
 import litellm
-from tenacity import retry, wait_random_exponential, stop_after_attempt
+from tenacity import (
+    retry,
+    retry_if_not_exception_type,
+    wait_random_exponential,
+    stop_after_attempt,
+)
 from tqdm.asyncio import tqdm as async_tqdm
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import nest_asyncio
 from dotenv import load_dotenv
+from mcp_completion.account_guard import FatalAccountError, is_fatal_account_error
 
 # Load environment variables from .env file
 load_dotenv()
@@ -380,6 +386,7 @@ class AsyncLiteLLMClient(AsyncLLMClient):
             litellm.api_base = api_base
 
     @retry(
+        retry=retry_if_not_exception_type(FatalAccountError),
         wait=wait_random_exponential(min=1, max=60),
         stop=stop_after_attempt(6),
         reraise=True,
@@ -485,6 +492,10 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 f"model={self.config.evaluator_model} "
                 f"error_type={type(e).__name__} error={e}"
             )
+            if is_fatal_account_error(e):
+                raise FatalAccountError(
+                    f"evaluator credential is invalid or out of funds: {e}"
+                ) from e
             raise
 
     def get_stats(self) -> Dict[str, int]:
@@ -590,6 +601,8 @@ ONLY output RAW JSON string directly. No any other text. No formatting. No code 
                 },
             )
             return result
+        except FatalAccountError:
+            raise
         except Exception as e:
             self.logger.warning(
                 f"Single claim evaluation failed: task_id={task_id} "
@@ -698,17 +711,28 @@ async def evaluate_dataframe_async(
             task_id = str(row.get("TASK", row_idx))
             result = await evaluator.evaluate(claims, response, task_id=task_id)
             return row_idx, result
+        except FatalAccountError:
+            raise
         except Exception as e:
             logger.error(f"Error processing row {row_idx}: {e}")
             return row_idx, {"coverage_score": None, "explanation": f"Failed: {e}"}
 
-    tasks = [safe_evaluate(idx, row) for idx, row in df.iterrows()]
-    results_list = [
-        await f
-        for f in tqdm(
-            asyncio.as_completed(tasks), total=len(tasks), desc="Scoring Rows"
-        )
+    tasks = [
+        asyncio.create_task(safe_evaluate(idx, row))
+        for idx, row in df.iterrows()
     ]
+    results_list = []
+    try:
+        for future in tqdm(
+            asyncio.as_completed(tasks), total=len(tasks), desc="Scoring Rows"
+        ):
+            results_list.append(await future)
+    except FatalAccountError:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     results_dict = {idx: res for idx, res in results_list}
 

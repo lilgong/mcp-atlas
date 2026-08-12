@@ -1,10 +1,7 @@
 import os
 import time
 import json
-import copy
-import uuid
 import asyncio
-import time
 
 from .runtime_log import write_runtime_event
 
@@ -41,49 +38,6 @@ def get_pangu_log_path() -> str:
         log_path = os.path.join(log_dir, f"pangu_response_{time.strftime('%Y%m%d')}.jsonl")
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     return log_path
-
-
-def generate_tool_call_id():
-    return f"chatcmpl-tool-{str(uuid.uuid4().hex)[:16]}"
-
-
-def pangu_response_refiner(response):
-    """针对盘古模型思考过程调工具导致对话终止的情况，做response的修正。"""
-    response_result = copy.deepcopy(response)
-    message = response["choices"][0]["message"]
-    reasoning_content = message.get("reasoning") or message.get("reasoning_content")
-    if not reasoning_content:
-        return response_result
-    # 如果content和tool_calls均为空，则做response的修改，否则直接返回response
-    if not message.get("content") and not message.get("tool_calls"):
-        if "<|tool_call_start|>" in reasoning_content and reasoning_content.count("<|tool_call_start|>") == 1 and \
-                "<|tool_call_end|>" in reasoning_content and reasoning_content.count("<|tool_call_end|>") == 1:
-            # 思考过程调用工具的场景
-            content = reasoning_content.split("<|tool_call_start|>")[0] + reasoning_content.split("<|tool_call_end|>")[
-                -1]
-            tool_call = reasoning_content.split("<|tool_call_start|>")[-1].split("<|tool_call_end|>")[0]
-            tool_call = json.loads(tool_call)
-            tool_call_result = []
-            for tc in tool_call:
-                tool_call_result.append({
-                    "id": generate_tool_call_id(),
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": tc["arguments"] if isinstance(tc["arguments"], str) else json.dumps(
-                            tc["arguments"]),
-                    }
-                })
-            response_result["choices"][0]["message"]["content"] = content
-            response_result["choices"][0]["message"]["tool_calls"] = tool_call_result
-            response_result["choices"][0]["message"]["reasoning"] = ""
-            response_result["choices"][0]["message"]["reasoning_content"] = ""
-        else:
-            # 思考过程没调用工具，但是content为空的场景
-            response_result["choices"][0]["message"]["content"] = reasoning_content
-            response_result["choices"][0]["message"]["reasoning"] = ""
-            response_result["choices"][0]["message"]["reasoning_content"] = ""
-    return response_result
 
 
 def generate_pangu(
@@ -132,11 +86,6 @@ def generate_pangu(
             response = requests.post(api_url, headers=headers, json=payload, timeout=PANGU_TIMEOUT)
             if response.status_code == 200:
                 result = response.json()
-                # refiner 已禁用：与 hzp 版本对齐，不回收"思考过程里的工具调用"，保留原始响应
-                # try:
-                #     result = pangu_response_refiner(result)
-                # except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                #     pass
                 with open(get_pangu_log_path(), 'a+', encoding='utf-8') as out_file:
                     out_file.write(json.dumps({"messages": messages, "response": result}, ensure_ascii=False) + '\n')
                 write_runtime_event(

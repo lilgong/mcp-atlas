@@ -17,6 +17,7 @@ from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .pangu_completion import generate_pangu_async
 from .runtime_log import jsonable, write_runtime_event
+from .account_guard import FatalAccountError, is_fatal_account_error
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +62,6 @@ def _thinking_is_disabled(extra_body: Dict[str, Any]) -> bool:
     )
 
 
-def _strip_empty_think_blocks(content: Any) -> str:
-    text = "" if content is None else str(content)
-    return _THINK_BLOCK_RE.sub(
-        lambda match: "" if not match.group(1).strip() else match.group(0),
-        text,
-    )
-
-
 def _contains_nonempty_think_block(content: Any) -> bool:
     text = "" if content is None else str(content)
     return any(match.group(1).strip() for match in _THINK_BLOCK_RE.finditer(text))
@@ -89,14 +82,9 @@ def _message_value(message: Any, field: str) -> Any:
 def _reasoning_and_content(response: Any) -> Tuple[Any, str]:
     message = _response_message(response)
     reasoning = _message_value(message, "reasoning_content")
-    content = _strip_empty_think_blocks(_message_value(message, "content"))
+    raw_content = _message_value(message, "content")
+    content = "" if raw_content is None else str(raw_content)
     return reasoning, content
-
-
-def _format_assistant_content(reasoning: Any, content: str) -> str:
-    if isinstance(reasoning, str) and reasoning.strip():
-        return f"<think>{reasoning}</think>{content}"
-    return content
 
 
 def _write_token_usage(
@@ -343,6 +331,10 @@ async def create_completion(
                 error_type=type(error).__name__,
                 error=str(error),
             )
+            if is_fatal_account_error(error):
+                raise FatalAccountError(
+                    f"model credential is invalid or out of funds: {error}"
+                ) from error
             raise
 
         usage = None
@@ -363,8 +355,7 @@ async def create_completion(
             response=jsonable(response),
         )
 
-        reasoning_content, raw_content = _reasoning_and_content(response)
-        content = _format_assistant_content(reasoning_content, raw_content)
+        reasoning_content, content = _reasoning_and_content(response)
         _write_token_usage(
             response,
             task_id=task_id,
@@ -378,7 +369,7 @@ async def create_completion(
             isinstance(reasoning_content, str)
             and bool(reasoning_content.strip())
         )
-        leaked_think_block = _contains_nonempty_think_block(raw_content)
+        leaked_think_block = _contains_nonempty_think_block(content)
         if not (thinking_disabled and (leaked_reasoning or leaked_think_block)):
             break
 

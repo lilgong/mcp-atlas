@@ -8,6 +8,7 @@ from typing import AsyncGenerator, Dict, List, Union, Any, Optional, Tuple
 
 from .mcp_client import IsolatedMCPClient, MCPClient
 from .llm import create_completion, _transform_tool_calls
+from .account_guard import FatalAccountError
 from .schema import (
     RunAgentAPIRequestBody,
     Message,
@@ -148,6 +149,8 @@ async def run_mcp_eval(
             assistant_message = result.message
             original_content = result.original_content
 
+        except FatalAccountError:
+            raise
         except Exception as error:
             logger.error(f"Model create completion or parsing failed: {error}")
             # Re-raise as server error instead of graceful handling
@@ -206,6 +209,8 @@ async def run_mcp_eval(
                     all_messages.append(tool_call_message)
                     yield AgentOutput("message", tool_call_message.model_dump())
 
+                except FatalAccountError:
+                    raise
                 except Exception as error:
                     logger.error(
                         f"Tool call failed: {error}, tool: {tool_call.function['name']}"

@@ -13,6 +13,7 @@ from typing import Any, List, Optional
 from .base_client import MCPClient
 from .sandbox_client import SandboxMCPClient
 from ..runtime_log import jsonable, write_runtime_event
+from ..account_guard import FatalAccountError, is_fatal_tool_result
 from ..schema import CallToolResponse, ToolDefinition
 from ..task_sandbox import TaskSandbox
 from ..tool_policy import (
@@ -315,6 +316,20 @@ class IsolatedMCPClient(MCPClient):
                 raise
 
         serialized = jsonable(response)
+        if is_fatal_tool_result(response):
+            write_runtime_event(
+                "tools",
+                "tool_account_failure",
+                task_id=self.task_id,
+                call_id=call_id,
+                tool_name=tool_name,
+                route=route.value,
+                duration_seconds=round(time.monotonic() - started, 3),
+            )
+            raise FatalAccountError(
+                f"MCP credential for {server_for_tool(tool_name) or tool_name} "
+                "is invalid or out of funds"
+            )
         write_runtime_event(
             "tools",
             "tool_call_completed",

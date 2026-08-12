@@ -106,12 +106,12 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message.content, "ok")
         self.assertEqual(completion.await_count, 1)
 
-    async def test_provider_empty_think_tag_is_removed(self):
+    async def test_provider_content_is_preserved_verbatim(self):
         result, _, _, _ = await self._call([
             self._response(content="<think> \n</think>ok"),
         ])
 
-        self.assertEqual(result.message.content, "ok")
+        self.assertEqual(result.message.content, "<think> \n</think>ok")
 
     async def test_litellm_response_with_empty_reasoning_has_no_think_tag(self):
         response = ModelResponse(
@@ -183,15 +183,16 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completion.await_count, 3)
         self.assertEqual(token_usage.call_count, 3)
 
-    async def test_enabled_reasoning_is_preserved_without_retry(self):
+    async def test_enabled_reasoning_is_not_copied_into_content(self):
         result, completion, _, _ = await self._call(
             [self._response(reasoning_content="visible reasoning")],
             extra_body={"thinking": {"type": "enabled"}},
         )
 
+        self.assertEqual(result.message.content, "ok")
         self.assertEqual(
-            result.message.content,
-            "<think>visible reasoning</think>ok",
+            result.message.original_message.reasoning_content,
+            "visible reasoning",
         )
         self.assertEqual(completion.await_count, 1)
 
@@ -200,9 +201,10 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
             self._response(reasoning_content="provider reasoning"),
         ])
 
+        self.assertEqual(result.message.content, "ok")
         self.assertEqual(
-            result.message.content,
-            "<think>provider reasoning</think>ok",
+            result.message.original_message.reasoning_content,
+            "provider reasoning",
         )
         self.assertEqual(completion.await_count, 1)
         self.assertEqual(token_usage.call_count, 1)

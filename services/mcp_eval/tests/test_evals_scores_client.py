@@ -12,6 +12,7 @@ from mcp_evals_scores import (
     EvaluatorConfig,
     get_single_claim_evaluation_schema,
 )
+from mcp_completion.account_guard import FatalAccountError
 
 
 def _fake_response(content='{"coverage": "fulfilled"}'):
@@ -60,6 +61,25 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         import tempfile, os
 
         return os.path.join(tempfile.mkdtemp(), "token_log.jsonl")
+
+    async def test_account_failure_is_not_retried(self):
+        calls = 0
+
+        async def fake_acompletion(**kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("Invalid API key")
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(evaluator_model="openai/gpt-5.4", semaphore_limit=2)
+        )
+        with patch.object(
+            mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ):
+            with self.assertRaises(FatalAccountError):
+                await client.generate_structured_content("prompt", {})
+
+        self.assertEqual(calls, 1)
 
 
 class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):

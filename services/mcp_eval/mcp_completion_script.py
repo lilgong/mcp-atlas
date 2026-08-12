@@ -46,6 +46,7 @@ from mcp_completion.tool_policy import (
     shared_routable_servers,
 )
 from mcp_completion.response_validation import is_completely_empty_agent_response
+from mcp_completion.account_guard import FatalAccountError, is_fatal_account_error
 
 warnings.filterwarnings("ignore")
 
@@ -312,10 +313,17 @@ class AsyncMCPTrajectoryGenerator:
                             return response, attempt + 1
                     else:
                         error_text = await resp.text()
+                        if is_fatal_account_error(error_text):
+                            raise FatalAccountError(
+                                "a model or MCP credential is invalid or out of "
+                                "funds; stopping before more invalid results are written"
+                            )
                         logging.error(
                             f"HTTP {resp.status} error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for task {taskId}: {error_text}"
                         )
 
+            except FatalAccountError:
+                raise
             except Exception as e:
                 # asyncio.TimeoutError stringifies to "", so name the type too.
                 logging.error(
@@ -487,6 +495,10 @@ class AsyncMCPTrajectoryGenerator:
             )
             return result_dict
 
+        except FatalAccountError:
+            # A run-wide account failure is not a task result. Let the dataset
+            # scheduler cancel its siblings and leave this task resumable.
+            raise
         except Exception as e:
             # End timing for error case
             end_time = time.time()
@@ -550,15 +562,47 @@ class AsyncMCPTrajectoryGenerator:
             f"Processing {len(tasks_to_process)} tasks with max {max_concurrent_requests} concurrent requests..."
         )
 
-        # Create async tasks
+        # Create tasks explicitly so a permanent provider-account failure can
+        # cancel queued and in-flight siblings immediately.
         async_tasks = []
         for i, (original_idx, row_data) in enumerate(tasks_to_process):
-            task = controlled_task(row_data, i)
+            task = asyncio.create_task(controlled_task(row_data, i))
             async_tasks.append(task)
 
-        # Execute all tasks concurrently
+        # Execute all tasks concurrently. Ordinary per-task errors are converted
+        # to result rows by process_single_task; only run-wide fatal failures
+        # escape and take this early-stop path.
         start_time = time.time()
-        results = await asyncio.gather(*async_tasks, return_exceptions=True)
+        done, pending = await asyncio.wait(
+            async_tasks,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        escaped_errors = []
+        for task in done:
+            if task.cancelled():
+                continue
+            error = task.exception()
+            if error is not None:
+                escaped_errors.append(error)
+        if escaped_errors:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            fatal_error = next(
+                (
+                    error
+                    for error in escaped_errors
+                    if isinstance(error, FatalAccountError)
+                ),
+                None,
+            )
+            if fatal_error is not None:
+                logging.critical("Stopping evaluation: %s", fatal_error)
+                raise fatal_error
+            raise escaped_errors[0]
+
+        # FIRST_EXCEPTION behaves like ALL_COMPLETED when no task raises.
+        results = [task.result() for task in async_tasks]
         end_time = time.time()
 
         # Filter out exceptions and create DataFrame
