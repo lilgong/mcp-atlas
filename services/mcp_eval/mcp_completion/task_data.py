@@ -340,7 +340,7 @@ def prepare_task_workspace(
 ) -> tuple[Path, TaskDataFixture, list[str]]:
     fixture = load_fixture_cached(os.fspath(Path(source_dir).resolve()))
     workspace_root = Path(
-        os.getenv("MCP_TASK_WORKSPACE_ROOT", tempfile.gettempdir())
+        os.getenv("MCP_TASK_WORKSPACE_ROOT") or tempfile.gettempdir()
     ).resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(
@@ -365,10 +365,10 @@ def prepare_task_workspace(
         if include_git:
             repos = materialize_git_repositories(
                 data_dir,
-                Path(os.getenv(
-                    "MCP_GIT_CACHE_DIR",
-                    workspace_root / "mcp-atlas-git-cache",
-                )).resolve(),
+                Path(
+                    os.getenv("MCP_GIT_CACHE_DIR")
+                    or workspace_root / "mcp-atlas-git-cache"
+                ).resolve(),
             )
             write_git_safe_directory_config(data_dir, repos)
             make_task_copy_writable(data_dir)

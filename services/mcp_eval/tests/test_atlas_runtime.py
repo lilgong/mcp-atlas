@@ -219,6 +219,48 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(data_dir.stat().st_mode & 0o002)
             self.assertTrue((data_dir / "sample.txt").stat().st_mode & 0o002)
 
+    def test_empty_workspace_and_git_cache_paths_use_temp_defaults(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            fixture_path = root / "fixture"
+            temp_root = root / "system-temp"
+            source.mkdir()
+            (source / "sample.txt").write_text(
+                "original\n", encoding="utf-8",
+            )
+            prepare_fixture(source, fixture_path, "unit-fixture-empty-paths")
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "MCP_TASK_WORKSPACE_ROOT": "",
+                        "MCP_GIT_CACHE_DIR": "",
+                    },
+                    clear=False,
+                ),
+                patch(
+                    "mcp_completion.task_data.tempfile.gettempdir",
+                    return_value=str(temp_root),
+                ),
+                patch(
+                    "mcp_completion.task_data.materialize_git_repositories",
+                    return_value=[],
+                ) as materialize,
+            ):
+                data_dir, _, _ = prepare_task_workspace(
+                    source_dir=fixture_path,
+                    task_id="task-empty-paths",
+                    include_git=True,
+                )
+
+            self.assertEqual(temp_root.resolve(), data_dir.parent.parent)
+            self.assertEqual(
+                (temp_root / "mcp-atlas-git-cache").resolve(),
+                materialize.call_args.args[1],
+            )
+
     def test_fixture_digest_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
