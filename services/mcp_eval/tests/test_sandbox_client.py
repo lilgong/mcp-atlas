@@ -18,9 +18,68 @@ from mcp_completion.tool_policy import ToolRoute
 class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
     def test_public_server_policies_match_upstream_limits(self):
         self.assertEqual(
-            (1, 1.0),
+            (1, 1.2, 2.0, 10.0),
             isolated_client.SERVER_CALL_POLICIES["brave-search"],
         )
+        self.assertEqual(
+            (1, 3.0, 15.0, 60.0),
+            isolated_client.SERVER_CALL_POLICIES["arxiv"],
+        )
+        self.assertEqual(
+            (1, 1.0, 15.0, 60.0),
+            isolated_client.SERVER_CALL_POLICIES["twelvedata"],
+        )
+
+    def test_rate_limit_detection_requires_error_shaped_result(self):
+        rate_limited = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Error: Page request resulted in HTTP 429",
+                }
+            ],
+            "isError": False,
+        }
+        nested_error = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"detail":"execution failed: 429 Too Many Requests"}',
+                }
+            ],
+            "isError": False,
+        }
+        normal_data = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"close":429,"status":"ok"}',
+                }
+            ],
+            "isError": False,
+        }
+        self.assertTrue(
+            isolated_client._is_rate_limited_tool_result(rate_limited)
+        )
+        self.assertTrue(
+            isolated_client._is_rate_limited_tool_result(nested_error)
+        )
+        self.assertFalse(
+            isolated_client._is_rate_limited_tool_result(normal_data)
+        )
+
+    def test_rate_limit_backoff_grows_and_success_recovers_gradually(self):
+        gate = isolated_client.ServerCallGate(1, 3.0, 15.0, 60.0)
+        with patch(
+            "mcp_completion.mcp_client.isolated_client.time.monotonic",
+            return_value=100.0,
+        ):
+            self.assertEqual(15.0, gate.observe_rate_limit(True))
+            self.assertEqual(30.0, gate.observe_rate_limit(True))
+            self.assertEqual(60.0, gate.observe_rate_limit(True))
+            self.assertEqual(0.0, gate.observe_rate_limit(False))
+        self.assertEqual(2, gate.consecutive_rate_limits)
+        self.assertEqual(160.0, gate.cooldown_until)
 
     async def test_call_time_allowlist_blocks_before_http(self):
         client = SandboxMCPClient(

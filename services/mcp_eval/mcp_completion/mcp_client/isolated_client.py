@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 import uuid
@@ -41,10 +42,16 @@ _SANDBOX_SEMAPHORE = asyncio.Semaphore(
 # Public services publish aggregate client limits.  All concurrent evaluations
 # in this process pass through this client, so pace them here without changing
 # MCP schemas or wrapping the server implementation.
-SERVER_CALL_POLICIES: dict[str, tuple[int, float]] = {
-    "arxiv": (1, 3.0),
-    "brave-search": (1, 1.0),
-    "osm-mcp-server": (1, 1.0),
+SERVER_CALL_POLICIES: dict[str, tuple[int, float, float, float]] = {
+    # The arxiv client retries one failed tool call several times internally.
+    # Back off after the final 429 so those hidden retries cannot sustain an
+    # overload loop.  Brave's local limiter is one request per second, hence
+    # the small scheduling margin.  TwelveData limits vary by API plan, so use
+    # light steady pacing and let observed 429s drive the longer delay.
+    "arxiv": (1, 3.0, 15.0, 60.0),
+    "brave-search": (1, 1.2, 2.0, 10.0),
+    "osm-mcp-server": (1, 1.0, 0.0, 0.0),
+    "twelvedata": (1, 1.0, 15.0, 60.0),
 }
 
 
@@ -52,9 +59,13 @@ SERVER_CALL_POLICIES: dict[str, tuple[int, float]] = {
 class ServerCallGate:
     concurrency: int
     min_interval: float
+    rate_limit_backoff: float = 0.0
+    max_rate_limit_backoff: float = 0.0
     semaphore: asyncio.Semaphore = field(init=False)
     schedule_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_started: float = 0.0
+    cooldown_until: float = 0.0
+    consecutive_rate_limits: int = 0
 
     def __post_init__(self) -> None:
         self.semaphore = asyncio.Semaphore(self.concurrency)
@@ -64,27 +75,107 @@ class ServerCallGate:
         queued_at = time.monotonic()
         async with self.semaphore:
             async with self.schedule_lock:
-                delay = self.min_interval - (time.monotonic() - self.last_started)
+                now = time.monotonic()
+                ready_at = max(
+                    self.last_started + self.min_interval,
+                    self.cooldown_until,
+                )
+                delay = ready_at - now
                 if delay > 0:
                     await asyncio.sleep(delay)
                 self.last_started = time.monotonic()
             yield int((time.monotonic() - queued_at) * 1000)
 
+    def observe_rate_limit(self, rate_limited: bool) -> float:
+        """Update adaptive cooldown and return the newly scheduled delay."""
+        if not rate_limited:
+            self.consecutive_rate_limits = max(
+                0, self.consecutive_rate_limits - 1
+            )
+            return 0.0
+        if self.rate_limit_backoff <= 0:
+            return 0.0
+        self.consecutive_rate_limits += 1
+        delay = min(
+            self.rate_limit_backoff
+            * (2 ** (self.consecutive_rate_limits - 1)),
+            self.max_rate_limit_backoff or self.rate_limit_backoff,
+        )
+        self.cooldown_until = max(
+            self.cooldown_until, time.monotonic() + delay
+        )
+        return delay
+
 
 _SERVER_CALL_GATES = {
-    server: ServerCallGate(concurrency, min_interval)
-    for server, (concurrency, min_interval) in SERVER_CALL_POLICIES.items()
+    server: ServerCallGate(*policy)
+    for server, policy in SERVER_CALL_POLICIES.items()
 }
+
+
+_RATE_LIMIT_MARKERS = (
+    "http 429",
+    "429 too many requests",
+    "status code: 429",
+    "status_code=429",
+    "rate limit exceeded",
+    "too many requests",
+)
+
+
+def _contains_rate_limit_marker(value: Any) -> bool:
+    text = str(value or "").casefold()
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
+
+def _is_rate_limited_tool_result(result: Any) -> bool:
+    """Recognize 429s only in error-shaped MCP results.
+
+    Successful market/search data can legitimately contain the number 429, so
+    a substring match across the whole payload would create false cooldowns.
+    """
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    elif isinstance(result, dict):
+        payload = result
+    else:
+        return False
+
+    if bool(payload.get("isError") or payload.get("is_error")):
+        return _contains_rate_limit_marker(
+            json.dumps(payload, ensure_ascii=False)
+        )
+
+    for item in payload.get("content", []):
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        text = item["text"].lstrip()
+        error_shaped = text.casefold().startswith(("error:", "http error"))
+        if not error_shaped and text.startswith("{"):
+            try:
+                nested = json.loads(text)
+            except (TypeError, ValueError):
+                nested = None
+            error_shaped = isinstance(nested, dict) and any(
+                key in nested for key in ("detail", "error", "errors")
+            )
+        if error_shaped and _contains_rate_limit_marker(text):
+            return True
+    return False
 
 
 @contextlib.asynccontextmanager
 async def _server_call_slot(tool_name: str):
-    gate = _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
+    gate = _server_call_gate(tool_name)
     if gate is None:
         yield 0
         return
     async with gate.slot() as queued_ms:
         yield queued_ms
+
+
+def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
+    return _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
 
 
 class IsolatedMCPClient(MCPClient):
@@ -292,6 +383,8 @@ class IsolatedMCPClient(MCPClient):
             args = {**args, "database": TASK_MONGODB_DATABASE}
 
         call_id = uuid.uuid4().hex
+        call_gate = _server_call_gate(tool_name)
+        rate_limit_cooldown_seconds = 0.0
         async with _server_call_slot(tool_name) as rate_limit_queued_ms:
             started = time.monotonic()
             write_runtime_event(
@@ -307,6 +400,10 @@ class IsolatedMCPClient(MCPClient):
             try:
                 response = await client.call_tool(tool_name, args)
             except Exception as exc:
+                if call_gate is not None:
+                    rate_limit_cooldown_seconds = call_gate.observe_rate_limit(
+                        _contains_rate_limit_marker(exc)
+                    )
                 write_runtime_event(
                     "tools",
                     "tool_call_failed",
@@ -316,8 +413,14 @@ class IsolatedMCPClient(MCPClient):
                     route=route.value,
                     duration_seconds=round(time.monotonic() - started, 3),
                     error=str(exc),
+                    rate_limit_cooldown_seconds=rate_limit_cooldown_seconds,
                 )
                 raise
+            rate_limited = _is_rate_limited_tool_result(response)
+            if call_gate is not None:
+                rate_limit_cooldown_seconds = call_gate.observe_rate_limit(
+                    rate_limited
+                )
 
         serialized = jsonable(response)
         server = server_for_tool(tool_name) or tool_name
@@ -349,6 +452,8 @@ class IsolatedMCPClient(MCPClient):
             route=route.value,
             duration_seconds=round(time.monotonic() - started, 3),
             is_error=response.is_error,
+            rate_limited=rate_limited,
+            rate_limit_cooldown_seconds=rate_limit_cooldown_seconds,
             result_chars=len(str(serialized)),
         )
         return response
