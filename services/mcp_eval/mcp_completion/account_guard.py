@@ -51,6 +51,19 @@ def credential_envs_for_mcp_server(server: str) -> tuple[str, ...]:
     return _MCP_CREDENTIAL_ENVS.get(server, ())
 
 
+def is_fatal_mcp_account_error(server: str, result: Any) -> bool:
+    """Recognize account failures only for MCPs that actually use credentials.
+
+    Local and public MCPs use words such as ``token``, ``authorization``, and
+    ``quota`` in parsers, source code, and ordinary domain responses. They have
+    no account that this runner could repair, so those strings must never stop
+    a batch as an account failure.
+    """
+    return bool(credential_envs_for_mcp_server(server)) and is_fatal_tool_result(
+        result
+    )
+
+
 def describe_fatal_account_error(error: FatalAccountError) -> str:
     """Build a safe, actionable log line without exposing credential values."""
     parts = []
@@ -82,6 +95,8 @@ _FATAL_ACCOUNT_MARKERS = (
     "api key expired",
     "invalid_auth",
     "authentication failed",
+    "bad credentials",
+    "this token has no access to model",
     "unauthorized",
     "401 unauthorized",
     # Explicit balance, credit, billing, or quota exhaustion. Generic 429 and

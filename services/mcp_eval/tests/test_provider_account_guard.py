@@ -5,6 +5,7 @@ from mcp_completion.account_guard import (
     credential_envs_for_mcp_server,
     describe_fatal_account_error,
     is_fatal_account_error,
+    is_fatal_mcp_account_error,
     is_fatal_tool_result,
 )
 from mcp_completion import pangu_completion
@@ -54,6 +55,88 @@ def test_mcp_plain_invalid_key_result_is_fatal():
     assert is_fatal_tool_result(result)
 
 
+def test_git_parser_token_error_cannot_stop_the_run():
+    result = {
+        "content": [{
+            "type": "text",
+            "text": '{"detail":"Tool git_git_diff execution failed: '
+            'Invalid token: \'.\'"}',
+        }],
+        "is_error": True,
+    }
+
+    assert is_fatal_tool_result(result)
+    assert not is_fatal_mcp_account_error("git", result)
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        "arxiv",
+        "calculator",
+        "cli-mcp-server",
+        "clinicaltrialsgov-mcp-server",
+        "ddg-search",
+        "desktop-commander",
+        "fetch",
+        "filesystem",
+        "git",
+        "mcp-code-executor",
+        "mcp-server-code-runner",
+        "memory",
+        "met-museum",
+        "mongodb",
+        "open-library",
+        "osm-mcp-server",
+        "pubmed",
+        "weather",
+        "whois",
+        "wikipedia",
+    ],
+)
+def test_credential_free_servers_cannot_raise_account_failure(server):
+    result = {
+        "content": [{"type": "text", "text": "Error: invalid token"}],
+        "is_error": True,
+    }
+
+    assert credential_envs_for_mcp_server(server) == ()
+    assert not is_fatal_mcp_account_error(server, result)
+
+
+@pytest.mark.parametrize(
+    ("server", "message", "credential_env"),
+    [
+        (
+            "brave-search",
+            "This token has no access to model brave-web-search",
+            "BRAVE_API_KEY",
+        ),
+        (
+            "exa",
+            "This token has no access to model exa-search",
+            "EXA_API_KEY",
+        ),
+        (
+            "oxylabs",
+            "This token has no access to model oxylabs-scraper",
+            "OXYLABS_PASSWORD",
+        ),
+        ("github", "Bad credentials", "GITHUB_TOKEN"),
+    ],
+)
+def test_credentialed_mcp_account_failures_stop_the_run(
+    server, message, credential_env
+):
+    result = {
+        "content": [{"type": "text", "text": f"Error: {message}"}],
+        "is_error": True,
+    }
+
+    assert credential_env in credential_envs_for_mcp_server(server)
+    assert is_fatal_mcp_account_error(server, result)
+
+
 def test_normal_search_text_is_not_treated_as_account_failure():
     result = {
         "content": [{
@@ -85,6 +168,7 @@ def test_pangu_billing_response_identifies_the_active_key(monkeypatch):
         text = "insufficient balance"
 
     monkeypatch.setenv("PANGU_API_KEY", "secret-test-value")
+    monkeypatch.setenv("PANGU_API_URL", "https://example.invalid/v1")
     monkeypatch.setattr(pangu_completion.requests, "post", lambda *a, **k: Response())
 
     with pytest.raises(FatalAccountError) as raised:
