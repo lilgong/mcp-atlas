@@ -26,6 +26,7 @@ litellm.set_verbose = False
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 litellm.ssl_verify = False
 
+
 def month_log_root(base_root_path: str) -> str:
     leaf = os.path.basename(os.path.normpath(base_root_path))
     try:
@@ -39,7 +40,9 @@ def build_token_log_path(api_key: str, env_name: str = "TOKEN_LOG_DIR") -> str:
     base_root_path = os.getenv(env_name, "token_usage_log")
     root_path = month_log_root(base_root_path)
     key_suffix = api_key[-8:] if api_key else "no-key"
-    log_file_name = f"token_usage_{key_suffix}_{str(datetime.date.today()).replace('-', '')}.jsonl"
+    log_file_name = (
+        f"token_usage_{key_suffix}_{str(datetime.date.today()).replace('-', '')}.jsonl"
+    )
     os.makedirs(root_path, exist_ok=True)
     return os.path.join(root_path, log_file_name)
 
@@ -85,6 +88,23 @@ def _reasoning_and_content(response: Any) -> Tuple[Any, str]:
     raw_content = _message_value(message, "content")
     content = "" if raw_content is None else str(raw_content)
     return reasoning, content
+
+
+def _message_for_provider(message: Message) -> Dict[str, Any]:
+    """Serialize conversation history without framework-only fields.
+
+    ``original_message`` is retained for result fidelity, but it is not part of
+    the chat-completions protocol.  Reasoning-capable providers need the
+    previous assistant turn's ``reasoning_content`` alongside its tool calls in
+    order to continue an interleaved reasoning trajectory.
+    """
+
+    if isinstance(message, AssistantMessage):
+        return message.model_dump(
+            exclude={"original_message"},
+            exclude_none=True,
+        )
+    return message.model_dump(exclude_none=True)
 
 
 def _write_token_usage(
@@ -224,17 +244,20 @@ def strip_all_additional_properties(schema: any) -> any:
 
 
 async def create_completion(
-        model: str,
-        messages: List[Message],
-        tools: List[ToolCallSchema],
-        extra_body: Optional[Dict[str, Any]] = None,
-        retry_thinking_contract_violations: bool = False,
-        task_id: str = "unknown",
-        turn: int = 0,
+    model: str,
+    messages: List[Message],
+    tools: List[ToolCallSchema],
+    extra_body: Optional[Dict[str, Any]] = None,
+    retry_thinking_contract_violations: bool = False,
+    task_id: str = "unknown",
+    turn: int = 0,
 ) -> LLMResponse:
     """Create a completion using LiteLLM."""
 
-    # Convert our schema to LiteLLM form at
+    # Convert our schema to provider form.  Gemini retains its historical raw
+    # assistant-message path; other providers receive the normalized message,
+    # including reasoning_content when the provider returned it on a previous
+    # turn, but never the framework-only original_message wrapper.
     if "gemini" in model.lower():
         litellm_messages = [
             (
@@ -248,7 +271,7 @@ async def create_completion(
             strip_all_additional_properties(tool.model_dump()) for tool in tools
         ]
     else:
-        litellm_messages = [msg.model_dump() for msg in messages]
+        litellm_messages = [_message_for_provider(msg) for msg in messages]
         litellm_tools = [tool.model_dump() for tool in tools]
 
     # These specific models route through an internal proxy that expects the
@@ -268,9 +291,7 @@ async def create_completion(
     extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
     thinking_disabled = _thinking_is_disabled(extra_body)
     max_attempts = (
-        THINKING_CONTRACT_MAX_ATTEMPTS
-        if retry_thinking_contract_violations
-        else 1
+        THINKING_CONTRACT_MAX_ATTEMPTS if retry_thinking_contract_violations else 1
     )
     response = None
     reasoning_content = None
@@ -373,9 +394,8 @@ async def create_completion(
             messages=messages,
             answer=content,
         )
-        leaked_reasoning = (
-            isinstance(reasoning_content, str)
-            and bool(reasoning_content.strip())
+        leaked_reasoning = isinstance(reasoning_content, str) and bool(
+            reasoning_content.strip()
         )
         leaked_think_block = _contains_nonempty_think_block(content)
         if not (thinking_disabled and (leaked_reasoning or leaked_think_block)):
@@ -461,29 +481,20 @@ async def create_completion(
                     kept=len(tool_calls or []),
                 )
 
-        if isinstance(response, dict):  # 盘古接口返回的是dict格式
-            assistant_message = AssistantMessage(
-                role="assistant",
-                content=content,
-                tool_calls=tool_calls,
-                original_message=response["choices"][0]["message"],
-            )
-        else:  # 开源接口返回的是ModelResponse格式
-            if "deepseek" not in proxy_model:
-                assistant_message = AssistantMessage(
-                    role="assistant",
-                    content=content,
-                    tool_calls=tool_calls,
-                    original_message=response.choices[0].message,
-                )
-            else:
-                assistant_message = AssistantMessage(
-                    role="assistant",
-                    content=str(response.choices[0].message.content),
-                    reasoning_content=reasoning_content,
-                    tool_calls=tool_calls,
-                    original_message=response.choices[0].message,
-                )
+        original_message = (
+            response["choices"][0]["message"]
+            if isinstance(response, dict)
+            else response.choices[0].message
+        )
+        assistant_message = AssistantMessage(
+            role="assistant",
+            content=content,
+            reasoning_content=(
+                reasoning_content if isinstance(reasoning_content, str) else None
+            ),
+            tool_calls=tool_calls,
+            original_message=original_message,
+        )
 
         return LLMResponse(
             message=assistant_message,
