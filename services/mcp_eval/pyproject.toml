@@ -37,4 +37,5 @@ packages = ["mcp_completion"]
 [dependency-groups]
 dev = [
     "black>=24.8.0",
+    "pytest>=8.0.0",
 ]
