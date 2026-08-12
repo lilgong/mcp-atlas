@@ -107,6 +107,41 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sandbox.task_network.startswith("mcp-atlas-net-"))
         _release_sandbox_names(sandbox.owned_names)
 
+    async def test_local_agent_activates_runtime_venv_for_child_tools(self):
+        sandbox = TaskSandbox(
+            task_id="venv-path",
+            local_servers={"mcp-server-code-runner"},
+            network_servers=set(),
+            agent_image="image",
+            mongo_image="",
+            startup_timeout=1.0,
+            memory_limit="1g",
+            cpu_limit="1.0",
+            task_data_source="/tmp/data",
+        )
+        sandbox.task_data_dir = Path("/tmp/data")
+        with patch(
+            "mcp_completion.task_sandbox._run",
+            new=AsyncMock(return_value=("", "", 0)),
+        ) as run, patch.object(
+            sandbox,
+            "_wait_for_agent",
+            new=AsyncMock(),
+        ):
+            await sandbox._start_agent_container(
+                kind="local",
+                enabled_servers=sandbox.local_servers,
+                network="private-task-network",
+                extra_env={},
+            )
+        command = run.await_args.args
+        image_index = command.index("image")
+        self.assertEqual(
+            ("uv", "run", "--no-sync", "python", "-m", "uvicorn"),
+            command[image_index + 1:image_index + 7],
+        )
+        _release_sandbox_names(sandbox.owned_names)
+
     def test_build_context_contains_runtime_but_no_fixture_data(self):
         with tempfile.TemporaryDirectory() as raw:
             context = Path(raw)
@@ -140,6 +175,14 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 context
                 / "src/agent_environment/mcp_server_template.json"
             ).read_text(encoding="utf-8")
+            template_config = json.loads(template)
+            self.assertEqual(
+                {
+                    "command": "/usr/local/bin/arxiv-mcp-server",
+                    "args": [],
+                },
+                template_config["mcpServers"]["arxiv"],
+            )
             self.assertIn("/opt/mcp-code-venv", template)
             self.assertNotIn("filesystem_server_compat.mjs", template)
             self.assertIn("oxylabs_mcp_compat", template)

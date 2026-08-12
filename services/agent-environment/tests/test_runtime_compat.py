@@ -207,7 +207,6 @@ def test_python_mcp_servers_pin_their_sdk():
         ).read_text(encoding="utf-8")
     )["mcpServers"]
     expected = {
-        "arxiv": "mcp==1.28.1",
         "calculator": "mcp==1.28.1",
         "cli-mcp-server": "mcp==1.28.1",
         "ddg-search": "mcp==1.28.1",
@@ -223,6 +222,19 @@ def test_python_mcp_servers_pin_their_sdk():
         args = servers[server]["args"]
         index = args.index("--with")
         assert args[index + 1] == pin, server
+
+    arxiv = servers["arxiv"]
+    assert arxiv == {
+        "command": "/usr/local/bin/arxiv-mcp-server",
+        "args": [],
+    }
+    installer = (
+        AGENT_ROOT / "dev_scripts/install_mcp_packages.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        "uv tool install arxiv-mcp-server==0.2.11 --with mcp==1.28.1"
+        in installer
+    )
 
 
 def test_git_backed_python_servers_pin_commits():

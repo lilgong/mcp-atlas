@@ -20,12 +20,8 @@
       }
     },
     "arxiv": {
-      "command": "uvx",
-      "args": [
-        "--with",
-        "mcp==1.28.1",
-        "arxiv-mcp-server==0.2.11"
-      ]
+      "command": "/usr/local/bin/arxiv-mcp-server",
+      "args": []
     },
     "brave-search": {
       "command": "node",

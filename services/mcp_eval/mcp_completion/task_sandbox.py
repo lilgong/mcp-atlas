@@ -673,10 +673,15 @@ class TaskSandbox:
         for key, value in sorted(extra_env.items()):
             command.extend(["--env", f"{key}={value}"])
         command.append(self.agent_image)
+        # Match the official entrypoint: code-runner launches a bare `python`
+        # child and relies on uv to prepend the agent venv to PATH.
         if kind == "local":
             command.extend(
                 [
-                    "/agent-environment/.venv/bin/python",
+                    "uv",
+                    "run",
+                    "--no-sync",
+                    "python",
                     "-m",
                     "uvicorn",
                     "agent_environment.main:app",
@@ -689,7 +694,10 @@ class TaskSandbox:
         else:
             command.extend(
                 [
-                    "/agent-environment/.venv/bin/python",
+                    "uv",
+                    "run",
+                    "--no-sync",
+                    "python",
                     "-m",
                     "uvicorn",
                     "agent_environment.main:app",
