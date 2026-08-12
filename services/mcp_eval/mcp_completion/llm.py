@@ -332,8 +332,16 @@ async def create_completion(
                 error=str(error),
             )
             if is_fatal_account_error(error):
+                credential_env = (
+                    "PANGU_API_KEY"
+                    if "pangu" in proxy_model and os.getenv("PANGU_API_KEY")
+                    else "LLM_API_KEY"
+                )
                 raise FatalAccountError(
-                    f"model credential is invalid or out of funds: {error}"
+                    "model credential is invalid or out of funds",
+                    source_kind="model",
+                    source_name=proxy_model,
+                    credential_envs=(credential_env,),
                 ) from error
             raise
 

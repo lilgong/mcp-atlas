@@ -7,6 +7,8 @@ from .runtime_log import write_runtime_event
 
 import requests
 
+from .account_guard import FatalAccountError, is_fatal_account_error
+
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 os.environ["NO_PROXY"] = "*"
@@ -101,7 +103,20 @@ def generate_pangu(
                     status_code=200,
                 )
                 return result
-            last_exception = Exception(f"Pangu Response status code is not 200 (got {response.status_code})")
+            error_body = response.text.strip()[:500]
+            last_exception = Exception(
+                f"Pangu HTTP {response.status_code}: {error_body or '<empty body>'}"
+            )
+            if is_fatal_account_error(last_exception):
+                credential_env = (
+                    "PANGU_API_KEY" if os.getenv("PANGU_API_KEY") else "LLM_API_KEY"
+                )
+                raise FatalAccountError(
+                    "model credential is invalid or out of funds",
+                    source_kind="model",
+                    source_name=f"pangu/{model}",
+                    credential_envs=(credential_env,),
+                ) from last_exception
         except requests.exceptions.Timeout:
             last_exception = Exception(f"Pangu request timed out after {PANGU_TIMEOUT}s")
         except requests.exceptions.RequestException as e:

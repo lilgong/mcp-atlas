@@ -16,7 +16,7 @@ from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
 from .runtime_log import write_runtime_event
-from .account_guard import FatalAccountError
+from .account_guard import FatalAccountError, describe_fatal_account_error
 from .task_sandbox import (
     DEFAULT_RUNTIME_IMAGE,
     reap_owned_task_sandboxes,
@@ -172,10 +172,19 @@ async def run_agent(
         return results
 
     except FatalAccountError as error:
-        logger.critical("Stopping request for fatal account failure: %s", error)
+        logger.critical(
+            "Stopping request for fatal account failure: %s",
+            describe_fatal_account_error(error),
+        )
         raise HTTPException(
             status_code=402,
-            detail={"code": "fatal_account_error", "error": str(error)},
+            detail={
+                "code": "fatal_account_error",
+                "error": str(error),
+                "source_kind": error.source_kind,
+                "source_name": error.source_name,
+                "credential_envs": list(error.credential_envs),
+            },
         )
 
     except MCPClientToolExecutionError as error:

@@ -41,7 +41,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import nest_asyncio
 from dotenv import load_dotenv
-from mcp_completion.account_guard import FatalAccountError, is_fatal_account_error
+from mcp_completion.account_guard import (
+    FatalAccountError,
+    describe_fatal_account_error,
+    is_fatal_account_error,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -493,8 +497,16 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 f"error_type={type(e).__name__} error={e}"
             )
             if is_fatal_account_error(e):
+                credential_env = (
+                    "EVAL_LLM_API_KEY"
+                    if os.getenv("EVAL_LLM_API_KEY")
+                    else "LLM_API_KEY"
+                )
                 raise FatalAccountError(
-                    f"evaluator credential is invalid or out of funds: {e}"
+                    "evaluator credential is invalid or out of funds",
+                    source_kind="evaluator_model",
+                    source_name=self.config.evaluator_model,
+                    credential_envs=(credential_env,),
                 ) from e
             raise
 
@@ -962,6 +974,12 @@ async def main(args):
         if args.num_tasks:
             logger.info(f"📊 Note: Results are based on {args.num_tasks} tasks only")
 
+    except FatalAccountError as e:
+        logger.critical(
+            "Stopping scoring: %s",
+            describe_fatal_account_error(e),
+        )
+        raise
     except (FileNotFoundError, KeyError) as e:
         logger.error(f"Pipeline stopped due to an error: {e}")
         raise

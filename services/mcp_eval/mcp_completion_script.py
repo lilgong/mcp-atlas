@@ -46,7 +46,11 @@ from mcp_completion.tool_policy import (
     shared_routable_servers,
 )
 from mcp_completion.response_validation import is_completely_empty_agent_response
-from mcp_completion.account_guard import FatalAccountError, is_fatal_account_error
+from mcp_completion.account_guard import (
+    FatalAccountError,
+    describe_fatal_account_error,
+    is_fatal_account_error,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -84,6 +88,25 @@ def get_retry_delay(attempt: int) -> float:
     delay = 10 * attempt
     jitter = delay * random.uniform(0, 0.5)
     return delay + jitter
+
+
+def fatal_account_error_from_service(error_text: str) -> FatalAccountError:
+    """Recover safe source metadata from the completion service's 402 body."""
+    try:
+        payload = json.loads(error_text)
+        detail = payload.get("detail", {}) if isinstance(payload, dict) else {}
+        if not isinstance(detail, dict) or detail.get("code") != "fatal_account_error":
+            raise ValueError("not a structured fatal-account response")
+        return FatalAccountError(
+            str(detail.get("error") or "credential is invalid or out of funds"),
+            source_kind=detail.get("source_kind"),
+            source_name=detail.get("source_name"),
+            credential_envs=detail.get("credential_envs") or (),
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return FatalAccountError(
+            "model or MCP credential is invalid or out of funds"
+        )
 
 
 # System prompt for the model (only used if USE_SYSTEM_PROMPT_IN_COMPLETION=true)
@@ -314,10 +337,7 @@ class AsyncMCPTrajectoryGenerator:
                     else:
                         error_text = await resp.text()
                         if is_fatal_account_error(error_text):
-                            raise FatalAccountError(
-                                "a model or MCP credential is invalid or out of "
-                                "funds; stopping before more invalid results are written"
-                            )
+                            raise fatal_account_error_from_service(error_text)
                         logging.error(
                             f"HTTP {resp.status} error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for task {taskId}: {error_text}"
                         )
@@ -597,7 +617,10 @@ class AsyncMCPTrajectoryGenerator:
                 None,
             )
             if fatal_error is not None:
-                logging.critical("Stopping evaluation: %s", fatal_error)
+                logging.critical(
+                    "Stopping evaluation: %s",
+                    describe_fatal_account_error(fatal_error),
+                )
                 raise fatal_error
             raise escaped_errors[0]
 

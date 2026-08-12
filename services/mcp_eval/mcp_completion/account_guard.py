@@ -3,11 +3,65 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Iterable, Optional
 
 
 class FatalAccountError(RuntimeError):
     """A model or MCP credential cannot make further successful calls."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        source_kind: Optional[str] = None,
+        source_name: Optional[str] = None,
+        credential_envs: Iterable[str] = (),
+    ) -> None:
+        super().__init__(message)
+        self.source_kind = source_kind
+        self.source_name = source_name
+        self.credential_envs = tuple(credential_envs)
+
+
+_MCP_CREDENTIAL_ENVS = {
+    "airtable": ("AIRTABLE_API_KEY",),
+    "alchemy": ("ALCHEMY_API_KEY",),
+    "brave-search": ("BRAVE_API_KEY",),
+    "context7": ("CONTEXT7_API_KEY",),
+    "e2b-server": ("E2B_API_KEY",),
+    "exa": ("EXA_API_KEY",),
+    "github": ("GITHUB_TOKEN",),
+    "google-maps": ("GOOGLE_MAPS_API_KEY",),
+    "google-workspace": (
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_REFRESH_TOKEN",
+    ),
+    "lara-translate": ("LARA_ACCESS_KEY_ID", "LARA_ACCESS_KEY_SECRET"),
+    "national-parks": ("NPS_API_KEY",),
+    "notion": ("NOTION_TOKEN",),
+    "oxylabs": ("OXYLABS_USERNAME", "OXYLABS_PASSWORD"),
+    "slack": ("SLACK_MCP_XOXC_TOKEN", "SLACK_MCP_XOXD_TOKEN"),
+    "weather-data": ("WEATHER_API_KEY",),
+}
+
+
+def credential_envs_for_mcp_server(server: str) -> tuple[str, ...]:
+    """Return public env names only; credential values are never included."""
+    return _MCP_CREDENTIAL_ENVS.get(server, ())
+
+
+def describe_fatal_account_error(error: FatalAccountError) -> str:
+    """Build a safe, actionable log line without exposing credential values."""
+    parts = []
+    if error.source_kind:
+        parts.append(f"source={error.source_kind}")
+    if error.source_name:
+        parts.append(f"name={error.source_name}")
+    if error.credential_envs:
+        parts.append(f"credential_env={','.join(error.credential_envs)}")
+    metadata = " ".join(parts)
+    return f"{metadata}: {error}" if metadata else str(error)
 
 
 _FATAL_ACCOUNT_MARKERS = (

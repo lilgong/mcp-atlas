@@ -1,7 +1,13 @@
+import pytest
+
 from mcp_completion.account_guard import (
+    FatalAccountError,
+    credential_envs_for_mcp_server,
+    describe_fatal_account_error,
     is_fatal_account_error,
     is_fatal_tool_result,
 )
+from mcp_completion import pangu_completion
 
 
 def test_invalid_model_token_stops_the_run():
@@ -57,3 +63,33 @@ def test_normal_search_text_is_not_treated_as_account_failure():
         "is_error": False,
     }
     assert not is_fatal_tool_result(result)
+
+
+def test_fatal_account_description_names_source_and_env_without_key_value():
+    error = FatalAccountError(
+        "MCP credential is invalid or out of funds",
+        source_kind="mcp",
+        source_name="brave-search",
+        credential_envs=credential_envs_for_mcp_server("brave-search"),
+    )
+
+    description = describe_fatal_account_error(error)
+    assert "source=mcp" in description
+    assert "name=brave-search" in description
+    assert "credential_env=BRAVE_API_KEY" in description
+
+
+def test_pangu_billing_response_identifies_the_active_key(monkeypatch):
+    class Response:
+        status_code = 402
+        text = "insufficient balance"
+
+    monkeypatch.setenv("PANGU_API_KEY", "secret-test-value")
+    monkeypatch.setattr(pangu_completion.requests, "post", lambda *a, **k: Response())
+
+    with pytest.raises(FatalAccountError) as raised:
+        pangu_completion.generate_pangu("pangu/test-model", [], [])
+
+    assert raised.value.source_name == "pangu/test-model"
+    assert raised.value.credential_envs == ("PANGU_API_KEY",)
+    assert "secret-test-value" not in describe_fatal_account_error(raised.value)

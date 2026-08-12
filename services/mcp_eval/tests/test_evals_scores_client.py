@@ -75,11 +75,16 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(
             mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"EVAL_LLM_API_KEY": ""}
         ):
-            with self.assertRaises(FatalAccountError):
+            with self.assertRaises(FatalAccountError) as raised:
                 await client.generate_structured_content("prompt", {})
 
         self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.source_kind, "evaluator_model")
+        self.assertEqual(raised.exception.source_name, "openai/gpt-5.4")
+        self.assertEqual(raised.exception.credential_envs, ("LLM_API_KEY",))
 
 
 class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
