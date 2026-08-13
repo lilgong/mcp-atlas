@@ -16,12 +16,12 @@
 
 --fix-claims 就是补上官方漏掉的那一步：把绑定 slack 消息日期的 claim 一起平移。
 只改能对上导出消息的日期，git commit 日期、电影上映日期等一律不碰。
-官方 MCP-Atlas.csv 始终只读；派生结果写到 MCP-Atlas.slack-aligned.csv。
+官方 MCP-Atlas-origin.csv 始终只读；派生结果写到 Git 忽略的 MCP-Atlas.csv。
 
 两个输入都是官方原版、只读、永不修改，每次运行都从它们重新派生：
 
     data_exports/slack_mcp_eval_export.zip  →  ..._<MMDD>.zip  （平移时间戳）
-    services/mcp_eval/MCP-Atlas.csv  →  MCP-Atlas.slack-aligned.csv（平移 claim 日期）
+    services/mcp_eval/MCP-Atlas-origin.csv  →  MCP-Atlas.csv（平移 claim 日期）
 
 不在上一轮结果上叠加，所以重复运行幂等：跑几次 md5 都一样，不会二次平移。
 
@@ -30,7 +30,7 @@
 
 Usage:
     uv run prepare_slack_import.py                 # dry-run：产出 zip，只打印 claim 会怎么改
-    uv run prepare_slack_import.py --fix-claims    # 同时把 MCP-Atlas.csv 从原版派生出来
+    uv run prepare_slack_import.py --fix-claims    # 同时从官方原版派生 MCP-Atlas.csv
     uv run prepare_slack_import.py --days-ago 3    # 让最新消息落到 3 天前（默认 3）
 """
 
@@ -53,8 +53,8 @@ SRC_ZIP = REPO_ROOT / "data_exports/slack_mcp_eval_export.zip"
 OUT_ZIP = REPO_ROOT / f"data_exports/slack_mcp_eval_export_{dt.date.today():%m%d}.zip"
 # 和 zip 同样的路数：Git 中的官方原版只读，每次从它派生出目标文件，
 # 绝不在改过的结果上再叠加。这样重复运行是幂等的。
-ORIGIN_CSV = SCRIPT_DIR / "MCP-Atlas.csv"
-CSV_PATH = SCRIPT_DIR / "MCP-Atlas.slack-aligned.csv"
+ORIGIN_CSV = SCRIPT_DIR / "MCP-Atlas-origin.csv"
+CSV_PATH = SCRIPT_DIR / "MCP-Atlas.csv"
 
 DAY = 86400
 UTC = dt.timezone.utc

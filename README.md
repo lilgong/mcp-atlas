@@ -149,7 +149,7 @@ codex/task-isolation-runtime
 
 ## 4. 准备部署材料
 
-仓库已经包含官方的 `services/mcp_eval/MCP-Atlas.csv`。以下运行材料仍需单独准备：
+仓库已经包含官方的 `services/mcp_eval/MCP-Atlas-origin.csv`。以下运行材料仍需单独准备：
 
 | 材料 | 用途 |
 | --- | --- |
@@ -164,7 +164,7 @@ codex/task-isolation-runtime
 官方原版已经提交在：
 
 ```text
-services/mcp_eval/MCP-Atlas.csv
+services/mcp_eval/MCP-Atlas-origin.csv
 ```
 
 它有 500 条任务，五列为 `TASK`、`ENABLED_TOOLS`、`PROMPT`、
@@ -179,12 +179,12 @@ clone 后检查：
 ```bash
 cd services/mcp_eval
 
-test -f MCP-Atlas.csv
-sha256sum MCP-Atlas.csv
+test -f MCP-Atlas-origin.csv
+sha256sum MCP-Atlas-origin.csv
 
 uv run python -c '
 import pandas as pd
-p = "MCP-Atlas.csv"
+p = "MCP-Atlas-origin.csv"
 df = pd.read_csv(p, nrows=2)
 required = {"TASK", "PROMPT", "TRAJECTORY", "GTFA_CLAIMS", "ENABLED_TOOLS"}
 missing = required - set(df.columns)
@@ -196,7 +196,8 @@ cd ../..
 ```
 
 不要直接修改这个文件。比较不同机器上的结果时，应使用相同 CSV SHA256。
-免费 Slack 需要的日期对齐版由 §6.4 的脚本派生，写到另一个文件，不覆盖官方原版。
+免费 Slack 需要的日期对齐版由 §6.4 的脚本派生为 Git 忽略的 `MCP-Atlas.csv`，
+不会覆盖官方原版。
 
 ### 4.2 复制 `.env`
 
@@ -493,7 +494,7 @@ data_exports/slack_mcp_eval_export.zip
 ```
 
 官方消息日期为 2025-12-01 至 2025-12-10。付费 Slack 能保留这段历史时，
-可以直接导入官方 zip，并继续使用官方 `MCP-Atlas.csv`。
+可以直接导入官方 zip，并把输入显式指向官方 `MCP-Atlas-origin.csv`。
 
 免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息和两条绑定消息日期的
 claims。脚本始终读取官方文件并生成派生文件，不会修改 Git 中的官方 CSV：
@@ -508,7 +509,7 @@ uv run python prepare_slack_import.py --fix-claims
 
 ```text
 data_exports/slack_mcp_eval_export_<MMDD>.zip
-services/mcp_eval/MCP-Atlas.slack-aligned.csv
+services/mcp_eval/MCP-Atlas.csv
 ```
 
 `<MMDD>` 是运行日期；不要把尖括号原样写进命令。
@@ -531,13 +532,13 @@ https://<你的-workspace>.slack.com/services/import
 免费 Slack 的 `.env` 使用派生 CSV：
 
 ```dotenv
-MCP_COMPLETION_INPUT=MCP-Atlas.slack-aligned.csv
+MCP_COMPLETION_INPUT=MCP-Atlas.csv
 ```
 
 付费 Slack 或严格跑官方原版时保持：
 
 ```dotenv
-MCP_COMPLETION_INPUT=MCP-Atlas.csv
+MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv
 ```
 
 然后写入同一个 workspace 的浏览器会话 token：
@@ -564,7 +565,7 @@ uv run python test_server_v2.py \
 uv run python test_server_v2.py \
   --server slack \
   --base-url http://localhost:1984 \
-  --input /your_path/mcp-atlas/services/mcp_eval/MCP-Atlas.csv
+  --input /your_path/mcp-atlas/services/mcp_eval/MCP-Atlas-origin.csv
 ```
 
 相对输入路径按 `services/mcp_eval/` 解析；未配置 `MCP_COMPLETION_INPUT` 时回退到
@@ -1483,7 +1484,7 @@ docker run --rm hello-world
 ```text
 [ ] 安装并验证 Git、Docker、Make、Python、uv、curl、jq、unzip
 [ ] clone codex/task-isolation-runtime
-[ ] 验证仓库内 services/mcp_eval/MCP-Atlas.csv 的 SHA256
+[ ] 验证仓库内 services/mcp_eval/MCP-Atlas-origin.csv 的 SHA256
 [ ] 创建并填写 .env
 [ ] 导入 Airtable、Notion、Calendar、Slack 数据；免费 Slack 生成并选择对齐版 CSV
 [ ] docker load 或 make build-atlas-runtime

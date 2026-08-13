@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject commits that replace the official MCP-Atlas benchmark CSV."""
+"""Verify the tracked, immutable MCP-Atlas benchmark baseline."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BENCHMARK_PATH = "services/mcp_eval/MCP-Atlas.csv"
+BENCHMARK_PATH = "services/mcp_eval/MCP-Atlas-origin.csv"
 OFFICIAL_SHA256 = (
     "065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad"
 )
@@ -61,16 +61,16 @@ def main() -> int:
 
     if actual != OFFICIAL_SHA256:
         print(
-            "official MCP-Atlas.csv integrity check failed\n"
+            "official MCP-Atlas-origin.csv integrity check failed\n"
             f"source:   {source}\n"
             f"expected: {OFFICIAL_SHA256}\n"
             f"actual:   {actual}\n"
-            "Keep local Slack date shifts in MCP-Atlas.slack-aligned.csv; "
-            "never commit them over MCP-Atlas.csv.",
+            "Keep local Slack date shifts in the ignored MCP-Atlas.csv; "
+            "never modify MCP-Atlas-origin.csv.",
             file=sys.stderr,
         )
         return 1
-    print(f"official MCP-Atlas.csv verified: {actual}")
+    print(f"official MCP-Atlas-origin.csv verified: {actual}")
     return 0
 
 
