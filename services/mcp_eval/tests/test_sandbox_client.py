@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 from mcp_completion.errors import MCPClientToolExecutionError
 from mcp_completion.mcp_client import isolated_client
-from mcp_completion.mcp_client.isolated_client import IsolatedMCPClient
+from mcp_completion.mcp_client.isolated_client import (
+    IsolatedMCPClient,
+    ToolPolicyError,
+)
 from mcp_completion.mcp_client.sandbox_client import SandboxMCPClient
 from mcp_completion.task_sandbox import (
     TaskSandboxError,
@@ -91,6 +94,26 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
                 "filesystem_write_file",
                 {"path": "/data/x", "content": "x"},
             )
+
+    async def test_unknown_tool_uses_upstream_style_without_name_hint(self):
+        client = IsolatedMCPClient(
+            task_id="tool-name-test",
+            shared_url="http://127.0.0.1:1",
+            enabled_tools=["weather-data_weather_astronomy"],
+        )
+        client._entered = True
+        client.allowed_tools = {"weather-data_weather_astronomy"}
+
+        with self.assertRaisesRegex(
+            ToolPolicyError,
+            r"^Unknown tool: weather-data-weather_astronomy$",
+        ) as raised:
+            await client.call_tool("weather-data-weather_astronomy", {})
+
+        self.assertNotIn("did you mean", str(raised.exception).casefold())
+        self.assertNotIn(
+            "weather-data_weather_astronomy", str(raised.exception)
+        )
 
     async def test_mongodb_database_is_forced_to_store(self):
         client = IsolatedMCPClient(

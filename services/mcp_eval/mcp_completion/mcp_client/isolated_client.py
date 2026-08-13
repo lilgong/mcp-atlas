@@ -365,9 +365,11 @@ class IsolatedMCPClient(MCPClient):
                 f"{reason}: {tool_name}"
             )
         if tool_name not in self.allowed_tools:
-            raise ToolPolicyError(
-                f"Tool is not enabled for task {self.task_id}: {tool_name}"
-            )
+            # Match the upstream MCP/FastMCP failure semantics.  Do not suggest
+            # or normalize a nearby name: exact tool-name adherence is part of
+            # the evaluation, while calling this an allowlist failure wrongly
+            # implies that a correctly enabled tool is unavailable.
+            raise ToolPolicyError(f"Unknown tool: {tool_name}")
 
         route = route_for_tool(tool_name)
         client = self._clients.get(route)
