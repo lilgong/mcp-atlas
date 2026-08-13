@@ -2,6 +2,8 @@ import os
 import time
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from .runtime_log import write_runtime_event
 
@@ -16,6 +18,15 @@ os.environ["NO_PROXY"] = "*"
 PANGU_TIMEOUT = int(os.getenv("PANGU_TIMEOUT", "1800"))
 PANGU_MAX_RETRIES = int(os.getenv("PANGU_MAX_RETRIES", "5"))
 PANGU_RETRY_DELAY = int(os.getenv("PANGU_RETRY_DELAY", "3"))
+MCP_COMPLETION_CONCURRENCY = int(os.getenv("MCP_COMPLETION_CONCURRENCY", "30"))
+
+# Pangu uses a synchronous requests client, so give it a dedicated executor.
+# Matching the task concurrency avoids Python's smaller implicit thread-pool
+# limit and prevents long model requests from starving unrelated to_thread work.
+_PANGU_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MCP_COMPLETION_CONCURRENCY,
+    thread_name_prefix="pangu-request",
+)
 
 
 def require_env(name: str) -> str:
@@ -151,15 +162,20 @@ async def generate_pangu_async(
     call_id: str = "",
 ):
     # generate_pangu 内部用同步 requests + time.sleep + 文件写入，直接 await 会冻住
-    # uvicorn 的 asyncio 事件循环、卡掉整个 server。放到线程里跑才能让 32 路并发真正并行。
-    return await asyncio.to_thread(
-        generate_pangu,
-        model,
-        messages,
-        tools,
-        task_id=task_id,
-        turn=turn,
-        call_id=call_id,
+    # uvicorn 的 asyncio 事件循环、卡掉整个 server。使用专用线程池，线程数与
+    # MCP_COMPLETION_CONCURRENCY 一致，也不会占满 asyncio 的默认线程池。
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _PANGU_EXECUTOR,
+        partial(
+            generate_pangu,
+            model,
+            messages,
+            tools,
+            task_id=task_id,
+            turn=turn,
+            call_id=call_id,
+        ),
     )
 
 
