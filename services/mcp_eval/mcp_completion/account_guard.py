@@ -41,6 +41,7 @@ _MCP_CREDENTIAL_ENVS = {
     "national-parks": ("NPS_API_KEY",),
     "notion": ("NOTION_TOKEN",),
     "oxylabs": ("OXYLABS_USERNAME", "OXYLABS_PASSWORD"),
+    "pubmed": ("SCRAPERAPI",),
     "slack": ("SLACK_MCP_XOXC_TOKEN", "SLACK_MCP_XOXD_TOKEN"),
     "weather-data": ("WEATHER_API_KEY",),
 }
@@ -81,6 +82,9 @@ _FATAL_ACCOUNT_MARKERS = (
     # Stable marker emitted by this service when the underlying provider text
     # is not safe or useful to expose to the outer batch runner.
     "fatal_account_error",
+    "scraperapi_credits_exhausted",
+    "scraperapi_invalid_key",
+    "scraperapi_account_rejected",
     # Authentication / credential failures.
     "authenticationerror",
     "invalid token",

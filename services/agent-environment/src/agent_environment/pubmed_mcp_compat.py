@@ -77,6 +77,19 @@ def _request_via_relay(
             },
             timeout=RELAY_TIMEOUT_SECONDS,
         )
+        if relay_response.status_code == 402:
+            try:
+                error = str(relay_response.json().get("error") or "")
+            except (requests.JSONDecodeError, AttributeError, TypeError, ValueError):
+                error = ""
+            if error.startswith((
+                "SCRAPERAPI_CREDITS_EXHAUSTED:",
+                "SCRAPERAPI_INVALID_KEY:",
+            )):
+                raise PubMedUpstreamError(error)
+            raise PubMedUpstreamError(
+                "SCRAPERAPI_ACCOUNT_REJECTED: PubMed relay account is unavailable"
+            )
         relay_response.raise_for_status()
         payload = relay_response.json()
         content = base64.b64decode(payload["body_base64"], validate=True)

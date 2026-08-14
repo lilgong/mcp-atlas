@@ -33,6 +33,10 @@ MAX_RESPONSE_BYTES = int(os.getenv("PUBMED_RELAY_MAX_RESPONSE_BYTES") or str(64 
 LOG_PATH = Path(os.getenv("PUBMED_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
 
 
+class ScraperAPIAccountError(RuntimeError):
+    """The configured ScraperAPI account cannot serve further requests."""
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
         return None
@@ -44,6 +48,11 @@ class Controller:
         self.last_started = 0.0
         self.blocked_until = 0.0
         self.blocked_response: tuple[int, dict[str, str], bytes, str] | None = None
+        self.account_error: str | None = None
+
+    def current_account_error(self) -> str | None:
+        with self.lock:
+            return self.account_error
 
     def _wait(self) -> None:
         now = time.monotonic()
@@ -60,6 +69,8 @@ class Controller:
         started = time.monotonic()
         with self.lock:
             queued_ms = (time.monotonic() - started) * 1000
+            if self.account_error:
+                raise ScraperAPIAccountError(self.account_error)
             if time.monotonic() < self.blocked_until and self.blocked_response:
                 return (*self.blocked_response, 0, queued_ms)
             self.blocked_response = None
@@ -68,6 +79,19 @@ class Controller:
                 self._wait()
                 final = _fetch_once(url, allow_redirects)
                 status, headers, _, _ = final
+                if status in {401, 407}:
+                    self.account_error = (
+                        "SCRAPERAPI_INVALID_KEY: ScraperAPI rejected the relay credential"
+                    )
+                    raise ScraperAPIAccountError(self.account_error)
+                if status == 403:
+                    # ScraperAPI documents 403 as exhausted monthly API credits.
+                    # This relay never sets max_cost, the other documented source
+                    # of a ScraperAPI 403.
+                    self.account_error = (
+                        "SCRAPERAPI_CREDITS_EXHAUSTED: ScraperAPI monthly credits are exhausted"
+                    )
+                    raise ScraperAPIAccountError(self.account_error)
                 if _is_abuse_response(final):
                     self.blocked_until = time.monotonic() + 300.0
                     self.blocked_response = final
@@ -167,7 +191,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._json(200, {"status": "ok", "min_interval_seconds": MIN_INTERVAL})
+            account_error = CONTROLLER.current_account_error()
+            if account_error:
+                self._json(503, {"status": "blocked", "error": account_error})
+            else:
+                self._json(200, {"status": "ok", "min_interval_seconds": MIN_INTERVAL})
         else:
             self._json(404, {"error": "not found"})
 
@@ -214,6 +242,20 @@ class Handler(BaseHTTPRequestHandler):
                 "attempts": attempts,
                 "queued_ms": round(queued_ms, 1),
                 "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            })
+        except ScraperAPIAccountError as exc:
+            parsed = urllib.parse.urlsplit(url)
+            _append_log({
+                "client": self.client_address[0],
+                "host": parsed.hostname,
+                "path": parsed.path,
+                "status": 402,
+                "account_error_code": str(exc).split(":", 1)[0],
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            })
+            self._json(402, {
+                "code": "scraperapi_account_error",
+                "error": str(exc),
             })
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._json(400, {"error": str(exc)})

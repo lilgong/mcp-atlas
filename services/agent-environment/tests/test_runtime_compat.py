@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_environment.oxylabs_mcp_compat import normalize_scraper_payload
 from agent_environment import pubmed_mcp_compat as pubmed
 from agent_environment.mcp_router import DEFAULT_TOOL_CALL_TIMEOUT_SECONDS
@@ -143,6 +145,8 @@ def test_pubmed_detects_ncbi_abuse_redirect():
 
 def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
     class RelayResponse:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -172,6 +176,33 @@ def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
     assert response.content == b"<ok/>"
     assert calls[0][0].endswith("/v1/fetch")
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+
+
+def test_pubmed_relay_preserves_scraperapi_credit_exhaustion(monkeypatch):
+    class RelayResponse:
+        status_code = 402
+
+        def json(self):
+            return {
+                "code": "scraperapi_account_error",
+                "error": (
+                    "SCRAPERAPI_CREDITS_EXHAUSTED: "
+                    "ScraperAPI monthly credits are exhausted"
+                ),
+            }
+
+    monkeypatch.setattr(pubmed, "RELAY_TOKEN", "secret")
+    monkeypatch.setattr(pubmed._SESSION, "post", lambda *args, **kwargs: RelayResponse())
+
+    with pytest.raises(
+        pubmed.PubMedUpstreamError,
+        match="SCRAPERAPI_CREDITS_EXHAUSTED",
+    ):
+        pubmed._request_via_relay(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params={"db": "pubmed"},
+            allow_redirects=False,
+        )
 
 
 def test_cli_uses_read_only_flag_allowlist_and_git_matches_official_release():

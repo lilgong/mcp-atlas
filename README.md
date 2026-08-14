@@ -465,6 +465,11 @@ curl http://<relay内网IP>:3985/health
 写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
+ScraperAPI 返回 401（key 无效）或 403（官方定义为当月 credits 耗尽）后，relay 会
+锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed MCP：
+MCP-Atlas completion 停止整批评测，data-syn P2 取消其他并发任务并退出；已经成功的
+结果保持落盘，充值或换 key 并重启 relay 后可续跑。普通 429 仍按瞬时限流处理。
+
 ---
 
 ## 6. 准备云端账号数据
