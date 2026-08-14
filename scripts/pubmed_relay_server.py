@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, rate-limited HTTP egress relay for NCBI E-utilities/PMC."""
+"""Authenticated, rate-limited NCBI relay using ScraperAPI egress."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import base64
 import hmac
 import json
 import os
+import ssl
 import threading
 import time
 import urllib.error
@@ -23,6 +24,7 @@ ALLOWED_TARGETS = {
     "www.ncbi.nlm.nih.gov": "/pmc/articles/",
 }
 TOKEN = (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+SCRAPERAPI_KEY = (os.getenv("SCRAPERAPI") or "").strip()
 BIND = (os.getenv("PUBMED_RELAY_BIND") or "127.0.0.1").strip()
 PORT = int(os.getenv("PUBMED_RELAY_PORT") or "3985")
 MIN_INTERVAL = float(os.getenv("PUBMED_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
@@ -113,7 +115,22 @@ def _validate_url(url: str) -> None:
 
 
 def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str]:
-    opener = urllib.request.build_opener() if allow_redirects else urllib.request.build_opener(NoRedirect())
+    # ScraperAPI's proxy endpoint terminates TLS, so its documented proxy mode
+    # requires either trusting their CA or disabling certificate verification.
+    # The proxy credential is confined to this relay and is never passed into a
+    # task container.
+    proxy_url = (
+        "http://scraperapi:"
+        f"{urllib.parse.quote(SCRAPERAPI_KEY, safe='')}"
+        "@proxy-server.scraperapi.com:8001"
+    )
+    handlers: list[Any] = [
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}),
+        urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
+    ]
+    if not allow_redirects:
+        handlers.append(NoRedirect())
+    opener = urllib.request.build_opener(*handlers)
     request = urllib.request.Request(url, headers={"User-Agent": "mcp_atlas_pubmed_relay/1.0"})
     try:
         response = opener.open(request, timeout=UPSTREAM_TIMEOUT)
@@ -201,12 +218,17 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            self._json(502, {"error": f"upstream request failed: {exc}"})
+            # URL-opening exceptions can include the authenticated proxy URL.
+            # Return only the exception class so credentials never reach logs or
+            # MCP trajectories.
+            self._json(502, {"error": f"upstream request failed: {type(exc).__name__}"})
 
 
 def main() -> None:
     if not TOKEN:
         raise SystemExit("PUBMED_RELAY_TOKEN must be set")
+    if not SCRAPERAPI_KEY:
+        raise SystemExit("SCRAPERAPI must be set")
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"PubMed relay listening on http://{BIND}:{PORT}", flush=True)
     server.serve_forever()

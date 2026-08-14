@@ -1,5 +1,5 @@
 [Unit]
-Description=MCP-Atlas centralized PubMed HTTP relay
+Description=MCP-Atlas PubMed relay through ScraperAPI
 After=network-online.target
 Wants=network-online.target
 

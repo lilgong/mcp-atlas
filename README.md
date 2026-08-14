@@ -431,6 +431,40 @@ MONGODB_CONNECTION_STRING=
 修改 `.env` 后，需要重启共享 MCP runtime 和 completion 服务。运行中的进程不会
 自动重新读取文件。
 
+### 5.8 PubMed 集中出口（可选）
+
+如果部署机器的公网 IP 被 NCBI abuse 系统限制，可以在一台受信任的内网机器上运行
+集中 relay，并通过 ScraperAPI 的标准代理出口访问 NCBI。relay 统一执行限速，任务
+容器只收到 relay URL 和随机 token，不会收到 `SCRAPERAPI` 凭证。
+
+relay 主机的 `.env` 配置：
+
+```dotenv
+PUBMED_RELAY_URL=http://<relay内网IP>:3985
+PUBMED_RELAY_TOKEN=<足够长的随机token>
+PUBMED_RELAY_BIND=0.0.0.0
+PUBMED_RELAY_PORT=3985
+PUBMED_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
+SCRAPERAPI=<ScraperAPI key>
+```
+
+启动 relay：
+
+```bash
+uv run --env-file .env python scripts/pubmed_relay_server.py
+```
+
+其他评测或合成机器只配置相同的 `PUBMED_RELAY_URL` 和
+`PUBMED_RELAY_TOKEN`；不要复制 `SCRAPERAPI`。健康检查：
+
+```bash
+curl http://<relay内网IP>:3985/health
+```
+
+默认使用 ScraperAPI 标准出口，不启用按十倍 credits 计费的 premium 模式。请求记录
+写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
+query 参数或凭证。relay 不应暴露到公网。
+
 ---
 
 ## 6. 准备云端账号数据
