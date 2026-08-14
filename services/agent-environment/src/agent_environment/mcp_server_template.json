@@ -284,16 +284,15 @@
       }
     },
     "pubmed": {
-      "command": "uvx",
+      "command": "/agent-environment/.venv/bin/python",
       "args": [
-        "--with",
-        "mcp==1.28.1",
-        "--from",
-        "git+https://github.com/geobio/PubMed-MCP-Server.git@e452cfc7d23cd4c0248c177d7814df3d9e82ea3b",
-        "python",
         "-m",
-        "pubmed_server"
-      ]
+        "agent_environment.pubmed_mcp_compat"
+      ],
+      "env": {
+        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
+      }
     },
     "slack": {
       "command": "node",

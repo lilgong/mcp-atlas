@@ -1,0 +1,21 @@
+[Unit]
+Description=MCP-Atlas centralized PubMed HTTP relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pubmed-relay
+Group=pubmed-relay
+EnvironmentFile=/etc/pubmed-relay.env
+ExecStart=/usr/bin/python3 /opt/pubmed-relay/pubmed_relay_server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/pubmed-relay
+
+[Install]
+WantedBy=multi-user.target

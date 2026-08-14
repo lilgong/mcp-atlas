@@ -350,11 +350,23 @@ class TaskSandbox:
             if self.local_servers:
                 await self._start_local_stack()
             if self.network_servers:
+                network_env = {
+                    name: value
+                    for name in (
+                        "NCBI_API_KEY",
+                        "NCBI_EMAIL",
+                        "NCBI_TOOL",
+                        "PUBMED_RELAY_URL",
+                        "PUBMED_RELAY_TOKEN",
+                        "PUBMED_RELAY_TIMEOUT_SECONDS",
+                    )
+                    if (value := (os.getenv(name) or "").strip())
+                }
                 await self._start_agent_container(
                     kind="network",
                     enabled_servers=self.network_servers,
                     network=self.task_network,
-                    extra_env={},
+                    extra_env=network_env,
                 )
         except BaseException:
             await asyncio.shield(self.close())

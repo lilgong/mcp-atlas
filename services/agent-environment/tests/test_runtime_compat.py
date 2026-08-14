@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from agent_environment.oxylabs_mcp_compat import normalize_scraper_payload
+from agent_environment import pubmed_mcp_compat as pubmed
 from agent_environment.mcp_router import DEFAULT_TOOL_CALL_TIMEOUT_SECONDS
 
 
@@ -84,6 +85,93 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     ]
     assert shared["filesystem"]["args"] == expected_filesystem
     assert local["filesystem"]["args"] == expected_filesystem
+    assert shared["pubmed"]["command"] == "/agent-environment/.venv/bin/python"
+    assert shared["pubmed"]["args"] == [
+        "-m",
+        "agent_environment.pubmed_mcp_compat",
+    ]
+    assert shared["pubmed"]["env"] == {
+        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+    }
+
+
+def test_pubmed_search_batches_all_metadata_into_one_efetch(monkeypatch):
+    calls = []
+    esearch = pubmed.ET.fromstring(
+        b"<eSearchResult><IdList><Id>1</Id><Id>2</Id></IdList></eSearchResult>"
+    )
+    efetch = pubmed.ET.fromstring(
+        b"""<PubmedArticleSet>
+        <PubmedArticle><MedlineCitation><PMID>1</PMID><Article>
+          <ArticleTitle>First <i>paper</i></ArticleTitle>
+          <AuthorList><Author><LastName>Alpha</LastName></Author></AuthorList>
+          <Journal><Title>Journal A</Title><JournalIssue><PubDate><Year>2025</Year></PubDate></JournalIssue></Journal>
+          <Abstract><AbstractText>First abstract.</AbstractText></Abstract>
+        </Article></MedlineCitation></PubmedArticle>
+        <PubmedArticle><MedlineCitation><PMID>2</PMID><Article>
+          <ArticleTitle>Second paper</ArticleTitle>
+          <Journal><Title>Journal B</Title><JournalIssue><PubDate><MedlineDate>2024 Winter</MedlineDate></PubDate></JournalIssue></Journal>
+        </Article></MedlineCitation></PubmedArticle>
+        </PubmedArticleSet>"""
+    )
+
+    def fake_request_xml(endpoint, params):
+        calls.append((endpoint, params))
+        return esearch if endpoint == "esearch" else efetch
+
+    monkeypatch.setattr(pubmed, "_request_xml", fake_request_xml)
+    rows = pubmed.search_key_words("diabetes", 10)
+
+    assert [row["PMID"] for row in rows] == ["1", "2"]
+    assert rows[0]["Title"] == "First paper"
+    assert rows[1]["Publication Date"] == "2024"
+    assert calls == [
+        ("esearch", {"db": "pubmed", "term": "diabetes", "retmax": 10}),
+        ("efetch", {"db": "pubmed", "id": "1,2"}),
+    ]
+
+
+def test_pubmed_detects_ncbi_abuse_redirect():
+    response = type("Response", (), {
+        "headers": {"Location": "https://misuse.ncbi.nlm.nih.gov/error/abuse.shtml"},
+        "content": b"",
+        "text": "",
+    })()
+    assert pubmed._is_blocked(response)
+
+
+def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
+    class RelayResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status_code": 200,
+                "headers": {"Content-Type": "application/xml; charset=utf-8"},
+                "body_base64": pubmed.base64.b64encode(b"<ok/>").decode(),
+                "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            }
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return RelayResponse()
+
+    monkeypatch.setattr(pubmed, "RELAY_TOKEN", "secret")
+    monkeypatch.setattr(pubmed._SESSION, "post", fake_post)
+    response = pubmed._request_via_relay(
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+        params={"db": "pubmed"},
+        allow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"<ok/>"
+    assert calls[0][0].endswith("/v1/fetch")
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
 
 
 def test_cli_uses_read_only_flag_allowlist_and_git_matches_official_release():
@@ -213,7 +301,6 @@ def test_python_mcp_servers_pin_their_sdk():
         "fetch": "mcp==1.28.1",
         "git": "mcp==1.25.0",
         "osm-mcp-server": "mcp==1.28.1",
-        "pubmed": "mcp==1.28.1",
         "twelvedata": "mcp==1.28.1",
         "weather-data": "mcp==1.28.1",
         "wikipedia": "mcp==1.28.1",
@@ -246,7 +333,7 @@ def test_git_backed_python_servers_pin_commits():
             / "mcp_server_template.json"
         ).read_text(encoding="utf-8")
     )["mcpServers"]
-    for server in ("pubmed", "weather-data"):
+    for server in ("weather-data",):
         source = servers[server]["args"][
             servers[server]["args"].index("--from") + 1
         ]
