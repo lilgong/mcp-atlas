@@ -10,6 +10,7 @@ from mcp_completion.tool_policy import (
     is_cloud_data_write,
     route_for_tool,
     server_for_tool,
+    servers_for_enabled_tools,
     shared_routable_servers,
 )
 
@@ -82,6 +83,16 @@ class ToolPolicyTests(unittest.TestCase):
         )
         self.assertEqual(server_for_tool("MongoDB_find"), "mongodb")
 
+    def test_enabled_tool_servers_cover_full_task_surface(self):
+        servers = servers_for_enabled_tools(
+            '["context7_resolve-library-id", "pubmed_search_pubmed_advanced"]'
+        )
+        self.assertEqual(["context7", "pubmed"], servers)
+
+    def test_enabled_tool_servers_reject_unknown_tool(self):
+        with self.assertRaisesRegex(ValueError, "unknown tool"):
+            servers_for_enabled_tools('["unknown-server_tool"]')
+
     def test_isolated_availability_ignores_shared_local_status(self):
         enabled = effective_enabled_servers(
             ["airtable", "git"],
@@ -111,6 +122,17 @@ class ToolPolicyTests(unittest.TestCase):
             task_mongo_configured=False,
         )
         self.assertEqual(["airtable", "git"], enabled)
+
+    def test_explicit_allowlist_can_exclude_task_network_server(self):
+        enabled = effective_enabled_servers(
+            ["airtable"],
+            isolation_enabled=True,
+            task_data_configured=True,
+            task_mongo_configured=True,
+            allowed_servers=["airtable", "arxiv", "git"],
+        )
+        self.assertEqual(["airtable", "arxiv", "git"], enabled)
+        self.assertNotIn("pubmed", enabled)
 
     def test_transiently_degraded_discovered_server_remains_routable(self):
         routable, reconnectable, online_count = shared_routable_servers(

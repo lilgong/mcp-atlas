@@ -29,8 +29,24 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             isolated_client.SERVER_CALL_POLICIES["arxiv"],
         )
         self.assertEqual(
+            (1, 1.2, 15.0, 60.0),
+            isolated_client.SERVER_CALL_POLICIES["pubmed"],
+        )
+        self.assertEqual(
             (1, 1.0, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["twelvedata"],
+        )
+        self.assertEqual(
+            (1, 6.0, 60.0, 60.0),
+            isolated_client.SERVER_CALL_POLICIES["wikipedia"],
+        )
+        self.assertNotIn("ddg-search", isolated_client.SERVER_CALL_POLICIES)
+        self.assertEqual(
+            {
+                "arxiv", "brave-search", "osm-mcp-server", "twelvedata",
+                "wikipedia",
+            },
+            set(isolated_client._SHARED_SERVER_CALL_GATES),
         )
 
     def test_rate_limit_detection_requires_error_shaped_result(self):
@@ -70,6 +86,25 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             isolated_client._is_rate_limited_tool_result(normal_data)
         )
+
+    async def test_wikipedia_relay_bypasses_whole_tool_call_gate(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "PUBMED_RELAY_URL": "http://relay.invalid:3985",
+                "PUBMED_RELAY_TOKEN": "test-token",
+            },
+            clear=False,
+        ):
+            self.assertIsNone(
+                isolated_client._server_call_gate(
+                    "wikipedia_search_wikipedia"
+                )
+            )
+            async with isolated_client._server_call_slot(
+                "wikipedia_search_wikipedia"
+            ) as slot:
+                self.assertEqual(0, slot.queued_ms)
 
     def test_rate_limit_backoff_grows_and_success_recovers_gradually(self):
         gate = isolated_client.ServerCallGate(1, 3.0, 15.0, 60.0)
@@ -166,6 +201,11 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
                 isolated_client._SERVER_CALL_GATES,
                 {"arxiv": test_gate},
                 clear=False,
+            ),
+            patch.dict(
+                isolated_client._SHARED_SERVER_CALL_GATES,
+                {},
+                clear=True,
             ),
             patch(
                 "mcp_completion.mcp_client.isolated_client.write_runtime_event"

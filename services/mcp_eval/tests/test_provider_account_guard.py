@@ -55,6 +55,18 @@ def test_mcp_plain_invalid_key_result_is_fatal():
     assert is_fatal_tool_result(result)
 
 
+def test_context7_monthly_quota_text_is_fatal():
+    result = {
+        "content": [{
+            "type": "text",
+            "text": "Monthly quota reached. Upgrade to Context7 Pro.",
+        }],
+        "is_error": False,
+    }
+
+    assert is_fatal_mcp_account_error("context7", result)
+
+
 def test_git_parser_token_error_cannot_stop_the_run():
     result = {
         "content": [{
@@ -90,7 +102,6 @@ def test_git_parser_token_error_cannot_stop_the_run():
         "osm-mcp-server",
         "weather",
         "whois",
-        "wikipedia",
     ],
 )
 def test_credential_free_servers_cannot_raise_account_failure(server):
@@ -123,6 +134,11 @@ def test_credential_free_servers_cannot_raise_account_failure(server):
         ),
         (
             "pubmed",
+            "SCRAPERAPI_CREDITS_EXHAUSTED: monthly credits are exhausted",
+            "SCRAPERAPI",
+        ),
+        (
+            "wikipedia",
             "SCRAPERAPI_CREDITS_EXHAUSTED: monthly credits are exhausted",
             "SCRAPERAPI",
         ),

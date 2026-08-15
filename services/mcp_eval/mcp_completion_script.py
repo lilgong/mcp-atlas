@@ -9,8 +9,8 @@
 # The filtering process:
 # 1. Query the shared service (MCP_SERVER_URL) for online cloud servers
 # 2. Merge task-local/network servers whose required fixture configuration exists
-# 3. If servers are returned, run extract_mcp_servers_per_task.py to extract which servers are used in each task's ground truth TRAJECTORY
-# 4. Filter out tasks whose ground truth trajectories require an unavailable route
+# 3. Resolve every server exposed by each task's ENABLED_TOOLS
+# 4. Filter out tasks whose enabled tool surface includes an unavailable route
 # 5. Print summary of how many tasks are being run vs skipped
 
 # Note that if rows exist in the output file, it'll skip re-evaluating those already-processed rows
@@ -36,13 +36,13 @@ import aiocsv
 import logging
 import random
 import argparse
-import subprocess
 import requests
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from datasets import load_dataset
 from mcp_completion.tool_policy import (
     effective_enabled_servers,
+    servers_for_enabled_tools,
     shared_routable_servers,
 )
 from mcp_completion.response_validation import is_completely_empty_agent_response
@@ -563,9 +563,31 @@ class AsyncMCPTrajectoryGenerator:
 
         async def controlled_task(row_data, task_index):
             async with semaphore:
-                return await self.process_single_task(
-                    row_data, output_file, task_index, len(df)
-                )
+                try:
+                    return await self.process_single_task(
+                        row_data, output_file, task_index, len(df)
+                    )
+                except FatalAccountError:
+                    # An unusable model/MCP account affects every sibling, so
+                    # preserve the existing run-wide early-stop behavior.
+                    raise
+                except Exception as error:
+                    # process_single_task already turns ordinary task failures
+                    # into rows. This boundary catches failures in that error
+                    # handling itself (for example a malformed response or an
+                    # isolated CSV write failure). Leave this task unrecorded so
+                    # a resumed run retries it, without cancelling unrelated
+                    # in-flight work.
+                    task_id = row_data.get("TASK", task_index)
+                    logging.exception(
+                        "[%d/%d] Unexpected task failure for %s; leaving it "
+                        "unrecorded for a resumed run: %s",
+                        task_index + 1,
+                        len(df),
+                        task_id,
+                        error,
+                    )
+                    return None
 
         # Filter out already processed tasks
         tasks_to_process = []
@@ -590,8 +612,9 @@ class AsyncMCPTrajectoryGenerator:
             async_tasks.append(task)
 
         # Execute all tasks concurrently. Ordinary per-task errors are converted
-        # to result rows by process_single_task; only run-wide fatal failures
-        # escape and take this early-stop path.
+        # to result rows by process_single_task, and the controlled_task boundary
+        # keeps unexpected task-local failures resumable. Only run-wide account
+        # failures escape and take this early-stop path.
         start_time = time.time()
         done, pending = await asyncio.wait(
             async_tasks,
@@ -641,48 +664,13 @@ class AsyncMCPTrajectoryGenerator:
         return pd.DataFrame(valid_results)
 
 
-def run_extract_script(input_csv_path: str) -> str:
-    """Run the extract_mcp_servers_per_task.py script and return the output JSON path"""
-    script_path = Path(__file__).parent / "extract_mcp_servers_per_task.py"
-
-    try:
-        result = subprocess.run(
-            [sys.executable, str(script_path), "--input", input_csv_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-
-        logging.info(f"Extract script output: {result.stdout}")
-
-        # Tool-map is always saved to completion_results/
-        input_path = Path(input_csv_path)
-        output_path = Path("completion_results") / f"{input_path.stem}-tool-map.json"
-        return str(output_path)
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error running extract script: {e.stderr}")
-        raise
-
-
-def load_tool_map(tool_map_path: str) -> Dict[str, List[str]]:
-    """Load the tool map JSON file"""
-    try:
-        with open(tool_map_path, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        logging.error(f"Error loading tool map from {tool_map_path}: {e}")
-        raise
-
-
 def filter_tasks_by_enabled_servers(
-    df: pd.DataFrame, tool_map: Dict[str, List[str]], enabled_servers: List[str]
+    df: pd.DataFrame, enabled_servers: List[str]
 ) -> tuple[pd.DataFrame, List[tuple[str, List[str]]]]:
-    """Keep tasks whose trajectory servers are available through a runtime route.
+    """Keep tasks whose complete enabled tool surface is available.
 
     Args:
         df: DataFrame with tasks
-        tool_map: Dict mapping task_id -> list of servers used in that task's ground truth TRAJECTORY
         enabled_servers: Route-aware shared and task-isolated server list
 
     Returns:
@@ -693,7 +681,10 @@ def filter_tasks_by_enabled_servers(
 
     for idx, row in df.iterrows():
         task_id = str(row.get("TASK", idx))
-        task_servers = tool_map.get(task_id, [])
+        try:
+            task_servers = servers_for_enabled_tools(row.get("ENABLED_TOOLS"))
+        except ValueError as exc:
+            raise ValueError(f"task {task_id}: {exc}") from exc
 
         # Check if all required servers are enabled
         if all(server in enabled_servers for server in task_servers):
@@ -733,7 +724,7 @@ def write_exclusion_report(
 
         f.write("Reason for exclusion:\n")
         f.write(
-            "Tasks were filtered out because their ground truth trajectories used MCP servers\n"
+            "Tasks were filtered out because their ENABLED_TOOLS exposed MCP servers\n"
         )
         f.write(
             "that are not available through the configured shared or task-isolated runtime.\n\n"
@@ -840,11 +831,22 @@ def get_enabled_servers() -> List[str]:
         task_mongo_configured = bool(
             (os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip()
         )
+        configured_allowlist = (os.getenv("ENABLED_SERVERS") or "").strip()
+        allowed_servers = (
+            {
+                server.strip()
+                for server in configured_allowlist.split(",")
+                if server.strip()
+            }
+            if configured_allowlist
+            else None
+        )
         enabled_servers = effective_enabled_servers(
             shared_enabled_servers,
             isolation_enabled=isolation_enabled,
             task_data_configured=task_data_configured,
             task_mongo_configured=task_mongo_configured,
+            allowed_servers=allowed_servers,
         )
 
         logging.info(
@@ -1057,13 +1059,12 @@ async def main():
         else:
             logging.info("🔍 Filtering tasks by route-aware server availability...")
 
-            # Validate that TRAJECTORY column exists
-            if "TRAJECTORY" not in df.columns:
+            # ENABLED_TOOLS is the runtime authority: a task must be skipped if
+            # any exposed server is unavailable, even when GT never called it.
+            if "ENABLED_TOOLS" not in df.columns:
                 raise ValueError(
-                    "❌ TRAJECTORY column is required when using --filter_for_enabled_servers.\n"
-                    "   The filter works by checking which MCP servers were used in the ground truth trajectories.\n"
-                    "   Your dataset is missing the TRAJECTORY column.\n"
-                    "   Either add TRAJECTORY to your dataset or remove the --filter_for_enabled_servers flag."
+                    "❌ ENABLED_TOOLS is required when using --filter_for_enabled_servers.\n"
+                    "   The filter checks the complete tool surface exposed to each task."
                 )
 
             # For HuggingFace datasets, save to a predictable CSV name for tool-map reuse
@@ -1074,20 +1075,11 @@ async def main():
                 df.to_csv(csv_filename, index=False, encoding="utf-8")
                 logging.info(f"Saved HuggingFace dataset to: {csv_filename}")
 
-            # Run extract script to generate tool map
-            logging.info("Running extract_mcp_servers_per_task.py...")
-            tool_map_path = run_extract_script(csv_filename)
-
-            # Load tool map
-            tool_map = load_tool_map(tool_map_path)
-
             logging.info(f"Enabled servers: {enabled_servers}")
 
             # Filter tasks
             original_count = len(df)
-            df, excluded_tasks = filter_tasks_by_enabled_servers(
-                df, tool_map, enabled_servers
-            )
+            df, excluded_tasks = filter_tasks_by_enabled_servers(df, enabled_servers)
             filtered_count = len(df)
 
             logging.info(f"📊 Running {filtered_count} out of {original_count} tasks")
@@ -1096,8 +1088,8 @@ async def main():
             skipped_count = original_count - filtered_count
             if skipped_count > 0:
                 logging.info(
-                    f"⚠️  Skipped {skipped_count} tasks because their ground "
-                    "truth trajectories require unavailable MCP routes"
+                    f"⚠️  Skipped {skipped_count} tasks because their enabled "
+                    "tool surfaces include unavailable MCP routes"
                 )
 
             # Write exclusion report

@@ -34,6 +34,11 @@ services/mcp_eval/evaluation_results/*
 # MCP/tool API call logs (per-key request counts)
 mcp_usage_log/
 token_usage_log/
+/completion_results/
+
+data_exports/mongo_dump_video_game_store/
+
+direct_probe_usage_log/
 
 # Local benchmark derived from the tracked official baseline. The Slack
 # preparation script regenerates this file for the current workspace dates.

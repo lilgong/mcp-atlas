@@ -17,6 +17,7 @@ becoming writable.
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional
 
@@ -170,6 +171,32 @@ def server_for_tool(tool_name: str) -> Optional[str]:
     return None
 
 
+def servers_for_enabled_tools(value: Any) -> list[str]:
+    """Return canonical servers from a task's authoritative ENABLED_TOOLS."""
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("ENABLED_TOOLS is not valid JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError("ENABLED_TOOLS must be a JSON list")
+
+    servers: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            tool_name = item
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            tool_name = item["name"]
+        else:
+            raise ValueError("ENABLED_TOOLS contains an invalid tool entry")
+        server = server_for_tool(tool_name)
+        if server is None:
+            raise ValueError(f"unknown tool in ENABLED_TOOLS: {tool_name}")
+        servers.add(server)
+    return sorted(servers)
+
+
 def is_cloud_data_write(tool_name: str) -> bool:
     """Fail closed for unknown tools on shared-account cloud servers."""
 
@@ -206,6 +233,7 @@ def effective_enabled_servers(
     isolation_enabled: bool,
     task_data_configured: bool,
     task_mongo_configured: bool,
+    allowed_servers: Iterable[str] | None = None,
 ) -> list[str]:
     """Combine shared-cloud health with task-routed runtime availability.
 
@@ -217,8 +245,9 @@ def effective_enabled_servers(
     """
 
     shared = set(shared_enabled_servers)
+    allowed = set(allowed_servers) if allowed_servers is not None else None
     if not isolation_enabled:
-        return sorted(shared)
+        return sorted(shared if allowed is None else shared & allowed)
 
     task_routed = set(TASK_LOCAL_SERVERS) | set(TASK_NETWORK_SERVERS)
     effective = shared - task_routed
@@ -227,6 +256,8 @@ def effective_enabled_servers(
         effective.update(set(TASK_LOCAL_SERVERS) - {"mongodb"})
         if task_mongo_configured:
             effective.add("mongodb")
+    if allowed is not None:
+        effective.intersection_update(allowed)
     return sorted(effective)
 
 

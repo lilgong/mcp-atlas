@@ -42,6 +42,7 @@ _MCP_CREDENTIAL_ENVS = {
     "notion": ("NOTION_TOKEN",),
     "oxylabs": ("OXYLABS_USERNAME", "OXYLABS_PASSWORD"),
     "pubmed": ("SCRAPERAPI",),
+    "wikipedia": ("SCRAPERAPI",),
     "slack": ("SLACK_MCP_XOXC_TOKEN", "SLACK_MCP_XOXD_TOKEN"),
     "weather-data": ("WEATHER_API_KEY",),
 }
@@ -184,6 +185,8 @@ def is_fatal_tool_result(result: Any) -> bool:
         "insufficient credit",
         "not enough credits",
         "out of credits",
+        "monthly quota reached",
+        "monthly quota exceeded",
         "quota exceeded",
         "quota exhausted",
     )

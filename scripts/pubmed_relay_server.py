@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, rate-limited NCBI relay using ScraperAPI egress."""
+"""Authenticated, allow-listed NCBI/Wikipedia relay using ScraperAPI egress."""
 
 from __future__ import annotations
 
@@ -20,8 +20,9 @@ from typing import Any
 
 
 ALLOWED_TARGETS = {
-    "eutils.ncbi.nlm.nih.gov": "/entrez/eutils/",
-    "www.ncbi.nlm.nih.gov": "/pmc/articles/",
+    "eutils.ncbi.nlm.nih.gov": ("ncbi", "/entrez/eutils/"),
+    "www.ncbi.nlm.nih.gov": ("ncbi", "/pmc/articles/"),
+    "en.wikipedia.org": ("wikipedia", "/w/api.php"),
 }
 TOKEN = (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
 SCRAPERAPI_KEY = (os.getenv("SCRAPERAPI") or "").strip()
@@ -108,7 +109,10 @@ class Controller:
             return (*final, 3, queued_ms)
 
 
-CONTROLLER = Controller()
+CONTROLLERS = {
+    "ncbi": Controller(),
+    "wikipedia": Controller(),
+}
 
 
 def _retry_after(headers: dict[str, str]) -> float:
@@ -129,13 +133,19 @@ def _is_abuse_response(response: tuple[int, dict[str, str], bytes, str]) -> bool
     )
 
 
-def _validate_url(url: str) -> None:
+def _validate_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
-    prefix = ALLOWED_TARGETS.get((parsed.hostname or "").lower())
-    if parsed.scheme != "https" or parsed.port not in (None, 443) or not prefix or not parsed.path.startswith(prefix):
-        raise ValueError("target is not an allowed NCBI E-utilities/PMC endpoint")
+    target = ALLOWED_TARGETS.get((parsed.hostname or "").lower())
+    if (
+        parsed.scheme != "https"
+        or parsed.port not in (None, 443)
+        or not target
+        or not parsed.path.startswith(target[1])
+    ):
+        raise ValueError("target is not an allowed NCBI/Wikipedia API endpoint")
     if parsed.username or parsed.password or parsed.fragment:
         raise ValueError("target URL contains forbidden components")
+    return target[0]
 
 
 def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str]:
@@ -155,7 +165,7 @@ def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], b
     if not allow_redirects:
         handlers.append(NoRedirect())
     opener = urllib.request.build_opener(*handlers)
-    request = urllib.request.Request(url, headers={"User-Agent": "mcp_atlas_pubmed_relay/1.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "mcp_atlas_egress_relay/1.0"})
     try:
         response = opener.open(request, timeout=UPSTREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
@@ -191,7 +201,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            account_error = CONTROLLER.current_account_error()
+            account_error = next(
+                (
+                    error
+                    for controller in CONTROLLERS.values()
+                    if (error := controller.current_account_error())
+                ),
+                None,
+            )
             if account_error:
                 self._json(503, {"status": "blocked", "error": account_error})
             else:
@@ -218,12 +235,14 @@ class Handler(BaseHTTPRequestHandler):
             params = payload.get("params") or {}
             if not isinstance(params, dict):
                 raise ValueError("params must be an object")
-            _validate_url(url)
+            target_group = _validate_url(url)
             query = urllib.parse.urlencode(params, doseq=True)
             if query:
                 separator = "&" if urllib.parse.urlsplit(url).query else "?"
                 url = f"{url}{separator}{query}"
-            status, headers, body, final_url, attempts, queued_ms = CONTROLLER.fetch(
+            status, headers, body, final_url, attempts, queued_ms = CONTROLLERS[
+                target_group
+            ].fetch(
                 url, bool(payload.get("allow_redirects", False))
             )
             self._json(200, {
@@ -272,7 +291,7 @@ def main() -> None:
     if not SCRAPERAPI_KEY:
         raise SystemExit("SCRAPERAPI must be set")
     server = ThreadingHTTPServer((BIND, PORT), Handler)
-    print(f"PubMed relay listening on http://{BIND}:{PORT}", flush=True)
+    print(f"NCBI/Wikipedia relay listening on http://{BIND}:{PORT}", flush=True)
     server.serve_forever()
 
 

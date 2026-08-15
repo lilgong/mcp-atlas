@@ -33,6 +33,7 @@ SOURCE_FILES = (
     "src/agent_environment/pubmed_mcp_compat.py",
     "src/agent_environment/run_node_mcp.cjs",
     "src/agent_environment/yibu_fetch_preload.cjs",
+    "src/agent_environment/wikipedia_preload/sitecustomize.py",
     "src/agent_environment/mcp_server_template.json",
 )
 
@@ -67,6 +68,18 @@ def stage_build_context(context: Path) -> None:
         text.replace(old, "/opt/mcp-code-venv"),
         encoding="utf-8",
     )
+    template_config = json.loads(template.read_text(encoding="utf-8"))
+    wikipedia_pythonpath = template_config["mcpServers"]["wikipedia"]["env"][
+        "PYTHONPATH"
+    ]
+    image_prefix = "/agent-environment/"
+    if not wikipedia_pythonpath.startswith(image_prefix):
+        raise RuntimeError("Wikipedia preload must be inside the runtime image")
+    staged_preload = context / wikipedia_pythonpath.removeprefix(image_prefix)
+    if not (staged_preload / "sitecustomize.py").is_file():
+        raise RuntimeError(
+            f"Wikipedia preload is not staged: {staged_preload}"
+        )
 
     patches = SOURCE / "vendor/yibu-patched" / "oxylabs_mcp"
     shutil.copytree(patches, context / "vendor/yibu-patched/oxylabs_mcp")

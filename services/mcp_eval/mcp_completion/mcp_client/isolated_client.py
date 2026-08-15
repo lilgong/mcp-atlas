@@ -20,6 +20,7 @@ from ..account_guard import (
     is_fatal_mcp_account_error,
 )
 from ..schema import CallToolResponse, ToolDefinition
+from ..shared_rate_gate import SharedRateGate, SharedRateLease
 from ..task_sandbox import TaskSandbox
 from ..tool_policy import (
     TASK_MONGODB_DATABASE,
@@ -51,7 +52,14 @@ SERVER_CALL_POLICIES: dict[str, tuple[int, float, float, float]] = {
     "arxiv": (1, 3.0, 15.0, 60.0),
     "brave-search": (1, 1.2, 2.0, 10.0),
     "osm-mcp-server": (1, 1.0, 0.0, 0.0),
+    # The rate-safe server emits two paced requests per search (ESearch plus
+    # one batched EFetch). Serialize calls across task containers sharing an IP.
+    "pubmed": (1, 1.2, 15.0, 60.0),
     "twelvedata": (1, 1.0, 15.0, 60.0),
+    # Wikimedia recommends serial Action API requests.  The client also
+    # retries 429s internally using Retry-After, so keep the lease for the
+    # whole tool call to prevent parallel tasks from piling onto that retry.
+    "wikipedia": (1, 6.0, 60.0, 60.0),
 }
 
 
@@ -112,6 +120,30 @@ _SERVER_CALL_GATES = {
     for server, policy in SERVER_CALL_POLICIES.items()
 }
 
+# Atlas evaluation and data synthesis are separate processes, so their
+# in-memory gates alone cannot coordinate shared public egress or API quotas.
+# Both repositories use the same per-user host lock directory.
+_SHARED_SERVER_CALL_GATES = {
+    "arxiv": SharedRateGate("arxiv", 3.0, 15.0, 60.0),
+    "brave-search": SharedRateGate("brave-search", 1.2, 2.0, 10.0),
+    "osm-mcp-server": SharedRateGate("osm-mcp-server", 1.0),
+    "twelvedata": SharedRateGate("twelvedata", 1.0, 15.0, 60.0),
+    "wikipedia": SharedRateGate(
+        "wikipedia", 6.0, 60.0, 60.0, completion_spacing=6.0,
+    ),
+}
+
+
+@dataclass
+class ServerCallSlot:
+    queued_ms: int
+    shared_lease: SharedRateLease | None = None
+
+    def observe_rate_limit(self, rate_limited: bool) -> float:
+        if self.shared_lease is None:
+            return 0.0
+        return self.shared_lease.observe_rate_limit(rate_limited)
+
 
 _RATE_LIMIT_MARKERS = (
     "http 429",
@@ -120,6 +152,7 @@ _RATE_LIMIT_MARKERS = (
     "status_code=429",
     "rate limit exceeded",
     "too many requests",
+    "blocked this public egress ip",
 )
 
 
@@ -166,16 +199,44 @@ def _is_rate_limited_tool_result(result: Any) -> bool:
 
 @contextlib.asynccontextmanager
 async def _server_call_slot(tool_name: str):
+    server = server_for_tool(tool_name) or ""
+    if server == "wikipedia" and _wikipedia_relay_enabled():
+        # The relay schedules individual Action API requests.  Serializing the
+        # entire multi-request MCP call here causes head-of-line blocking across
+        # evaluation and synthesis processes without adding upstream safety.
+        yield ServerCallSlot(0)
+        return
     gate = _server_call_gate(tool_name)
     if gate is None:
-        yield 0
+        yield ServerCallSlot(0)
         return
-    async with gate.slot() as queued_ms:
-        yield queued_ms
+    shared_gate = _SHARED_SERVER_CALL_GATES.get(server)
+    queued_at = time.monotonic()
+    async with gate.slot():
+        if shared_gate is None:
+            yield ServerCallSlot(int((time.monotonic() - queued_at) * 1000))
+            return
+        async with shared_gate.slot() as shared_lease:
+            yield ServerCallSlot(
+                int((time.monotonic() - queued_at) * 1000),
+                shared_lease,
+            )
 
 
 def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
+    if (
+        server_for_tool(tool_name) == "wikipedia"
+        and _wikipedia_relay_enabled()
+    ):
+        return None
     return _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
+
+
+def _wikipedia_relay_enabled() -> bool:
+    return bool(
+        (os.getenv("PUBMED_RELAY_URL") or "").strip()
+        and (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+    )
 
 
 class IsolatedMCPClient(MCPClient):
@@ -387,7 +448,8 @@ class IsolatedMCPClient(MCPClient):
         call_id = uuid.uuid4().hex
         call_gate = _server_call_gate(tool_name)
         rate_limit_cooldown_seconds = 0.0
-        async with _server_call_slot(tool_name) as rate_limit_queued_ms:
+        async with _server_call_slot(tool_name) as call_slot:
+            rate_limit_queued_ms = call_slot.queued_ms
             started = time.monotonic()
             write_runtime_event(
                 "tools",
@@ -402,10 +464,18 @@ class IsolatedMCPClient(MCPClient):
             try:
                 response = await client.call_tool(tool_name, args)
             except Exception as exc:
+                rate_limited = _contains_rate_limit_marker(exc)
+                shared_cooldown_seconds = call_slot.observe_rate_limit(
+                    rate_limited
+                )
                 if call_gate is not None:
                     rate_limit_cooldown_seconds = call_gate.observe_rate_limit(
-                        _contains_rate_limit_marker(exc)
+                        rate_limited
                     )
+                rate_limit_cooldown_seconds = max(
+                    rate_limit_cooldown_seconds,
+                    shared_cooldown_seconds,
+                )
                 write_runtime_event(
                     "tools",
                     "tool_call_failed",
@@ -419,10 +489,15 @@ class IsolatedMCPClient(MCPClient):
                 )
                 raise
             rate_limited = _is_rate_limited_tool_result(response)
+            shared_cooldown_seconds = call_slot.observe_rate_limit(rate_limited)
             if call_gate is not None:
                 rate_limit_cooldown_seconds = call_gate.observe_rate_limit(
                     rate_limited
                 )
+            rate_limit_cooldown_seconds = max(
+                rate_limit_cooldown_seconds,
+                shared_cooldown_seconds,
+            )
 
         serialized = jsonable(response)
         server = server_for_tool(tool_name) or tool_name

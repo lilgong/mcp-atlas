@@ -12,13 +12,16 @@ MONGO_FIXTURE_DUMP ?=
 MONGO_FIXTURE_DB ?=
 MONGO_FIXTURE_ID ?=
 
-.PHONY: build build-atlas-runtime build-task-mongo run run-docker run-docker-host shell test test-completion run-mcp-completion check-task-isolation cleanup-task-sandboxes push
+.PHONY: build build-atlas-runtime build-task-mongo run run-docker run-docker-host run-egress-relay shell test test-completion run-mcp-completion check-task-isolation cleanup-task-sandboxes push
 
 run-docker: # run docker container for mcp servers (agent-environment service)
 	docker run --rm -p 127.0.0.1:$(MCP_HOST_PORT):1984 -p 127.0.0.1:$(MCP_STATUS_HOST_PORT):1985 --add-host=host.docker.internal:host-gateway --env-file .env $(IMAGE_NAME):latest
 
 run-docker-host: # run shared MCP using MCP_SHARED_HOST/MCP_SHARED_PORT from .env
 	uv run --project services/mcp_eval python scripts/run_shared_mcp.py
+
+run-egress-relay: # run the authenticated PubMed/Wikipedia ScraperAPI relay
+	uv run --env-file .env python scripts/pubmed_relay_server.py
 
 build: # builds agent-environment; only tags :latest (VERSION is for the GHCR push target)
 	cd services/agent-environment && docker buildx build --platform linux/amd64 -t $(IMAGE_NAME) .

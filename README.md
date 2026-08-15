@@ -123,7 +123,7 @@ docker run --rm hello-world
 
 ```bash
 git clone \
-  --branch codex/task-isolation-runtime \
+  --branch feat/remote-pubmed-relay \
   https://github.com/lilgong/mcp-atlas.git
 
 cd mcp-atlas
@@ -139,11 +139,30 @@ git log -1 --oneline
 预期分支：
 
 ```text
-codex/task-isolation-runtime
+feat/remote-pubmed-relay
 ```
 
 不需要执行 `git submodule update`。任务使用的 Git 仓库由文件 fixture 中的
 `repos/git_submodule_info.csv` 指定 URL 和 commit，任务启动时按需物化。
+
+### 3.1 已部署机器更新
+
+如果机器已经 clone 了本仓库，只更新测评分支即可；不需要安装
+`mcp-atlas-data-syn`：
+
+```bash
+cd /path/to/mcp-atlas
+git fetch origin
+git switch feat/remote-pubmed-relay
+git pull --ff-only origin feat/remote-pubmed-relay
+cp env.template .env  # 仅首次部署；已有 .env 时不要覆盖
+uv sync --project services/mcp_eval --frozen
+make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
+```
+
+Wikipedia 的逐请求 relay 适配位于 runtime 镜像内，因此拉取本分支后必须重建或加载
+由同一提交构建的 `mcp-atlas-runtime:latest`。仅重启 Python 服务不会更新已有镜像。
+随后按 §10 重启共享 runtime 和 completion；旧进程不会自动加载新代码或 `.env`。
 
 ---
 
@@ -342,6 +361,19 @@ MCP_TASK_ISOLATION_ENABLED=true
 Docker 繁忙或残留较多时阻塞 `/health`；运行中的 age-gated sweeper 会回收已失去
 进程跟踪且超过 `MCP_SANDBOX_ORPHAN_MAX_AGE` 的资源。
 
+同一宿主机、同一 Unix 用户并行运行 MCP-Atlas 和 data-syn 时，arXiv、Brave、OSM、
+TwelveData 与未配置集中 relay 的 Wikipedia 调用会自动通过
+`/tmp/mcp-atlas-rate-gates-<uid>/` 的文件锁统一串行和间隔调度；可识别的 429 退避也在
+进程间共享。
+`MCP_SHARED_RATE_LIMIT_DIR` 通常留空，
+只有迁移本地锁目录时才填写；不要指向 NFS。该机制只协调调用时序，不代理请求、
+不改变工具 schema，也不适用于不同宿主机或不同 Unix 用户。
+Wikipedia 的一个工具调用会在内部读取多个页面属性；配置集中 relay 时不锁住整个工具
+调用，而是将 search/summary/article 的每个 HTTP 子请求统一交给 relay 排队并经
+ScraperAPI 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
+`Retry-After`。
+两种路径都不改变工具 schema 或返回结构。
+
 ### 5.5 轨迹参数
 
 ```dotenv
@@ -391,7 +423,7 @@ ENABLED_SERVERS=
 ENABLED_SERVERS=calculator,wikipedia,github
 ```
 
-则只启动列出的 server，不再自动补充。
+则只启用列出的 server（包括任务沙箱内的 server），不再自动补充。
 
 主要凭证：
 
@@ -431,16 +463,15 @@ MONGODB_CONNECTION_STRING=
 修改 `.env` 后，需要重启共享 MCP runtime 和 completion 服务。运行中的进程不会
 自动重新读取文件。
 
-### 5.8 PubMed 集中出口（可选）
+### 5.8 PubMed/Wikipedia 集中出口（推荐多机共用一个）
 
 如果部署机器的公网 IP 被 NCBI abuse 系统限制，可以在一台受信任的内网机器上运行
-集中 relay，并通过 ScraperAPI 的标准代理出口访问 NCBI。relay 统一执行限速，任务
+集中 relay，并通过 ScraperAPI 的标准代理出口访问 NCBI 和 Wikipedia Action API。relay 统一执行限速，任务
 容器只收到 relay URL 和随机 token，不会收到 `SCRAPERAPI` 凭证。
 
 relay 主机的 `.env` 配置：
 
 ```dotenv
-PUBMED_RELAY_URL=http://<relay内网IP>:3985
 PUBMED_RELAY_TOKEN=<足够长的随机token>
 PUBMED_RELAY_BIND=0.0.0.0
 PUBMED_RELAY_PORT=3985
@@ -451,11 +482,20 @@ SCRAPERAPI=<ScraperAPI key>
 启动 relay：
 
 ```bash
-uv run --env-file .env python scripts/pubmed_relay_server.py
+make run-egress-relay
 ```
 
-其他评测或合成机器只配置相同的 `PUBMED_RELAY_URL` 和
-`PUBMED_RELAY_TOKEN`；不要复制 `SCRAPERAPI`。健康检查：
+每台评测机器只配置：
+
+```dotenv
+PUBMED_RELAY_URL=http://<relay内网IP>:3985
+PUBMED_RELAY_TOKEN=<与relay主机相同的token>
+PUBMED_RELAY_TIMEOUT_SECONDS=90
+SCRAPERAPI=
+```
+
+不要把 `SCRAPERAPI` 复制到评测机器，也不需要在评测机器启动 relay。data-syn 若同时
+生产，可以连接同一个 relay，但它不是 MCP-Atlas 测评部署的依赖。健康检查：
 
 ```bash
 curl http://<relay内网IP>:3985/health
@@ -465,8 +505,12 @@ curl http://<relay内网IP>:3985/health
 写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
+集中 relay 会跨机器统一 PubMed/Wikipedia 的请求节奏。arXiv、OSM、Brave 和
+TwelveData 的共享文件门控只协调同一宿主机、同一 Unix 用户的进程；不同机器不会共享
+该锁。如果多台机器共用同一公网出口，应分别降低并发或错峰运行这些服务。
+
 ScraperAPI 返回 401（key 无效）或 403（官方定义为当月 credits 耗尽）后，relay 会
-锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed MCP：
+锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed/Wikipedia MCP：
 MCP-Atlas completion 停止整批评测，data-syn P2 取消其他并发任务并退出；已经成功的
 结果保持落盘，充值或换 key 并重启 relay 后可续跑。普通 429 仍按瞬时限流处理。
 
@@ -1232,6 +1276,20 @@ evaluation_results/
 └── coverage_histogram_<model-label>.png
 ```
 
+评分完成后，可用确定性审核脚本区分模型失败、已恢复的 MCP 抖动和真正阻塞任务的
+环境故障：
+
+```bash
+uv run python atlas_verify_v2.py \
+  --scored "evaluation_results/scored_<model-label>.csv" \
+  --eval-log completion_results/mcp_eval.log \
+  --runtime-log completion_results/runtime_logs \
+  --usage-log ../../mcp_usage_log
+```
+
+它不会修改分数或从分母中删除任务；缺少 usage/runtime log 时仍可运行，但无法识别
+只记录在这些日志中的上游状态码、排队时间和恢复证据。
+
 比较模型时至少记录：
 
 - Git commit。
@@ -1522,9 +1580,10 @@ docker run --rm hello-world
 
 ```text
 [ ] 安装并验证 Git、Docker、Make、Python、uv、curl、jq、unzip
-[ ] clone codex/task-isolation-runtime
+[ ] clone feat/remote-pubmed-relay
 [ ] 验证仓库内 services/mcp_eval/MCP-Atlas-origin.csv 的 SHA256
 [ ] 创建并填写 .env
+[ ] 若使用集中出口：在 relay 主机启动 make run-egress-relay，并从评测机检查 /health
 [ ] 导入 Airtable、Notion、Calendar、Slack 数据；免费 Slack 生成并选择对齐版 CSV
 [ ] docker load 或 make build-atlas-runtime
 [ ] 生成 official-data-v2 文件 fixture
@@ -1564,8 +1623,11 @@ docker run --rm hello-world
 | `scripts/prepare_task_data_fixture.py` | 生成内容寻址文件 fixture |
 | `scripts/build_task_mongo_fixture.py` | 从 mongodump 构建 task-Mongo fixture 镜像 |
 | `scripts/run_shared_mcp.py` | 启动共享 MCP runtime |
+| `scripts/pubmed_relay_server.py` | PubMed/Wikipedia 的鉴权、限速 ScraperAPI 出口 |
 | `services/mcp_eval/mcp_completion_script.py` | 生成模型轨迹 |
 | `services/mcp_eval/mcp_evals_scores.py` | claim coverage 评分 |
+| `services/mcp_eval/atlas_verify_v2.py` | 结合 scored CSV、runtime log 和 usage log 审核 MCP 侧影响 |
+| `services/mcp_eval/mcp_completion/shared_rate_gate.py` | 同机多进程共享的上游请求节奏门控 |
 | `services/mcp_eval/test_server_v1.py` | 检查所有工具均走共享端点的 V1 runtime |
 | `services/mcp_eval/test_server_v2.py` | 按正式路由检查共享云端与逐任务容器工具 |
 | `services/mcp_eval/mcp_server_probe.py` | V1/V2 共用的代表调用和官方数据断言 |

@@ -157,6 +157,10 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "src/agent_environment/yibu_fetch_preload.cjs", paths
             )
+            self.assertIn(
+                "src/agent_environment/wikipedia_preload/sitecustomize.py",
+                paths,
+            )
             self.assertFalse(
                 any(path.startswith("vendor/yibu-patched/node_modules/") for path in paths)
             )
@@ -201,6 +205,10 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
             self.assertIn("nodesource.com/setup_22.x", dockerfile)
             self.assertIn("src/agent_environment/pubmed_mcp_compat.py", dockerfile)
+            self.assertIn(
+                "src/agent_environment/wikipedia_preload/sitecustomize.py",
+                dockerfile,
+            )
 
     def test_git_trust_is_scoped_to_task_repositories(self):
         template = json.loads(

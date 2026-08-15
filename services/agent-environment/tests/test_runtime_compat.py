@@ -385,3 +385,17 @@ def test_wikipedia_uses_user_agent_fixed_release():
     args = servers["wikipedia"]["args"]
     assert "wikipedia-mcp==2.0.1" in args
     assert not any("735590286fbe" in arg for arg in args)
+    assert servers["wikipedia"]["env"]["PYTHONPATH"] == (
+        "/agent-environment/src/agent_environment/wikipedia_preload"
+    )
+    preload = (
+        AGENT_ROOT
+        / "src"
+        / "agent_environment"
+        / "wikipedia_preload"
+        / "sitecustomize.py"
+    )
+    compile(preload.read_text(encoding="utf-8"), str(preload), "exec")
+    text = preload.read_text(encoding="utf-8")
+    assert "Session.request" in text
+    assert "SyncHTTPClient._do_get" in text

@@ -34,6 +34,8 @@ COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/
 COPY src/agent_environment/mcp_server_template.json \
      src/agent_environment/mcp_server_template.json
+COPY src/agent_environment/wikipedia_preload/sitecustomize.py \
+     src/agent_environment/wikipedia_preload/sitecustomize.py
 RUN sed -i 's/\r$//' entrypoint.sh \
     && chmod 0755 entrypoint.sh \
     && uv sync --frozen
