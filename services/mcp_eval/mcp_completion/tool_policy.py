@@ -61,6 +61,23 @@ KNOWN_SERVERS = (
     "exa",
 )
 
+# The official dataset still names some services that the official runtime
+# removed. The official harness naturally drops those names when it intersects
+# ENABLED_TOOLS with list-tools. Keep the same behavior during our preflight:
+# ignore only these explicitly retired names, while continuing to reject every
+# other unknown tool as schema drift.
+OFFICIAL_RETIRED_SERVERS = (
+    "airbnb",
+    "rijksmuseum-server",
+    "f1-mcp-server",
+    "anili",
+    "balldontlie",
+    "reddit",
+    "yfmcp",
+    "youtube",
+    "youtube-transcript",
+)
+
 # These servers may execute arbitrary local code or mutate files/database state.
 # They run in a disposable, credential-free container for each agent task.  The
 # container has outbound networking, matching the official tool behavior, while
@@ -171,6 +188,13 @@ def server_for_tool(tool_name: str) -> Optional[str]:
     return None
 
 
+def _is_official_retired_tool(tool_name: str) -> bool:
+    return any(
+        tool_name.startswith(f"{server}_")
+        for server in OFFICIAL_RETIRED_SERVERS
+    )
+
+
 def servers_for_enabled_tools(value: Any) -> list[str]:
     """Return canonical servers from a task's authoritative ENABLED_TOOLS."""
 
@@ -191,6 +215,8 @@ def servers_for_enabled_tools(value: Any) -> list[str]:
         else:
             raise ValueError("ENABLED_TOOLS contains an invalid tool entry")
         server = server_for_tool(tool_name)
+        if server is None and _is_official_retired_tool(tool_name):
+            continue
         if server is None:
             raise ValueError(f"unknown tool in ENABLED_TOOLS: {tool_name}")
         servers.add(server)

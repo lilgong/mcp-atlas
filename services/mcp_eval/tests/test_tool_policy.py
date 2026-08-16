@@ -89,6 +89,12 @@ class ToolPolicyTests(unittest.TestCase):
         )
         self.assertEqual(["context7", "pubmed"], servers)
 
+    def test_official_retired_server_does_not_exclude_task(self):
+        servers = servers_for_enabled_tools(
+            '["rijksmuseum-server_search_artwork", "brave-search_brave_web_search"]'
+        )
+        self.assertEqual(["brave-search"], servers)
+
     def test_enabled_tool_servers_reject_unknown_tool(self):
         with self.assertRaisesRegex(ValueError, "unknown tool"):
             servers_for_enabled_tools('["unknown-server_tool"]')
