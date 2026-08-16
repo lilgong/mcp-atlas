@@ -369,8 +369,8 @@ TwelveData 与未配置集中 relay 的 Wikipedia 调用会自动通过
 只有迁移本地锁目录时才填写；不要指向 NFS。该机制只协调调用时序，不代理请求、
 不改变工具 schema，也不适用于不同宿主机或不同 Unix 用户。
 Wikipedia 的一个工具调用会在内部读取多个页面属性；配置集中 relay 时不锁住整个工具
-调用，而是将 search/summary/article 的每个 HTTP 子请求统一交给 relay 排队并经
-ScraperAPI 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
+调用，而是将 search/summary/article 的每个 HTTP 子请求统一交给 relay 调度并经
+IPWO 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
 `Retry-After`。
 两种路径都不改变工具 schema 或返回结构。
 
@@ -466,8 +466,8 @@ MONGODB_CONNECTION_STRING=
 ### 5.8 PubMed/Wikipedia 集中出口（推荐多机共用一个）
 
 如果部署机器的公网 IP 被 NCBI abuse 系统限制，可以在一台受信任的内网机器上运行
-集中 relay，并通过 ScraperAPI 的标准代理出口访问 NCBI 和 Wikipedia Action API。relay 统一执行限速，任务
-容器只收到 relay URL 和随机 token，不会收到 `SCRAPERAPI` 凭证。
+集中 relay，并通过 IPWO 动态住宅代理访问 NCBI 和 Wikipedia Action API。relay 统一执行限速，任务
+容器只收到 relay URL 和随机 token，不会收到代理凭证。
 
 relay 主机的 `.env` 配置：
 
@@ -476,7 +476,11 @@ PUBMED_RELAY_TOKEN=<足够长的随机token>
 PUBMED_RELAY_BIND=0.0.0.0
 PUBMED_RELAY_PORT=3985
 PUBMED_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
-SCRAPERAPI=<ScraperAPI key>
+IPWO_PROXY_HOST=<IPWO proxy host>
+IPWO_PROXY_PORT=<IPWO proxy port>
+IPWO_PROXY_USERNAME=<IPWO username>
+IPWO_PROXY_PASSWORD=<IPWO password>
+IPWO_PROXY_COUNTRY=US
 ```
 
 启动 relay：
@@ -491,17 +495,18 @@ make run-egress-relay
 PUBMED_RELAY_URL=http://<relay内网IP>:3985
 PUBMED_RELAY_TOKEN=<与relay主机相同的token>
 PUBMED_RELAY_TIMEOUT_SECONDS=90
-SCRAPERAPI=
 ```
 
-不要把 `SCRAPERAPI` 复制到评测机器，也不需要在评测机器启动 relay。data-syn 若同时
+不要把 IPWO 凭证复制到评测机器，也不需要在评测机器启动 relay。data-syn 若同时
 生产，可以连接同一个 relay，但它不是 MCP-Atlas 测评部署的依赖。健康检查：
 
 ```bash
 curl http://<relay内网IP>:3985/health
 ```
 
-默认使用 ScraperAPI 标准出口，不启用按十倍 credits 计费的 premium 模式。请求记录
+relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议使用
+`IPWO_PROXY_COUNTRY=US`；relay 会为每次上游尝试更换动态
+住宅代理的 `sid`。请求记录
 写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
@@ -509,7 +514,7 @@ query 参数或凭证。relay 不应暴露到公网。
 TwelveData 的共享文件门控只协调同一宿主机、同一 Unix 用户的进程；不同机器不会共享
 该锁。如果多台机器共用同一公网出口，应分别降低并发或错峰运行这些服务。
 
-ScraperAPI 返回 401（key 无效）或 403（官方定义为当月 credits 耗尽）后，relay 会
+IPWO 代理返回 407 时，relay 会
 锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed/Wikipedia MCP：
 MCP-Atlas completion 停止整批评测，data-syn P2 取消其他并发任务并退出；已经成功的
 结果保持落盘，充值或换 key 并重启 relay 后可续跑。普通 429 仍按瞬时限流处理。
@@ -1623,7 +1628,7 @@ docker run --rm hello-world
 | `scripts/prepare_task_data_fixture.py` | 生成内容寻址文件 fixture |
 | `scripts/build_task_mongo_fixture.py` | 从 mongodump 构建 task-Mongo fixture 镜像 |
 | `scripts/run_shared_mcp.py` | 启动共享 MCP runtime |
-| `scripts/pubmed_relay_server.py` | PubMed/Wikipedia 的鉴权、限速 ScraperAPI 出口 |
+| `scripts/pubmed_relay_server.py` | PubMed/Wikipedia 的鉴权、限速住宅代理出口 |
 | `services/mcp_eval/mcp_completion_script.py` | 生成模型轨迹 |
 | `services/mcp_eval/mcp_evals_scores.py` | claim coverage 评分 |
 | `services/mcp_eval/atlas_verify_v2.py` | 结合 scored CSV、runtime log 和 usage log 审核 MCP 侧影响 |

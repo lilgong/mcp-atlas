@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, allow-listed NCBI/Wikipedia relay using ScraperAPI egress."""
+"""Authenticated, allow-listed NCBI/Wikipedia residential egress relay."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import base64
 import hmac
 import json
 import os
-import ssl
+import re
+import secrets
 import threading
 import time
 import urllib.error
@@ -25,7 +26,11 @@ ALLOWED_TARGETS = {
     "en.wikipedia.org": ("wikipedia", "/w/api.php"),
 }
 TOKEN = (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
-SCRAPERAPI_KEY = (os.getenv("SCRAPERAPI") or "").strip()
+IPWO_PROXY_HOST = (os.getenv("IPWO_PROXY_HOST") or "").strip()
+IPWO_PROXY_PORT = (os.getenv("IPWO_PROXY_PORT") or "").strip()
+IPWO_PROXY_USERNAME = (os.getenv("IPWO_PROXY_USERNAME") or "").strip()
+IPWO_PROXY_PASSWORD = (os.getenv("IPWO_PROXY_PASSWORD") or "").strip()
+IPWO_PROXY_COUNTRY = (os.getenv("IPWO_PROXY_COUNTRY") or "").strip().upper()
 BIND = (os.getenv("PUBMED_RELAY_BIND") or "127.0.0.1").strip()
 PORT = int(os.getenv("PUBMED_RELAY_PORT") or "3985")
 MIN_INTERVAL = float(os.getenv("PUBMED_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
@@ -34,8 +39,51 @@ MAX_RESPONSE_BYTES = int(os.getenv("PUBMED_RELAY_MAX_RESPONSE_BYTES") or str(64 
 LOG_PATH = Path(os.getenv("PUBMED_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
 
 
-class ScraperAPIAccountError(RuntimeError):
-    """The configured ScraperAPI account cannot serve further requests."""
+class RelayAccountError(RuntimeError):
+    """The configured egress account cannot serve further requests."""
+
+
+class RelayUpstreamError(RuntimeError):
+    """A proxy or target connection failed without an HTTP response."""
+
+
+def _missing_ipwo_config() -> tuple[str, ...]:
+    values = {
+        "IPWO_PROXY_HOST": IPWO_PROXY_HOST,
+        "IPWO_PROXY_PORT": IPWO_PROXY_PORT,
+        "IPWO_PROXY_USERNAME": IPWO_PROXY_USERNAME,
+        "IPWO_PROXY_PASSWORD": IPWO_PROXY_PASSWORD,
+    }
+    return tuple(name for name, value in values.items() if not value)
+
+
+def _validate_ipwo_config() -> None:
+    missing = _missing_ipwo_config()
+    if missing:
+        raise ValueError(
+            "IPWO proxy configuration is incomplete; missing " + ", ".join(missing)
+        )
+
+
+def _ipwo_username_for_request() -> str:
+    username = IPWO_PROXY_USERNAME
+    if IPWO_PROXY_COUNTRY:
+        username = re.sub(
+            r"_zone_[^_]+",
+            f"_zone_{IPWO_PROXY_COUNTRY}",
+            username,
+            count=1,
+        )
+    # IPWO documents sid changes as the way to obtain another dynamic exit.
+    # A fresh sid per upstream attempt avoids pinning the relay to one blocked
+    # residential address while preserving all other account parameters.
+    username = re.sub(
+        r"_sid_[^_]+",
+        f"_sid_{secrets.randbelow(90_000_000) + 10_000_000}",
+        username,
+        count=1,
+    )
+    return username
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -48,65 +96,80 @@ class Controller:
         self.lock = threading.Lock()
         self.last_started = 0.0
         self.blocked_until = 0.0
-        self.blocked_response: tuple[int, dict[str, str], bytes, str] | None = None
         self.account_error: str | None = None
 
     def current_account_error(self) -> str | None:
         with self.lock:
             return self.account_error
 
-    def _wait(self) -> None:
-        now = time.monotonic()
-        delay = max(
-            self.last_started + MIN_INTERVAL - now,
-            self.blocked_until - now,
-            0.0,
-        )
-        if delay:
+    def _wait_for_slot(self) -> None:
+        """Pace request starts without serializing their network wait time."""
+        while True:
+            with self.lock:
+                if self.account_error:
+                    raise RelayAccountError(self.account_error)
+                now = time.monotonic()
+                delay = max(
+                    self.last_started + MIN_INTERVAL - now,
+                    self.blocked_until - now,
+                    0.0,
+                )
+                if delay <= 0:
+                    self.last_started = now
+                    return
             time.sleep(delay)
-        self.last_started = time.monotonic()
+
+    def _set_cooldown(self, seconds: float) -> None:
+        with self.lock:
+            until = time.monotonic() + max(seconds, 0.0)
+            self.blocked_until = max(self.blocked_until, until)
+
+    def _latch_account_error(self, message: str) -> None:
+        with self.lock:
+            if not self.account_error:
+                self.account_error = message
+            error = self.account_error
+        raise RelayAccountError(error)
 
     def fetch(self, url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str, int, float]:
         started = time.monotonic()
-        with self.lock:
-            queued_ms = (time.monotonic() - started) * 1000
-            if self.account_error:
-                raise ScraperAPIAccountError(self.account_error)
-            if time.monotonic() < self.blocked_until and self.blocked_response:
-                return (*self.blocked_response, 0, queued_ms)
-            self.blocked_response = None
-            final: tuple[int, dict[str, str], bytes, str] | None = None
-            for attempt in range(3):
-                self._wait()
+        queued_ms: float | None = None
+        final: tuple[int, dict[str, str], bytes, str] | None = None
+        for attempt in range(3):
+            self._wait_for_slot()
+            if queued_ms is None:
+                queued_ms = (time.monotonic() - started) * 1000
+            try:
                 final = _fetch_once(url, allow_redirects)
-                status, headers, _, _ = final
-                if status in {401, 407}:
-                    self.account_error = (
-                        "SCRAPERAPI_INVALID_KEY: ScraperAPI rejected the relay credential"
-                    )
-                    raise ScraperAPIAccountError(self.account_error)
-                if status == 403:
-                    # ScraperAPI documents 403 as exhausted monthly API credits.
-                    # This relay never sets max_cost, the other documented source
-                    # of a ScraperAPI 403.
-                    self.account_error = (
-                        "SCRAPERAPI_CREDITS_EXHAUSTED: ScraperAPI monthly credits are exhausted"
-                    )
-                    raise ScraperAPIAccountError(self.account_error)
-                if _is_abuse_response(final):
-                    self.blocked_until = time.monotonic() + 300.0
-                    self.blocked_response = final
-                    return (*final, attempt + 1, queued_ms)
-                if status != 429 and status < 500:
-                    return (*final, attempt + 1, queued_ms)
+            except RelayAccountError as exc:
+                self._latch_account_error(str(exc))
+            except RelayUpstreamError:
+                if attempt == 2:
+                    raise
+                self._set_cooldown(5.0 * (2**attempt))
+                continue
+            status, headers, _, _ = final
+            if status == 407:
+                self._latch_account_error(
+                    "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
+                )
+            if _is_abuse_response(final):
                 if attempt < 2:
-                    retry_after = _retry_after(headers)
-                    self.blocked_until = time.monotonic() + max(retry_after, 5.0 * (2**attempt))
-            assert final is not None
-            if final[0] == 429:
-                self.blocked_until = time.monotonic() + max(_retry_after(final[1]), 60.0)
-                self.blocked_response = final
-            return (*final, 3, queued_ms)
+                    # A new sid selects another residential exit, so do not
+                    # poison unrelated requests with one exit's abuse page.
+                    self._set_cooldown(5.0 * (2**attempt))
+                    continue
+                return (*final, attempt + 1, queued_ms)
+            if status != 429 and status < 500:
+                return (*final, attempt + 1, queued_ms)
+            if attempt < 2:
+                retry_after = _retry_after(headers)
+                self._set_cooldown(max(retry_after, 5.0 * (2**attempt)))
+        assert final is not None
+        if final[0] == 429:
+            cooldown = max(_retry_after(final[1]), 60.0)
+            self._set_cooldown(cooldown)
+        return (*final, 3, queued_ms or 0.0)
 
 
 CONTROLLERS = {
@@ -148,19 +211,23 @@ def _validate_url(url: str) -> str:
     return target[0]
 
 
+def _proxy_tunnel_status(exc: Exception) -> int | None:
+    reason = str(getattr(exc, "reason", exc))
+    match = re.search(r"Tunnel connection failed:\s*(\d{3})\b", reason)
+    return int(match.group(1)) if match else None
+
+
 def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str]:
-    # ScraperAPI's proxy endpoint terminates TLS, so its documented proxy mode
-    # requires either trusting their CA or disabling certificate verification.
-    # The proxy credential is confined to this relay and is never passed into a
-    # task container.
+    # Proxy credentials stay in this relay and are never passed into task
+    # containers. IPWO tunnels the target TLS connection normally.
     proxy_url = (
-        "http://scraperapi:"
-        f"{urllib.parse.quote(SCRAPERAPI_KEY, safe='')}"
-        "@proxy-server.scraperapi.com:8001"
+        "http://"
+        f"{urllib.parse.quote(_ipwo_username_for_request(), safe='')}:"
+        f"{urllib.parse.quote(IPWO_PROXY_PASSWORD, safe='')}@"
+        f"{IPWO_PROXY_HOST}:{IPWO_PROXY_PORT}"
     )
     handlers: list[Any] = [
-        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}),
-        urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
     ]
     if not allow_redirects:
         handlers.append(NoRedirect())
@@ -170,6 +237,14 @@ def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], b
         response = opener.open(request, timeout=UPSTREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
         response = exc
+    except Exception as exc:
+        if _proxy_tunnel_status(exc) == 407:
+            raise RelayAccountError(
+                "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
+            ) from None
+        # Proxy exceptions can embed the authenticated proxy URL. Preserve only
+        # the exception type for retry/diagnostics so credentials never leak.
+        raise RelayUpstreamError(type(exc).__name__) from None
     with response:
         body = response.read(MAX_RESPONSE_BYTES + 1)
         if len(body) > MAX_RESPONSE_BYTES:
@@ -191,13 +266,20 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def _json(self, status: int, payload: dict[str, Any]) -> None:
+    def _json(self, status: int, payload: dict[str, Any]) -> bool:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            # The task was cancelled or its timeout expired while the relay was
+            # still working. This is not a relay/upstream failure and there is
+            # no live connection on which a second error response could work.
+            return False
 
     def do_GET(self) -> None:
         if self.path == "/health":
@@ -212,7 +294,11 @@ class Handler(BaseHTTPRequestHandler):
             if account_error:
                 self._json(503, {"status": "blocked", "error": account_error})
             else:
-                self._json(200, {"status": "ok", "min_interval_seconds": MIN_INTERVAL})
+                self._json(200, {
+                    "status": "ok",
+                    "egress_backend": "ipwo",
+                    "min_interval_seconds": MIN_INTERVAL,
+                })
         else:
             self._json(404, {"error": "not found"})
 
@@ -245,7 +331,7 @@ class Handler(BaseHTTPRequestHandler):
             ].fetch(
                 url, bool(payload.get("allow_redirects", False))
             )
-            self._json(200, {
+            delivered = self._json(200, {
                 "status_code": status,
                 "headers": headers,
                 "body_base64": base64.b64encode(body).decode("ascii"),
@@ -258,22 +344,25 @@ class Handler(BaseHTTPRequestHandler):
                 "path": parsed.path,
                 "status": status,
                 "response_bytes": len(body),
+                "egress_backend": "ipwo",
                 "attempts": attempts,
                 "queued_ms": round(queued_ms, 1),
                 "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "client_disconnected": not delivered,
             })
-        except ScraperAPIAccountError as exc:
+        except RelayAccountError as exc:
             parsed = urllib.parse.urlsplit(url)
             _append_log({
                 "client": self.client_address[0],
                 "host": parsed.hostname,
                 "path": parsed.path,
                 "status": 402,
+                "egress_backend": "ipwo",
                 "account_error_code": str(exc).split(":", 1)[0],
                 "duration_ms": round((time.monotonic() - started) * 1000, 1),
             })
             self._json(402, {
-                "code": "scraperapi_account_error",
+                "code": "relay_account_error",
                 "error": str(exc),
             })
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -282,17 +371,34 @@ class Handler(BaseHTTPRequestHandler):
             # URL-opening exceptions can include the authenticated proxy URL.
             # Return only the exception class so credentials never reach logs or
             # MCP trajectories.
+            _append_log({
+                "client": self.client_address[0],
+                "status": 502,
+                "egress_backend": "ipwo",
+                "error_type": type(exc).__name__,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            })
             self._json(502, {"error": f"upstream request failed: {type(exc).__name__}"})
 
 
 def main() -> None:
     if not TOKEN:
         raise SystemExit("PUBMED_RELAY_TOKEN must be set")
-    if not SCRAPERAPI_KEY:
-        raise SystemExit("SCRAPERAPI must be set")
+    try:
+        _validate_ipwo_config()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     server = ThreadingHTTPServer((BIND, PORT), Handler)
-    print(f"NCBI/Wikipedia relay listening on http://{BIND}:{PORT}", flush=True)
-    server.serve_forever()
+    print(
+        f"NCBI/Wikipedia relay (ipwo) listening on http://{BIND}:{PORT}",
+        flush=True,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

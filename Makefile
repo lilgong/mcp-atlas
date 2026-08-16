@@ -20,7 +20,7 @@ run-docker: # run docker container for mcp servers (agent-environment service)
 run-docker-host: # run shared MCP using MCP_SHARED_HOST/MCP_SHARED_PORT from .env
 	uv run --project services/mcp_eval python scripts/run_shared_mcp.py
 
-run-egress-relay: # run the authenticated PubMed/Wikipedia ScraperAPI relay
+run-egress-relay: # run the authenticated PubMed/Wikipedia residential egress relay
 	uv run --env-file .env python scripts/pubmed_relay_server.py
 
 build: # builds agent-environment; only tags :latest (VERSION is for the GHCR push target)

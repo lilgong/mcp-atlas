@@ -67,6 +67,30 @@ def test_context7_monthly_quota_text_is_fatal():
     assert is_fatal_mcp_account_error("context7", result)
 
 
+@pytest.mark.parametrize(
+    ("server", "text"),
+    [
+        (
+            "pubmed",
+            '{"error":"Search failed: IPWO_PROXY_AUTH_FAILED: '
+            'proxy credential rejected"}',
+        ),
+        (
+            "wikipedia",
+            '{"title":"Example","summary":"Error generating summary: '
+            'IPWO_PROXY_AUTH_FAILED: proxy credential rejected"}',
+        ),
+    ],
+)
+def test_ipwo_marker_inside_json_text_is_fatal(server, text):
+    result = {
+        "content": [{"type": "text", "text": text}],
+        "is_error": False,
+    }
+
+    assert is_fatal_mcp_account_error(server, result)
+
+
 def test_git_parser_token_error_cannot_stop_the_run():
     result = {
         "content": [{
@@ -134,13 +158,13 @@ def test_credential_free_servers_cannot_raise_account_failure(server):
         ),
         (
             "pubmed",
-            "SCRAPERAPI_CREDITS_EXHAUSTED: monthly credits are exhausted",
-            "SCRAPERAPI",
+            "IPWO_PROXY_AUTH_FAILED: proxy credential rejected",
+            "IPWO_PROXY_PASSWORD",
         ),
         (
             "wikipedia",
-            "SCRAPERAPI_CREDITS_EXHAUSTED: monthly credits are exhausted",
-            "SCRAPERAPI",
+            "IPWO_PROXY_AUTH_FAILED: proxy credential rejected",
+            "IPWO_PROXY_PASSWORD",
         ),
         ("github", "Bad credentials", "GITHUB_TOKEN"),
     ],
@@ -166,6 +190,17 @@ def test_normal_search_text_is_not_treated_as_account_failure():
         "is_error": False,
     }
     assert not is_fatal_tool_result(result)
+
+
+def test_relay_servers_identify_ipwo_proxy_credentials():
+    assert credential_envs_for_mcp_server("pubmed") == (
+        "IPWO_PROXY_USERNAME",
+        "IPWO_PROXY_PASSWORD",
+    )
+    assert credential_envs_for_mcp_server("wikipedia") == (
+        "IPWO_PROXY_USERNAME",
+        "IPWO_PROXY_PASSWORD",
+    )
 
 
 def test_fatal_account_description_names_source_and_env_without_key_value():

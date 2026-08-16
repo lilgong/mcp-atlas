@@ -178,17 +178,14 @@ def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
 
 
-def test_pubmed_relay_preserves_scraperapi_credit_exhaustion(monkeypatch):
+def test_pubmed_relay_preserves_ipwo_auth_failure(monkeypatch):
     class RelayResponse:
         status_code = 402
 
         def json(self):
             return {
-                "code": "scraperapi_account_error",
-                "error": (
-                    "SCRAPERAPI_CREDITS_EXHAUSTED: "
-                    "ScraperAPI monthly credits are exhausted"
-                ),
+                "code": "relay_account_error",
+                "error": "IPWO_PROXY_AUTH_FAILED: proxy credential rejected",
             }
 
     monkeypatch.setattr(pubmed, "RELAY_TOKEN", "secret")
@@ -196,7 +193,7 @@ def test_pubmed_relay_preserves_scraperapi_credit_exhaustion(monkeypatch):
 
     with pytest.raises(
         pubmed.PubMedUpstreamError,
-        match="SCRAPERAPI_CREDITS_EXHAUSTED",
+        match="IPWO_PROXY_AUTH_FAILED",
     ):
         pubmed._request_via_relay(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",

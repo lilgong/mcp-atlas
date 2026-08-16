@@ -41,8 +41,8 @@ _MCP_CREDENTIAL_ENVS = {
     "national-parks": ("NPS_API_KEY",),
     "notion": ("NOTION_TOKEN",),
     "oxylabs": ("OXYLABS_USERNAME", "OXYLABS_PASSWORD"),
-    "pubmed": ("SCRAPERAPI",),
-    "wikipedia": ("SCRAPERAPI",),
+    "pubmed": ("IPWO_PROXY_USERNAME", "IPWO_PROXY_PASSWORD"),
+    "wikipedia": ("IPWO_PROXY_USERNAME", "IPWO_PROXY_PASSWORD"),
     "slack": ("SLACK_MCP_XOXC_TOKEN", "SLACK_MCP_XOXD_TOKEN"),
     "weather-data": ("WEATHER_API_KEY",),
 }
@@ -83,9 +83,7 @@ _FATAL_ACCOUNT_MARKERS = (
     # Stable marker emitted by this service when the underlying provider text
     # is not safe or useful to expose to the outer batch runner.
     "fatal_account_error",
-    "scraperapi_credits_exhausted",
-    "scraperapi_invalid_key",
-    "scraperapi_account_rejected",
+    "ipwo_proxy_auth_failed",
     # Authentication / credential failures.
     "authenticationerror",
     "invalid token",
@@ -134,6 +132,13 @@ _FATAL_ACCOUNT_MARKERS = (
     "配额已用完",
 )
 
+# Relay-owned markers are unambiguous even when an MCP serializes its failure
+# as a JSON string inside an otherwise successful content block; it does not
+# need to start with ``Error:`` to stop a run that cannot recover.
+_STABLE_TOOL_ACCOUNT_MARKERS = (
+    "ipwo_proxy_auth_failed",
+)
+
 
 def is_fatal_account_error(value: Any) -> bool:
     """Return whether an actual error describes unusable credentials/funds."""
@@ -158,6 +163,12 @@ def is_fatal_tool_result(result: Any) -> bool:
     serialized = json.dumps(payload, ensure_ascii=False)
     if not is_fatal_account_error(serialized):
         return False
+    serialized_folded = serialized.casefold()
+    if any(
+        marker in serialized_folded
+        for marker in _STABLE_TOOL_ACCOUNT_MARKERS
+    ):
+        return True
     if bool(payload.get("isError") or payload.get("is_error")):
         return True
 

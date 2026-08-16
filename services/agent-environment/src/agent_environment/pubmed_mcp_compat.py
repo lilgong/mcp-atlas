@@ -82,13 +82,10 @@ def _request_via_relay(
                 error = str(relay_response.json().get("error") or "")
             except (requests.JSONDecodeError, AttributeError, TypeError, ValueError):
                 error = ""
-            if error.startswith((
-                "SCRAPERAPI_CREDITS_EXHAUSTED:",
-                "SCRAPERAPI_INVALID_KEY:",
-            )):
+            if error.startswith("IPWO_PROXY_AUTH_FAILED:"):
                 raise PubMedUpstreamError(error)
             raise PubMedUpstreamError(
-                "SCRAPERAPI_ACCOUNT_REJECTED: PubMed relay account is unavailable"
+                "IPWO_PROXY_AUTH_FAILED: PubMed relay account is unavailable"
             )
         relay_response.raise_for_status()
         payload = relay_response.json()
