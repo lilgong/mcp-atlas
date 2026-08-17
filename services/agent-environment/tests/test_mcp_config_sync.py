@@ -114,6 +114,9 @@ console.log(JSON.stringify({{
   source: runner.parseSource('exa-mcp-server@3.2.1'),
   url: adapter.rewriteUrl('https://api.exa.ai/search', 'exa'),
   brave: adapter.rewriteUrl('https://api.search.brave.com/res/v1/web/search', 'brave'),
+  lara: adapter.rewriteUrl('https://api.laratranslate.com/v2/languages', 'lara'),
+  laraTokenParts: adapter.laraSessionToken().split('.').length,
+  laraAuthorization: adapter.rewriteHeaders({{'authorization': 'Lara signature'}}, 'lara', 'lara-secret').get('authorization'),
   unrelated: adapter.rewriteUrl('https://example.com/x', 'exa'),
   interceptUnrelated: adapter.isUpstreamRequest('https://example.com/x', 'exa'),
   authorization: headers.get('authorization'),
@@ -130,6 +133,9 @@ console.log(JSON.stringify({{
     }
     assert output["url"] == "https://yibuapi.com/exa/search"
     assert output["brave"] == "https://yibuapi.com/brave/v1/web/search"
+    assert output["lara"] == "https://yibuapi.com/lara/v2/languages"
+    assert output["laraTokenParts"] == 3
+    assert output["laraAuthorization"] == "Bearer lara-secret"
     assert output["unrelated"] == "https://example.com/x"
     assert output["interceptUnrelated"] is False
     assert output["authorization"] == "Bearer secret"

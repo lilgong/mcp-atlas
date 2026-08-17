@@ -37,7 +37,11 @@ _MCP_CREDENTIAL_ENVS = {
         "GOOGLE_CLIENT_SECRET",
         "GOOGLE_REFRESH_TOKEN",
     ),
-    "lara-translate": ("LARA_ACCESS_KEY_ID", "LARA_ACCESS_KEY_SECRET"),
+    "lara-translate": (
+        "LARA_YIBU_API_KEY",
+        "LARA_ACCESS_KEY_ID",
+        "LARA_ACCESS_KEY_SECRET",
+    ),
     "national-parks": ("NPS_API_KEY",),
     "notion": ("NOTION_TOKEN",),
     "oxylabs": ("OXYLABS_USERNAME", "OXYLABS_PASSWORD"),
@@ -45,7 +49,7 @@ _MCP_CREDENTIAL_ENVS = {
     "wikipedia": ("IPWO_PROXY_USERNAME", "IPWO_PROXY_PASSWORD"),
     "slack": ("SLACK_MCP_XOXC_TOKEN", "SLACK_MCP_XOXD_TOKEN"),
     "twelvedata": ("TWELVE_DATA_API_KEY",),
-    "weather-data": ("WEATHER_API_KEY",),
+    "weather-data": ("WEATHER_YIBU_API_KEY", "WEATHER_API_KEY"),
 }
 
 

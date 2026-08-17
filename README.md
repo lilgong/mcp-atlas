@@ -438,13 +438,13 @@ ENABLED_SERVERS=calculator,wikipedia,github
 | GitHub | `GITHUB_TOKEN` |
 | Google Maps | `GOOGLE_MAPS_API_KEY` |
 | Google Workspace | `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_REFRESH_TOKEN` |
-| Lara Translate | `LARA_ACCESS_KEY_ID`、`LARA_ACCESS_KEY_SECRET` |
+| Lara Translate | Yibu：`LARA_YIBU_API_KEY`；官方：`LARA_ACCESS_KEY_ID`、`LARA_ACCESS_KEY_SECRET` |
 | National Parks | `NPS_API_KEY` |
 | Notion | `NOTION_TOKEN` |
 | Oxylabs | `OXYLABS_USERNAME`、`OXYLABS_PASSWORD`、`OXYLABS_SCRAPER_URL` |
 | Slack | `SLACK_MCP_XOXC_TOKEN`、`SLACK_MCP_XOXD_TOKEN` |
 | Twelve Data | `TWELVE_DATA_API_KEY` |
-| Weather Data | `WEATHER_API_KEY` |
+| Weather Data | 官方直连：`WEATHER_API_KEY`；Yibu 传输：`WEATHER_YIBU_API_KEY` |
 
 如果配置 Oxylabs，`OXYLABS_SCRAPER_URL` 不能留空。留空会使 Oxylabs server
 启动后不注册工具。
@@ -711,8 +711,8 @@ make build-atlas-runtime \
 这条命令就是完整的 runtime 镜像构建入口：它会把
 `services/agent-environment/package.json` 和 `package-lock.json` 放入隔离的
 Docker build context，并在镜像内执行 `npm ci`。不要在宿主机另外全局安装 Node MCP，
-也不要再维护 `/mnt/node_modules` 副本。Brave、Exa 的 Yibu 鉴权和 usage log 由仓库内
-transport preload 加载，Oxylabs 仍使用版本绑定的 Python transport patch；这些适配都
+也不要再维护 `/mnt/node_modules` 副本。Brave、Exa、Lara 的 Yibu 鉴权和 usage log 由仓库内
+transport preload 加载，WeatherAPI 使用只改 HTTP 的 Python preload，Oxylabs 仍使用版本绑定的 Python transport patch；这些适配都
 不会改 MCP 工具 schema。
 
 构建需要访问系统软件源、npm 和 Python package index。构建只生成/更新镜像 tag，

@@ -178,13 +178,18 @@
       }
     },
     "lara-translate": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "@translated/lara-mcp@0.0.11"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@translated/lara-mcp@0.0.11",
+        "dist/index.js"
       ],
       "env": {
         "LARA_ACCESS_KEY_ID": "${LARA_ACCESS_KEY_ID}",
-        "LARA_ACCESS_KEY_SECRET": "${LARA_ACCESS_KEY_SECRET}"
+        "LARA_ACCESS_KEY_SECRET": "${LARA_ACCESS_KEY_SECRET}",
+        "LARA_YIBU_API_KEY": "${LARA_YIBU_API_KEY}",
+        "MCP_YIBU_SERVICE": "lara",
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
       }
     },
     "mcp-code-executor": {
@@ -342,7 +347,8 @@
         "weather-mcp-server"
       ],
       "env": {
-        "WEATHER_API_KEY": "${WEATHER_API_KEY}"
+        "WEATHER_API_KEY": "${WEATHER_API_KEY}",
+        "PYTHONPATH": "/agent-environment/src/agent_environment/weatherapi_preload"
       }
     },
     "whois": {

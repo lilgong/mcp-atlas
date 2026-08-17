@@ -30,6 +30,21 @@ def test_normal_rate_limit_does_not_stop_the_run():
     assert not is_fatal_account_error(body)
 
 
+def test_lara_account_failure_names_yibu_and_official_credentials():
+    assert credential_envs_for_mcp_server("lara-translate") == (
+        "LARA_YIBU_API_KEY",
+        "LARA_ACCESS_KEY_ID",
+        "LARA_ACCESS_KEY_SECRET",
+    )
+
+
+def test_weather_account_failure_names_yibu_and_official_credentials():
+    assert credential_envs_for_mcp_server("weather-data") == (
+        "WEATHER_YIBU_API_KEY",
+        "WEATHER_API_KEY",
+    )
+
+
 def test_mcp_tool_billing_error_stops_the_run():
     body = "MCP tool failed: insufficient balance"
     assert is_fatal_account_error(body)

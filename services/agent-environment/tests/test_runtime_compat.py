@@ -439,6 +439,33 @@ def test_git_backed_python_servers_pin_commits():
         assert all(character in "0123456789abcdef" for character in revision)
 
 
+def test_weather_data_keeps_official_tools_and_uses_optional_yibu_transport():
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+    weather = servers["weather-data"]
+    assert weather["args"][-1] == "weather-mcp-server"
+    assert weather["env"]["PYTHONPATH"] == (
+        "/agent-environment/src/agent_environment/weatherapi_preload"
+    )
+    preload = (
+        AGENT_ROOT
+        / "src"
+        / "agent_environment"
+        / "weatherapi_preload"
+        / "sitecustomize.py"
+    )
+    compile(preload.read_text(encoding="utf-8"), str(preload), "exec")
+    text = preload.read_text(encoding="utf-8")
+    assert "httpx.AsyncClient.get" in text
+    assert 'params.pop("key", None)' in text
+
+
 def test_wikipedia_uses_user_agent_fixed_release():
     servers = json.loads(
         (

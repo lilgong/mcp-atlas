@@ -115,6 +115,25 @@ if "mcpServers" in config:
                         var_names = re.findall(r"\$\{([^}]+)\}", arg)
                         required_vars.update(var_names)
 
+            if name == "lara-translate":
+                yibu_key = os.getenv("LARA_YIBU_API_KEY", "").strip()
+                official_keys = (
+                    os.getenv("LARA_ACCESS_KEY_ID", "").strip()
+                    and os.getenv("LARA_ACCESS_KEY_SECRET", "").strip()
+                )
+                if yibu_key or official_keys:
+                    enabled_set.add(name)
+                    api_key_enabled.append(name)
+                    continue
+
+            if name == "weather-data":
+                yibu_key = os.getenv("WEATHER_YIBU_API_KEY", "").strip()
+                official_key = os.getenv("WEATHER_API_KEY", "").strip()
+                if yibu_key or official_key:
+                    enabled_set.add(name)
+                    api_key_enabled.append(name)
+                    continue
+
             # Check if all required variables are set
             if required_vars:
                 all_keys_present = True
