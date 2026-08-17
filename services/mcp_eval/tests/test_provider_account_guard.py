@@ -166,6 +166,11 @@ def test_credential_free_servers_cannot_raise_account_failure(server):
             "IPWO_PROXY_AUTH_FAILED: proxy credential rejected",
             "IPWO_PROXY_PASSWORD",
         ),
+        (
+            "twelvedata",
+            "TWELVEDATA_DAILY_CREDITS_EXHAUSTED: daily limit reached",
+            "TWELVE_DATA_API_KEY",
+        ),
         ("github", "Bad credentials", "GITHUB_TOKEN"),
     ],
 )
@@ -201,6 +206,18 @@ def test_relay_servers_identify_ipwo_proxy_credentials():
         "IPWO_PROXY_USERNAME",
         "IPWO_PROXY_PASSWORD",
     )
+
+
+def test_twelvedata_minute_rate_limit_does_not_stop_the_run():
+    result = {
+        "content": [{
+            "type": "text",
+            "text": "Error: 429 Too Many Requests: current minute limit",
+        }],
+        "is_error": True,
+    }
+
+    assert not is_fatal_mcp_account_error("twelvedata", result)
 
 
 def test_fatal_account_description_names_source_and_env_without_key_value():

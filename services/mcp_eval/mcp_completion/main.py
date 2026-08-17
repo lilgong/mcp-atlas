@@ -113,6 +113,63 @@ app = FastAPI(
 )
 
 
+async def _collect_agent_outputs(
+    body: RunAgentAPIRequestBody,
+) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    async for agent_output in handle_run_mcp_eval(body):
+        results.append(
+            {
+                "type": agent_output.type,
+                "data": agent_output.data,
+            }
+        )
+    return results
+
+
+async def _wait_for_disconnect(request: Request) -> None:
+    while not await request.is_disconnected():
+        await asyncio.sleep(0.25)
+
+
+async def _collect_until_disconnect(
+    body: RunAgentAPIRequestBody,
+    request: Request,
+) -> List[Dict[str, Any]]:
+    """Cancel this request's eval when its HTTP client stops waiting."""
+    evaluation = asyncio.create_task(_collect_agent_outputs(body))
+    disconnect = asyncio.create_task(_wait_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {evaluation, disconnect}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if evaluation in done:
+            return await evaluation
+
+        logger.warning(
+            "Client disconnected; cancelling evaluation for task_id=%s",
+            body.task_id or "generated",
+        )
+        write_runtime_event(
+            "service",
+            "evaluation_cancelled_after_client_disconnect",
+            task_id=body.task_id or "generated",
+        )
+        evaluation.cancel()
+        with suppress(asyncio.CancelledError):
+            await evaluation
+        raise HTTPException(status_code=499, detail="Client disconnected")
+    finally:
+        if not evaluation.done():
+            evaluation.cancel()
+        with suppress(asyncio.CancelledError):
+            await evaluation
+        if not disconnect.done():
+            disconnect.cancel()
+        with suppress(asyncio.CancelledError):
+            await disconnect
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log requests with their actual response status codes."""
@@ -151,6 +208,7 @@ async def health():
 @app.post("/v2/mcp_eval/run_agent")
 async def run_agent(
     body: RunAgentAPIRequestBody,
+    request: Request,
     authorization: Optional[str] = Header(None),
 ):
     """
@@ -163,16 +221,10 @@ async def run_agent(
     )
 
     try:
-        # Process agent outputs and return results
-        results = []
-        async for agent_output in handle_run_mcp_eval(body):
-            result = {
-                "type": agent_output.type,
-                "data": agent_output.data,
-            }
-            results.append(result)
+        return await _collect_until_disconnect(body, request)
 
-        return results
+    except HTTPException:
+        raise
 
     except FatalAccountError as error:
         logger.critical(

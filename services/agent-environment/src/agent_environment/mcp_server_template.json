@@ -309,11 +309,18 @@
       }
     },
     "twelvedata": {
-      "command": "uvx",
+      "command": "uv",
       "args": [
+        "run",
+        "--python",
+        "3.13",
+        "--no-project",
         "--with",
         "mcp==1.28.1",
+        "--with",
         "mcp-server-twelve-data==0.2.5",
+        "python",
+        "/agent-environment/src/agent_environment/twelvedata_mcp_compat.py",
         "-k",
         "${TWELVE_DATA_API_KEY}"
       ]

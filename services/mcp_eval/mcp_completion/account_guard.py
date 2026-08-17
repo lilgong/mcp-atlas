@@ -44,6 +44,7 @@ _MCP_CREDENTIAL_ENVS = {
     "pubmed": ("IPWO_PROXY_USERNAME", "IPWO_PROXY_PASSWORD"),
     "wikipedia": ("IPWO_PROXY_USERNAME", "IPWO_PROXY_PASSWORD"),
     "slack": ("SLACK_MCP_XOXC_TOKEN", "SLACK_MCP_XOXD_TOKEN"),
+    "twelvedata": ("TWELVE_DATA_API_KEY",),
     "weather-data": ("WEATHER_API_KEY",),
 }
 
@@ -84,6 +85,7 @@ _FATAL_ACCOUNT_MARKERS = (
     # is not safe or useful to expose to the outer batch runner.
     "fatal_account_error",
     "ipwo_proxy_auth_failed",
+    "twelvedata_daily_credits_exhausted",
     # Authentication / credential failures.
     "authenticationerror",
     "invalid token",
@@ -137,6 +139,7 @@ _FATAL_ACCOUNT_MARKERS = (
 # need to start with ``Error:`` to stop a run that cannot recover.
 _STABLE_TOOL_ACCOUNT_MARKERS = (
     "ipwo_proxy_auth_failed",
+    "twelvedata_daily_credits_exhausted",
 )
 
 

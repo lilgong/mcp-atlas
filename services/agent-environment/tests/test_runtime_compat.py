@@ -3,10 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from agent_environment.oxylabs_mcp_compat import normalize_scraper_payload
 from agent_environment import pubmed_mcp_compat as pubmed
+from agent_environment.twelvedata_mcp_compat import (
+    daily_credit_error,
+    safe_upstream_error,
+)
 from agent_environment.mcp_router import DEFAULT_TOOL_CALL_TIMEOUT_SECONDS
 
 
@@ -96,6 +101,70 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
         "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
         "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
     }
+    assert shared["twelvedata"]["args"] == [
+        "run",
+        "--python",
+        "3.13",
+        "--no-project",
+        "--with",
+        "mcp==1.28.1",
+        "--with",
+        "mcp-server-twelve-data==0.2.5",
+        "python",
+        "/agent-environment/src/agent_environment/twelvedata_mcp_compat.py",
+        "-k",
+        "${TWELVE_DATA_API_KEY}",
+    ]
+
+
+def test_twelvedata_daily_credit_error_is_fatal_but_minute_limit_is_not():
+    class Response:
+        status_code = 429
+
+        def __init__(self, message):
+            self.message = message
+
+        def json(self):
+            return {"code": 429, "message": self.message, "status": "error"}
+
+    assert daily_credit_error(Response(
+        "You have run out of API credits for the day. Wait for the next day."
+    )).startswith("TWELVEDATA_DAILY_CREDITS_EXHAUSTED:")
+    assert daily_credit_error(Response(
+        "You have run out of API credits for the current minute."
+    )) is None
+
+
+def test_twelvedata_http_error_does_not_expose_apikey():
+    response = httpx.Response(
+        400,
+        request=httpx.Request(
+            "GET",
+            "https://api.twelvedata.com/time_series?apikey=secret-value",
+        ),
+        json={"message": "Invalid symbol"},
+    )
+
+    error = safe_upstream_error(response)
+    assert error == "TwelveData upstream HTTP 400: Invalid symbol"
+    assert "secret-value" not in error
+
+
+def test_twelvedata_minute_limit_remains_a_rate_limit_error():
+    response = httpx.Response(
+        429,
+        request=httpx.Request(
+            "GET",
+            "https://api.twelvedata.com/time_series?apikey=secret-value",
+        ),
+        json={
+            "message": "You have run out of API credits for the current minute."
+        },
+    )
+
+    error = safe_upstream_error(response)
+    assert error.startswith("TwelveData upstream HTTP 429:")
+    assert "TWELVEDATA_DAILY_CREDITS_EXHAUSTED" not in error
 
 
 def test_pubmed_search_batches_all_metadata_into_one_efetch(monkeypatch):
