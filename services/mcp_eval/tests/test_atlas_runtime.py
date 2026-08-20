@@ -17,6 +17,7 @@ from mcp_completion.task_data import (  # noqa: E402
     TaskDataError,
     content_digest,
     load_fixture,
+    make_task_copy_writable,
     prepare_task_workspace,
     write_git_safe_directory_config,
 )
@@ -32,6 +33,27 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
     FIXTURE_V2_VECTOR_SHA256 = (
         "857ee1508a17cca148ee326d72141926e9b2abfe0797a3f70a5a9d4efce51182"
     )
+
+    def test_task_copy_allows_only_workspace_internal_symlinks(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root = base / "data"
+            target = root / "repos/project/packages/project/README.MD"
+            target.parent.mkdir(parents=True)
+            target.write_text("readme\n", encoding="utf-8")
+            link = root / "repos/project/README.MD"
+            link.symlink_to("packages/project/README.MD")
+
+            make_task_copy_writable(root)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual("readme\n", link.read_text(encoding="utf-8"))
+
+            outside = base / "outside.txt"
+            outside.write_text("secret\n", encoding="utf-8")
+            escaping = root / "repos/project/escaping"
+            escaping.symlink_to(outside)
+            with self.assertRaisesRegex(TaskDataError, "escapes workspace"):
+                make_task_copy_writable(root)
 
     @staticmethod
     def _write_fixture_v2_vector(root: Path) -> None:

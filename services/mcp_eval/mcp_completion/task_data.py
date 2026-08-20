@@ -177,9 +177,23 @@ def content_digest(root: str | Path) -> str:
 
 def make_task_copy_writable(root: Path) -> None:
     """Grant writes only on the disposable copy mounted into a task container."""
+    resolved_root = root.resolve()
     for path in [root, *root.rglob("*")]:
         if path.is_symlink():
-            raise TaskDataError(f"task data symlinks are not allowed: {path}")
+            try:
+                target = path.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise TaskDataError(
+                    f"task data symlink cannot be resolved safely: {path}"
+                ) from exc
+            if not target.is_relative_to(resolved_root):
+                raise TaskDataError(
+                    f"task data symlink escapes workspace: {path} -> {target}"
+                )
+            # Pinned Git repositories may contain relative symlinks.  Leave
+            # the link itself untouched and chmod its in-workspace target when
+            # that target is visited independently.
+            continue
         if not path.exists():
             continue
         mode = path.stat().st_mode
