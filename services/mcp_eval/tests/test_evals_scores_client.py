@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import mcp_evals_scores
+from litellm.types.utils import ModelResponse
 from mcp_evals_scores import (
     AsyncLiteLLMClient,
     CoverageEvaluator,
@@ -29,6 +30,43 @@ def _fake_response(content='{"coverage": "fulfilled"}'):
     )
 
 
+class _AsyncStream:
+    def __init__(self, chunks, *, on_open=None, on_close=None, delay=0.0):
+        self.chunks = chunks
+        self.on_open = on_open
+        self.on_close = on_close
+        self.delay = delay
+
+    def __aiter__(self):
+        async def iterate():
+            if self.on_open:
+                self.on_open()
+            try:
+                for item in self.chunks:
+                    if self.delay:
+                        await asyncio.sleep(self.delay)
+                    yield item
+            finally:
+                if self.on_close:
+                    self.on_close()
+
+        return iterate()
+
+
+def _stream_chunk(content, finish_reason=None):
+    return ModelResponse(
+        model="judge-test",
+        stream=True,
+        choices=[
+            {
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": finish_reason,
+            }
+        ],
+    )
+
+
 class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_and_single_retry_layer_are_passed_through(self):
         captured = {}
@@ -42,7 +80,11 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(
             mcp_evals_scores.litellm, "acompletion", fake_acompletion
-        ), patch.object(mcp_evals_scores, "TOKEN_LOG_PATH", self._log_path()):
+        ), patch.object(
+            mcp_evals_scores, "TOKEN_LOG_PATH", self._log_path()
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"LLM_STREAMING_ENABLED": "true"}
+        ):
             schema = get_single_claim_evaluation_schema()
             await client.generate_structured_content("prompt", schema)
 
@@ -50,6 +92,8 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["timeout"], mcp_evals_scores.EVAL_REQUEST_TIMEOUT)
         # The SDK's own retries would multiply with the tenacity decorator.
         self.assertEqual(captured["max_retries"], 0)
+        self.assertIs(captured["stream"], True)
+        self.assertEqual(captured["stream_options"], {"include_usage": True})
         self.assertEqual(captured["response_format"]["type"], "json_schema")
         structured = captured["response_format"]["json_schema"]
         self.assertEqual(structured["name"], "single_claim_evaluation")
@@ -85,6 +129,67 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.source_kind, "evaluator_model")
         self.assertEqual(raised.exception.source_name, "openai/gpt-5.4")
         self.assertEqual(raised.exception.credential_envs, ("LLM_API_KEY",))
+
+    async def test_streamed_strict_json_is_parsed_only_after_completion(self):
+        async def fake_acompletion(**kwargs):
+            return _AsyncStream(
+                [
+                    _stream_chunk('{"claim_text":"claim",'),
+                    _stream_chunk(
+                        '"coverage_outcome":"fulfilled",'
+                        '"justification":"covered",'
+                        '"confidence_level":1.0}',
+                        finish_reason="stop",
+                    ),
+                ]
+            )
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(
+                evaluator_model="openai/gpt-5.4",
+                semaphore_limit=1,
+                request_delay=0.0,
+            )
+        )
+        with patch.object(
+            mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ), patch.object(
+            mcp_evals_scores, "TOKEN_LOG_PATH", self._log_path()
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"LLM_STREAMING_ENABLED": "true"}
+        ):
+            result = await client.generate_structured_content(
+                "prompt", get_single_claim_evaluation_schema()
+            )
+
+        self.assertEqual(result["coverage_outcome"], "fulfilled")
+        self.assertEqual(result["confidence_level"], 1.0)
+
+    async def test_non_streaming_judge_omits_stream_parameters(self):
+        captured = {}
+
+        async def fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return _fake_response('{"ok":true}')
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(
+                evaluator_model="openai/test",
+                semaphore_limit=1,
+                request_delay=0.0,
+            )
+        )
+        with patch.object(
+            mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ), patch.object(
+            mcp_evals_scores, "TOKEN_LOG_PATH", self._log_path()
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"LLM_STREAMING_ENABLED": "false"}
+        ):
+            await client.generate_structured_content("prompt", {})
+
+        self.assertNotIn("stream", captured)
+        self.assertNotIn("stream_options", captured)
 
 
 class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
@@ -149,6 +254,52 @@ class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
                 )(client, "prompt", {})
 
         self.assertEqual(client.semaphore._value, 1, "slot was not released")
+
+    async def test_concurrency_slot_is_held_until_stream_is_consumed(self):
+        import os
+        import tempfile
+
+        active = 0
+        max_active = 0
+
+        def opened():
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+
+        def closed():
+            nonlocal active
+            active -= 1
+
+        async def fake_acompletion(**kwargs):
+            return _AsyncStream(
+                [_stream_chunk('{"ok":true}', finish_reason="stop")],
+                on_open=opened,
+                on_close=closed,
+                delay=0.03,
+            )
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(
+                evaluator_model="openai/test",
+                semaphore_limit=1,
+                request_delay=0.0,
+            )
+        )
+        with patch.object(
+            mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ), patch.object(
+            mcp_evals_scores,
+            "TOKEN_LOG_PATH",
+            os.path.join(tempfile.mkdtemp(), "token_log.jsonl"),
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"LLM_STREAMING_ENABLED": "true"}
+        ):
+            await asyncio.gather(
+                *(client.generate_structured_content("prompt", {}) for _ in range(3))
+            )
+
+        self.assertEqual(max_active, 1)
 
 
 class CoverageEvaluatorOutputTests(unittest.IsolatedAsyncioTestCase):

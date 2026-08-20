@@ -46,6 +46,7 @@ from mcp_completion.tool_policy import (
     shared_routable_servers,
 )
 from mcp_completion.response_validation import is_completely_empty_agent_response
+from mcp_completion.streaming import llm_streaming_enabled
 from mcp_completion.account_guard import (
     FatalAccountError,
     describe_fatal_account_error,
@@ -1103,6 +1104,7 @@ async def main():
     logging.info(f"  concurrency        = {args.concurrency}")
     logging.info(f"  filter_by_servers  = {not args.no_filter}")
     logging.info(f"  extra_body         = {extra_body}")
+    logging.info(f"  llm_streaming      = {llm_streaming_enabled()}")
     logging.info(
         "  retry_thinking_contract_violations = %s",
         args.retry_thinking_contract_violations,

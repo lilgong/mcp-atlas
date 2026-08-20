@@ -270,6 +270,13 @@ MCP_COMPLETION_MODEL=pangu/<checkpoint-name>
 如果 `PANGU_API_KEY` 或 `PANGU_API_URL` 留空，代码分别回退到 `LLM_API_KEY`
 和 `LLM_BASE_URL`。
 
+设置 `LLM_STREAMING_ENABLED=true` 后，completion 请求使用流式传输，但会先完整重建一轮 assistant 的
+`reasoning_content`、`content` 和全部 tool-call arguments，再执行 MCP 工具；不会把
+半截参数写入轨迹或提前调用工具。`DEFAULT_TIMEOUT`/`PANGU_TIMEOUT` 因此表示等待
+下一块流式数据的空闲超时，持续有数据到达的长思考不会仅因总时长超过该值失败。
+该开关默认为 `false`；关闭时不会发送 `stream` 或 `stream_options`，行为与原非流式
+实现一致。completion 和判官共用此开关，便于用同一套配置做完整 A/B。
+
 ### 5.2 裁判模型
 
 ```dotenv
@@ -281,6 +288,11 @@ EVAL_LLM_BASE_URL=<evaluator-base-url>
 `EVAL_LLM_API_KEY` 留空时，评分脚本会回退到 `LLM_API_KEY`。
 `EVAL_LLM_BASE_URL` 留空时，LiteLLM 使用对应 provider 的默认地址；它不会读取
 `LLM_BASE_URL`。
+
+开关启用时，判官请求同样使用流式传输，并在完整聚合 strict JSON schema 响应后才解析和计分。
+`EVAL_REQUEST_TIMEOUT`（默认 120 秒）由本仓库控制，表示相邻流式数据块的最大
+空闲时间，并非一步 API 写死的整条请求时限。流中断或缺少 finish reason 会被视为
+基础设施失败并从头重试，不会拿半截 JSON 生成分数。
 
 ### 5.3 端口
 

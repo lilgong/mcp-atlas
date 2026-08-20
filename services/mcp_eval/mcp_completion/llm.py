@@ -18,6 +18,7 @@ from .config import config
 from .pangu_completion import generate_pangu_async
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error
+from .streaming import collect_litellm_response, llm_streaming_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -329,14 +330,31 @@ async def create_completion(
                     call_id=call_id,
                 )
             else:
-                response = await litellm.acompletion(
+                use_streaming = llm_streaming_enabled()
+                provider_response = await litellm.acompletion(
                     model=proxy_model,
                     messages=litellm_messages,
                     tools=litellm_tools,
                     api_key=config.LLM_API_KEY,
                     api_base=config.LLM_BASE_URL,
                     timeout=config.DEFAULT_TIMEOUT,
+                    **(
+                        {
+                            "stream": True,
+                            "stream_options": {"include_usage": True},
+                        }
+                        if use_streaming
+                        else {}
+                    ),
                     **({"extra_body": extra_body} if extra_body else {}),
+                )
+                response = (
+                    await collect_litellm_response(
+                        provider_response,
+                        messages=litellm_messages,
+                    )
+                    if use_streaming
+                    else provider_response
                 )
         except Exception as error:
             logger.error(f"LiteLLM completion failed: {error}")
