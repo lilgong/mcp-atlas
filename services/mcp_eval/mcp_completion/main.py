@@ -166,8 +166,14 @@ async def _collect_until_disconnect(
             await evaluation
         if not disconnect.done():
             disconnect.cancel()
-        with suppress(asyncio.CancelledError):
-            await disconnect
+        # Starlette's request.is_disconnected() may be blocked in the ASGI
+        # receive callable and not acknowledge task cancellation until the
+        # response scope closes.  Waiting for that watcher here deadlocks the
+        # successful response path: the response cannot close until this
+        # handler returns.  Give ordinary asyncio waiters one scheduling turn
+        # to observe cancellation, but never make a completed evaluation wait
+        # for the request watcher.
+        await asyncio.sleep(0)
 
 
 @app.middleware("http")

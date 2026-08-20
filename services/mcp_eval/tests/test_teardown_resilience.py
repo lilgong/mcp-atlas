@@ -155,6 +155,37 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["data"]["content"], "done")
         self.assertTrue(watcher_cancelled.is_set())
 
+    async def test_completed_evaluation_does_not_wait_for_stubborn_watcher(self):
+        watcher_release = asyncio.Event()
+
+        class ConnectedRequest:
+            async def is_disconnected(self):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Mirrors an ASGI receive callable which only finishes
+                    # after the response scope closes.
+                    await watcher_release.wait()
+                return True
+
+        async def fake_outputs(_body):
+            return [{"type": "message", "data": {"content": "done"}}]
+
+        try:
+            with patch.object(
+                completion_main, "_collect_agent_outputs", side_effect=fake_outputs
+            ):
+                result = await asyncio.wait_for(
+                    completion_main._collect_until_disconnect(
+                        SimpleNamespace(task_id="task-ok"), ConnectedRequest()
+                    ),
+                    timeout=1,
+                )
+            self.assertEqual(result[0]["data"]["content"], "done")
+        finally:
+            watcher_release.set()
+            await asyncio.sleep(0)
+
     async def test_disconnect_cancels_evaluation_and_waits_for_cleanup(self):
         evaluation_started = asyncio.Event()
         cleanup_finished = asyncio.Event()
