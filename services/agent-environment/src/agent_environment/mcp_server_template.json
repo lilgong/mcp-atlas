@@ -348,6 +348,8 @@
       ],
       "env": {
         "WEATHER_API_KEY": "${WEATHER_API_KEY}",
+        "WEATHER_YIBU_API_KEY": "${WEATHER_YIBU_API_KEY}",
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
         "PYTHONPATH": "/agent-environment/src/agent_environment/weatherapi_preload"
       }
     },

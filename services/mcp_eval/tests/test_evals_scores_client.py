@@ -183,6 +183,183 @@ class CoverageEvaluatorOutputTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "judge unavailable"):
             await evaluator.evaluate_single_claim("claim", "response")
 
+    async def test_terminal_completion_failure_scores_zero_without_judge(self):
+        class UnexpectedClient:
+            async def generate_structured_content(self, *args, **kwargs):
+                raise AssertionError("terminal failures must not call the judge")
+
+        evaluator = CoverageEvaluator(
+            client=UnexpectedClient(),
+            config=EvaluatorConfig(
+                evaluator_model="openai/gpt-5.4", semaphore_limit=1
+            ),
+        )
+
+        result = await evaluator.evaluate(
+            ["claim one", "claim two"],
+            "ERROR [task_timeout]: task timed out twice",
+            task_id="failed-task",
+        )
+
+        self.assertEqual(0.0, result["coverage_score"])
+        self.assertEqual(2, result["total_claims"])
+        self.assertEqual([0.0, 0.0], [x["score"] for x in result["per_claim"]])
+
+    def test_terminal_failure_counts_are_grouped_by_kind(self):
+        frame = mcp_evals_scores.pd.DataFrame(
+            [
+                {"script_model_response": "ERROR [task_timeout]: first"},
+                {"script_model_response": "ERROR [task_timeout]: second"},
+                {"script_model_response": "ERROR [http_500]: upstream"},
+                {"script_model_response": "normal answer"},
+            ]
+        )
+
+        self.assertEqual(
+            {"task_timeout": 2, "http_500": 1},
+            dict(mcp_evals_scores.terminal_failure_counts(frame)),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumeScoringTests(unittest.TestCase):
+    """A rerun after one more completion lands must only pay for that completion."""
+
+    def _previous(self, rows):
+        import pandas as pd
+
+        return pd.DataFrame(rows)
+
+    def _write(self, rows):
+        import tempfile, os, pandas as pd
+
+        handle, path = tempfile.mkstemp(suffix=".csv")
+        os.close(handle)
+        pd.DataFrame(rows).to_csv(path, index=False)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def _scored_row(self, task, response, score=0.5):
+        row = {
+            "TASK": task,
+            "GTFA_CLAIMS": '["c"]',
+            "script_model_response": response,
+            "coverage_score": score,
+            "fully_covered_claims": 1,
+            "partially_covered_claims": 0,
+            "total_claims": 1,
+            "coverage_details_json": "{}",
+            "evaluation_confidence": 0.9,
+        }
+        row[mcp_evals_scores.SCORING_FINGERPRINT_COLUMN] = (
+            mcp_evals_scores.scored_input_fingerprint(row, "judge-model")
+        )
+        row[mcp_evals_scores.SCORING_MODEL_COLUMN] = "judge-model"
+        row[mcp_evals_scores.SCORING_POLICY_COLUMN] = (
+            mcp_evals_scores.SCORING_POLICY_VERSION
+        )
+        return row
+
+    def _input_row(self, task, response):
+        return {
+            "TASK": task,
+            "GTFA_CLAIMS": '["c"]',
+            "script_model_response": response,
+        }
+
+    def _reusable(self, previous_rows, input_rows):
+        import pandas as pd
+        import logging
+
+        path = self._write(previous_rows)
+        return mcp_evals_scores.load_reusable_scores(
+            path,
+            pd.DataFrame(input_rows),
+            logging.getLogger("t"),
+            "judge-model",
+        )
+
+    def test_unchanged_task_is_reused(self):
+        reusable = self._reusable(
+            [self._scored_row("t1", "answer")], [self._input_row("t1", "answer")]
+        )
+        self.assertEqual(list(reusable), [0])
+        self.assertEqual(reusable[0]["coverage_score"], 0.5)
+
+    def test_rerun_completion_is_not_given_the_stale_score(self):
+        reusable = self._reusable(
+            [self._scored_row("t1", "old answer")],
+            [self._input_row("t1", "new answer")],
+        )
+        self.assertEqual(reusable, {}, "a changed response must be rescored")
+
+    def test_changed_claims_are_not_given_the_stale_score(self):
+        previous = self._scored_row("t1", "answer")
+        row = self._input_row("t1", "answer")
+        row["GTFA_CLAIMS"] = '["different claim"]'
+        self.assertEqual(self._reusable([previous], [row]), {})
+
+    def test_previously_unscored_task_is_retried(self):
+        previous = self._scored_row("t1", "answer", score=float("nan"))
+        self.assertEqual(
+            self._reusable([previous], [self._input_row("t1", "answer")]),
+            {},
+            "an unscored row is a judge failure, not a result",
+        )
+
+    def test_new_task_is_scored(self):
+        reusable = self._reusable(
+            [self._scored_row("t1", "answer")],
+            [self._input_row("t1", "answer"), self._input_row("t2", "answer")],
+        )
+        self.assertEqual(list(reusable), [0])
+
+    def test_file_without_result_columns_is_ignored(self):
+        self.assertEqual(
+            self._reusable(
+                [{"TASK": "t1", "GTFA_CLAIMS": '["c"]'}],
+                [self._input_row("t1", "answer")],
+            ),
+            {},
+        )
+
+    def test_old_file_without_scoring_identity_is_not_reused(self):
+        previous = self._scored_row("t1", "answer")
+        previous.pop(mcp_evals_scores.SCORING_FINGERPRINT_COLUMN)
+        self.assertEqual(
+            self._reusable([previous], [self._input_row("t1", "answer")]),
+            {},
+        )
+
+    def test_changed_evaluator_model_is_not_reused(self):
+        import pandas as pd
+        import logging
+
+        previous = self._scored_row("t1", "answer")
+        path = self._write([previous])
+        reusable = mcp_evals_scores.load_reusable_scores(
+            path,
+            pd.DataFrame([self._input_row("t1", "answer")]),
+            logging.getLogger("t"),
+            "different-judge-model",
+        )
+        self.assertEqual(reusable, {})
+
+    def test_fingerprint_reads_the_column_the_judge_reads(self):
+        import pandas as pd
+
+        row = pd.Series(
+            {
+                "GTFA_CLAIMS": '["c"]',
+                "script_model_response": "picked",
+                "response": "ignored",
+            }
+        )
+        self.assertEqual(mcp_evals_scores.response_for_scoring(row), "picked")
+        fallback = pd.Series(
+            {"GTFA_CLAIMS": '["c"]', "script_model_response": None, "response": "used"}
+        )
+        self.assertEqual(mcp_evals_scores.response_for_scoring(fallback), "used")

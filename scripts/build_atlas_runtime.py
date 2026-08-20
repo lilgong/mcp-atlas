@@ -31,9 +31,11 @@ SOURCE_FILES = (
     "src/agent_environment/osm_mcp_compat.py",
     "src/agent_environment/oxylabs_mcp_compat.py",
     "src/agent_environment/pubmed_mcp_compat.py",
+    "src/agent_environment/twelvedata_mcp_compat.py",
     "src/agent_environment/run_node_mcp.cjs",
     "src/agent_environment/yibu_fetch_preload.cjs",
     "src/agent_environment/wikipedia_preload/sitecustomize.py",
+    "src/agent_environment/weatherapi_preload/sitecustomize.py",
     "src/agent_environment/mcp_server_template.json",
 )
 
@@ -69,16 +71,37 @@ def stage_build_context(context: Path) -> None:
         encoding="utf-8",
     )
     template_config = json.loads(template.read_text(encoding="utf-8"))
-    wikipedia_pythonpath = template_config["mcpServers"]["wikipedia"]["env"][
-        "PYTHONPATH"
-    ]
+    # Every in-image path the template names must actually be staged. A
+    # server-specific check only guards the one server someone remembered to
+    # add, so a template that starts routing through a new shim or preload
+    # silently ships an image where that server cannot start. Checking the
+    # template itself keeps SOURCE_FILES honest without another manual list.
     image_prefix = "/agent-environment/"
-    if not wikipedia_pythonpath.startswith(image_prefix):
-        raise RuntimeError("Wikipedia preload must be inside the runtime image")
-    staged_preload = context / wikipedia_pythonpath.removeprefix(image_prefix)
-    if not (staged_preload / "sitecustomize.py").is_file():
+    unstaged: list[str] = []
+    for name, server in template_config["mcpServers"].items():
+        referenced: list[tuple[str, bool]] = []
+        for arg in server.get("args") or []:
+            if isinstance(arg, str) and arg.startswith(image_prefix):
+                referenced.append((arg, False))
+        env = server.get("env")
+        env_items = env if isinstance(env, list) else [env or {}]
+        for entry in env_items:
+            pythonpath = (entry or {}).get("PYTHONPATH")
+            if isinstance(pythonpath, str) and pythonpath.startswith(image_prefix):
+                referenced.append((pythonpath, True))
+        for path, is_preload_dir in referenced:
+            staged = context / path.removeprefix(image_prefix)
+            present = (
+                (staged / "sitecustomize.py").is_file()
+                if is_preload_dir
+                else staged.is_file()
+            )
+            if not present:
+                unstaged.append(f"{name}: {path}")
+    if unstaged:
         raise RuntimeError(
-            f"Wikipedia preload is not staged: {staged_preload}"
+            "template references paths that SOURCE_FILES does not stage: "
+            + ", ".join(sorted(unstaged))
         )
 
     patches = SOURCE / "vendor/yibu-patched" / "oxylabs_mcp"

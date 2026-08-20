@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -453,6 +454,12 @@ def test_weather_data_keeps_official_tools_and_uses_optional_yibu_transport():
     assert weather["env"]["PYTHONPATH"] == (
         "/agent-environment/src/agent_environment/weatherapi_preload"
     )
+    # The preload reads these two out of its own process environment, and the
+    # subprocess only receives what this block declares.  Without the Yibu key
+    # ``_install`` returns early, the official server never gets a key, and
+    # every tool call fails with "Weather API key not set."
+    assert weather["env"]["WEATHER_YIBU_API_KEY"] == "${WEATHER_YIBU_API_KEY}"
+    assert weather["env"]["MCP_USAGE_LOG_DIR"] == "${MCP_USAGE_LOG_DIR}"
     preload = (
         AGENT_ROOT
         / "src"
@@ -464,6 +471,44 @@ def test_weather_data_keeps_official_tools_and_uses_optional_yibu_transport():
     text = preload.read_text(encoding="utf-8")
     assert "httpx.AsyncClient.get" in text
     assert 'params.pop("key", None)' in text
+
+
+def test_special_cased_servers_receive_every_env_var_their_gating_reads():
+    """A server enabled on the strength of an env var must also be given it.
+
+    ``mcp_client`` special-cases a few servers so an optional Yibu key can
+    stand in for the official credentials.  That decision reads the key from
+    the service's own environment, but the MCP subprocess inherits nothing
+    beyond PATH/HOME/..., so it only sees what the template's ``env`` block
+    declares.  When the two disagree the server is started and then fails
+    every single call -- weather-data returned "Weather API key not set." for
+    a whole 500-task run because its Yibu key was gated on but never passed.
+    """
+    client_source = (
+        AGENT_ROOT / "src" / "agent_environment" / "mcp_client.py"
+    ).read_text(encoding="utf-8")
+    servers = json.loads(
+        (
+            AGENT_ROOT
+            / "src"
+            / "agent_environment"
+            / "mcp_server_template.json"
+        ).read_text(encoding="utf-8")
+    )["mcpServers"]
+
+    special_cases = re.findall(
+        r'if name == "([^"]+)":(.*?)continue', client_source, re.DOTALL
+    )
+    assert special_cases, "expected mcp_client to special-case at least one server"
+
+    for name, block in special_cases:
+        gating_vars = set(re.findall(r'os\.getenv\(\s*"([A-Z0-9_]+)"', block))
+        declared = set(servers[name].get("env") or {})
+        missing = sorted(gating_vars - declared)
+        assert not missing, (
+            f"{name}: enablement is gated on {missing}, but the template never "
+            "passes them to the subprocess, so the server starts unusable"
+        )
 
 
 def test_wikipedia_uses_user_agent_fixed_release():

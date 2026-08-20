@@ -83,6 +83,15 @@ REQUEST_TIMEOUT = float(os.getenv("TASK_REQUEST_TIMEOUT", "3600"))
 MAX_TIMEOUT_ATTEMPTS = int(os.getenv("MAX_TIMEOUT_ATTEMPTS", "2"))
 
 
+class TerminalTaskError(RuntimeError):
+    """A task exhausted its retries and must be persisted as a failed result."""
+
+    def __init__(self, message: str, *, kind: str, attempts: int):
+        super().__init__(message)
+        self.kind = kind
+        self.attempts = attempts
+
+
 def get_retry_delay(attempt: int) -> float:
     """Calculate exponential backoff delay with jitter. Base: 5s, 10s, 20s..."""
     delay = 10 * attempt
@@ -311,6 +320,8 @@ class AsyncMCPTrajectoryGenerator:
         url = f"{SERVER_URL}/v2/mcp_eval/run_agent"
 
         timeouts = 0
+        last_failure_kind = "no_usable_response"
+        last_failure = "the agent did not return a usable response"
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
                 async with self.session.post(
@@ -324,6 +335,10 @@ class AsyncMCPTrajectoryGenerator:
                             messages = json.loads(text)
 
                         if is_completely_empty_agent_response(messages):
+                            last_failure_kind = "model_empty_response"
+                            last_failure = (
+                                "HTTP 200 returned a completely empty agent response"
+                            )
                             logging.warning(
                                 "HTTP 200 returned a completely empty agent "
                                 "response on attempt %d/%d for task %s",
@@ -338,6 +353,8 @@ class AsyncMCPTrajectoryGenerator:
                         error_text = await resp.text()
                         if is_fatal_account_error(error_text):
                             raise fatal_account_error_from_service(error_text)
+                        last_failure_kind = f"http_{resp.status}"
+                        last_failure = error_text[:2000]
                         logging.error(
                             f"HTTP {resp.status} error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for task {taskId}: {error_text}"
                         )
@@ -345,6 +362,12 @@ class AsyncMCPTrajectoryGenerator:
             except FatalAccountError:
                 raise
             except Exception as e:
+                last_failure_kind = (
+                    "task_timeout"
+                    if isinstance(e, asyncio.TimeoutError)
+                    else "request_error"
+                )
+                last_failure = f"{type(e).__name__}: {e or '<no detail>'}"
                 # asyncio.TimeoutError stringifies to "", so name the type too.
                 logging.error(
                     "Error on attempt %d/%d for task %s: %s: %s",
@@ -357,21 +380,25 @@ class AsyncMCPTrajectoryGenerator:
                 if isinstance(e, asyncio.TimeoutError):
                     timeouts += 1
                     if timeouts >= MAX_TIMEOUT_ATTEMPTS:
-                        logging.error(
-                            "Giving up on task %s after %d timeouts at %.0fs; "
-                            "retrying would re-run the same turns",
-                            taskId,
-                            timeouts,
-                            REQUEST_TIMEOUT,
+                        raise TerminalTaskError(
+                            f"task {taskId} timed out {timeouts} times at "
+                            f"{REQUEST_TIMEOUT:.0f}s; retrying would re-run "
+                            "the same turns",
+                            kind="task_timeout",
+                            attempts=attempt + 1,
                         )
-                        return None, attempt + 1
 
             if attempt < MAX_RETRY_ATTEMPTS - 1:
                 delay = get_retry_delay(attempt)
                 logging.info(f"Retrying task {taskId} in {delay:.0f}s...")
                 await asyncio.sleep(delay)
 
-        return None, MAX_RETRY_ATTEMPTS
+        raise TerminalTaskError(
+            f"task {taskId} did not produce a usable agent response after "
+            f"{MAX_RETRY_ATTEMPTS} attempts; last failure: {last_failure}",
+            kind=last_failure_kind,
+            attempts=MAX_RETRY_ATTEMPTS,
+        )
 
     async def write_result_to_csv(self, result_dict: Dict[str, Any], output_file: str):
         """Write a single result to CSV file (thread-safe)"""
@@ -417,6 +444,15 @@ class AsyncMCPTrajectoryGenerator:
                 user_prompt=row_data.get("PROMPT", ""),
                 taskId=task_id,
             )
+            if trajectory_response is None:
+                # Defensive guard for future transports. This is a terminal
+                # task result after the transport has already retried it, not a
+                # reason to silently omit the task from the benchmark.
+                raise TerminalTaskError(
+                    f"task {task_id} returned no agent response",
+                    kind="no_agent_response",
+                    attempts=num_attempts,
+                )
 
             # 2. PROCESS: Evaluate the task
             result = GenerationResult(task_id=task_id)
@@ -517,7 +553,7 @@ class AsyncMCPTrajectoryGenerator:
 
         except FatalAccountError:
             # A run-wide account failure is not a task result. Let the dataset
-            # scheduler cancel its siblings and leave this task resumable.
+            # scheduler cancel its siblings and stop before writing false rows.
             raise
         except Exception as e:
             # End timing for error case
@@ -532,7 +568,11 @@ class AsyncMCPTrajectoryGenerator:
                 row_data.get("ENABLED_TOOLS", "[]")
             )
 
-            # Write error result with ground truth columns
+            failure_kind = getattr(e, "kind", type(e).__name__)
+            num_attempts = max(num_attempts, getattr(e, "attempts", 0))
+
+            # Write a terminal task result. Unlike the old ambiguous None row,
+            # the response and errors retain why this task earns no credit.
             error_result = {
                 # Ground truth columns (from input dataset) - all CAPS
                 "TASK": task_id,
@@ -541,10 +581,10 @@ class AsyncMCPTrajectoryGenerator:
                 "GTFA_CLAIMS": row_data.get("GTFA_CLAIMS", ""),
                 "ENABLED_TOOLS": row_data.get("ENABLED_TOOLS", ""),
                 # Completion result columns (from script execution) - all lowercase
-                "script_model_response": f"ERROR: {str(e)}",
+                "script_model_response": f"ERROR [{failure_kind}]: {str(e)}",
                 "raw_conversation_history": None,
                 "trajectory": None,
-                "errors": [],
+                "errors": [{"type": failure_kind, "message": str(e)}],
                 "trajectory_time": trajectory_time,
                 "num_retry": num_attempts,  # Use actual retry count even in error case
             }
@@ -651,6 +691,20 @@ class AsyncMCPTrajectoryGenerator:
         results = [task.result() for task in async_tasks]
         end_time = time.time()
 
+        # A None here means even the terminal error row could not be written
+        # (for example an isolated CSV write failure). Do not report a partial
+        # benchmark as successfully completed.
+        missing_task_ids = [
+            str(row_data.get("TASK", original_idx))
+            for (original_idx, row_data), result in zip(tasks_to_process, results)
+            if not isinstance(result, dict)
+        ]
+        if missing_task_ids:
+            raise RuntimeError(
+                "completion output is incomplete; no row was written for "
+                f"{len(missing_task_ids)} task(s): {missing_task_ids[:20]}"
+            )
+
         # Filter out exceptions and create DataFrame
         valid_results = [r for r in results if isinstance(r, dict)]
 
@@ -749,6 +803,39 @@ def write_exclusion_report(
         f.write("=" * 80 + "\n")
 
     logging.info(f"📄 Wrote exclusion report to {output_file}")
+
+
+def validate_completion_output(df: pd.DataFrame, output_file: str) -> None:
+    """Require exactly one persisted row for every task selected for this run."""
+    expected = df["TASK"].astype(str)
+    if expected.duplicated().any():
+        duplicates = expected[expected.duplicated(keep=False)].unique().tolist()
+        raise RuntimeError(f"input contains duplicate TASK ids: {duplicates[:20]}")
+
+    try:
+        actual_frame = pd.read_csv(output_file, usecols=["TASK"], encoding="utf-8")
+    except Exception as error:
+        raise RuntimeError(f"cannot validate completion output: {error}") from error
+
+    actual = actual_frame["TASK"].astype(str)
+    duplicate_rows = actual[actual.duplicated(keep=False)].unique().tolist()
+    expected_set = set(expected)
+    actual_set = set(actual)
+    missing = sorted(expected_set - actual_set)
+    extra = sorted(actual_set - expected_set)
+    if duplicate_rows or missing or extra or len(actual) != len(expected):
+        raise RuntimeError(
+            "completion output task coverage mismatch: "
+            f"expected={len(expected)} rows, actual={len(actual)} rows, "
+            f"missing={missing[:20]}, extra={extra[:20]}, "
+            f"duplicates={duplicate_rows[:20]}"
+        )
+
+    logging.info(
+        "Completion output coverage verified: %d/%d unique tasks",
+        len(actual),
+        len(expected),
+    )
 
 
 def get_enabled_servers() -> List[str]:
@@ -1126,6 +1213,8 @@ async def main():
         results_df = await generator.evaluate_dataset_async(
             df, output_csv, processed_ids, args.concurrency
         )
+
+    validate_completion_output(df, output_csv)
 
     logging.info(f"\n📊 Results saved to: {output_csv}")
     if len(results_df) > 0:

@@ -18,6 +18,7 @@ import asyncio
 import os
 import json
 import ast
+import hashlib
 import logging
 import argparse
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -134,6 +135,127 @@ import json
 import ast
 import re
 from typing import List, Union
+
+
+RESULT_COLUMNS = (
+    "coverage_score",
+    "fully_covered_claims",
+    "partially_covered_claims",
+    "total_claims",
+    "coverage_details_json",
+    "evaluation_confidence",
+)
+
+# Bump this whenever the judge prompt, output contract, or score aggregation
+# semantics change.  Resume is safe only when both the judged input and this
+# policy identity are unchanged.
+SCORING_POLICY_VERSION = "coverage-judge-v2"
+SCORING_FINGERPRINT_COLUMN = "scoring_fingerprint"
+SCORING_MODEL_COLUMN = "scoring_evaluator_model"
+SCORING_POLICY_COLUMN = "scoring_policy_version"
+
+
+def response_for_scoring(row: Any) -> Any:
+    """Return the completion text the judge is shown.
+
+    Resume decides whether an old score still applies by comparing what that
+    score was computed from, so the fingerprint and the evaluator have to read
+    the same column. Selecting it in one place keeps them from drifting apart.
+    """
+    for column in ("script_model_response", "response"):
+        if column in row and pd.notna(row[column]):
+            return row.get(column, "")
+    return ""
+
+
+def terminal_failure_counts(df: pd.DataFrame) -> Counter:
+    """Count framework terminal-result rows by their explicit failure kind."""
+    counts: Counter = Counter()
+    for _, row in df.iterrows():
+        response = response_for_scoring(row)
+        if not isinstance(response, str) or not response.startswith("ERROR ["):
+            continue
+        closing = response.find("]", len("ERROR ["))
+        kind = response[len("ERROR [") : closing] if closing != -1 else "unknown"
+        counts[kind or "unknown"] += 1
+    return counts
+
+
+def scored_input_fingerprint(row: Any, evaluator_model: str) -> str:
+    """Identify what a coverage score was computed from.
+
+    Only the claims and the response reach the judge, so a row whose completion
+    was re-run produces a different fingerprint and is scored again, while an
+    untouched row can keep its score.
+    """
+    payload = {
+        "policy_version": SCORING_POLICY_VERSION,
+        "evaluator_model": str(evaluator_model),
+        "claims": str(row.get("GTFA_CLAIMS", "")),
+        "response": str(response_for_scoring(row)),
+    }
+    raw = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def load_reusable_scores(
+    scored_path: str,
+    df_input: pd.DataFrame,
+    logger: logging.Logger,
+    evaluator_model: str,
+) -> Dict[Any, Dict[str, Any]]:
+    """Map input row index to the previous result columns worth reusing.
+
+    Rows left unscored last time are judge/infrastructure failures rather than
+    results, so they are retried instead of being carried over.
+    """
+    try:
+        previous = pd.read_csv(scored_path)
+    except Exception as error:
+        logger.warning(f"Could not read '{scored_path}' for resume: {error}")
+        return {}
+
+    absent = [
+        c for c in (
+            "TASK", *RESULT_COLUMNS, SCORING_FINGERPRINT_COLUMN,
+            SCORING_MODEL_COLUMN, SCORING_POLICY_COLUMN,
+        )
+        if c not in previous.columns
+    ]
+    if absent:
+        logger.warning(
+            f"Ignoring '{scored_path}' for resume; missing columns: {absent}"
+        )
+        return {}
+
+    by_task: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    for _, previous_row in previous.iterrows():
+        if pd.isna(previous_row.get("coverage_score")):
+            continue
+        by_task[str(previous_row.get("TASK"))] = (
+            str(previous_row[SCORING_FINGERPRINT_COLUMN]),
+            {column: previous_row[column] for column in RESULT_COLUMNS},
+        )
+
+    reusable: Dict[Any, Dict[str, Any]] = {}
+    restaled = 0
+    for index, row in df_input.iterrows():
+        entry = by_task.get(str(row.get("TASK")))
+        if entry is None:
+            continue
+        fingerprint, result = entry
+        if fingerprint != scored_input_fingerprint(row, evaluator_model):
+            restaled += 1
+            continue
+        reusable[index] = result
+
+    if restaled:
+        logger.info(
+            f"{restaled} tasks changed since the last scoring run; rescoring them"
+        )
+    return reusable
 
 
 def extract_claims(claim_blob: Union[str, List, None]) -> List[str]:
@@ -640,6 +762,30 @@ ONLY output RAW JSON string directly. No any other text. No formatting. No code 
                 "confidence": 1.0,
             }
 
+        # The completion runner emits this prefix only after a task has
+        # exhausted its retries. It is a real terminal model/task outcome, not
+        # text that needs an LLM judge. Score it deterministically as zero and
+        # avoid paying for claim-evaluator calls that cannot change the result.
+        if isinstance(response, str) and response.startswith("ERROR ["):
+            reason = response[:1000]
+            return {
+                "per_claim": [
+                    {
+                        "claim": claim,
+                        "score": 0.0,
+                        "covered": False,
+                        "reason": reason,
+                    }
+                    for claim in claims
+                ],
+                "coverage_score": 0.0,
+                "total_claims": len(claims),
+                "fully_covered_claims": 0,
+                "partially_covered_claims": 0,
+                "explanation": "Completion ended with a terminal task failure",
+                "confidence": 1.0,
+            }
+
         # Define coverage outcome to score mapping
         coverage_to_score = {
             "fulfilled": 1.0,
@@ -710,16 +856,7 @@ async def evaluate_dataframe_async(
     async def safe_evaluate(row_idx, row):
         try:
             claims = extract_claims(row.get("GTFA_CLAIMS", ""))
-            # Determine the correct response column
-            response_col = next(
-                (
-                    col
-                    for col in ["script_model_response", "response"]
-                    if col in row and pd.notna(row[col])
-                ),
-                None,
-            )
-            response = row.get(response_col, "") if response_col else ""
+            response = response_for_scoring(row)
             task_id = str(row.get("TASK", row_idx))
             result = await evaluator.evaluate(claims, response, task_id=task_id)
             return row_idx, result
@@ -947,10 +1084,57 @@ async def main(args):
         # 2. Run scoring evaluation
         client = AsyncLiteLLMClient(config)
         evaluator = CoverageEvaluator(client, config)
-        df_scored = await evaluate_dataframe_async(df_input, evaluator)
+
+        # Judging a claim costs tokens, so a rerun after one more completion
+        # lands should only pay for that completion. Scores whose claims and
+        # response are byte-identical to the previous run are carried over.
+        reusable: Dict[Any, Dict[str, Any]] = {}
+        if args.resume and os.path.exists(scored_path):
+            reusable = load_reusable_scores(
+                scored_path, df_input, logger, args.evaluator_model,
+            )
+
+        pending = df_input.drop(index=list(reusable))
+        if reusable:
+            logger.info(
+                f"Resume: reusing {len(reusable)} scores from '{scored_path}', "
+                f"scoring {len(pending)} tasks"
+            )
+
+        scored_parts = []
+        if reusable:
+            carried = df_input.loc[list(reusable)].copy()
+            for column in RESULT_COLUMNS:
+                carried[column] = [reusable[i][column] for i in carried.index]
+            scored_parts.append(carried)
+        if len(pending):
+            scored_parts.append(await evaluate_dataframe_async(pending, evaluator))
+        else:
+            logger.info("Every task already holds a current score; nothing to rescore")
+
+        # Reindexing on the input restores its row order, so a resumed run and a
+        # full run produce the same file.
+        df_scored = pd.concat(scored_parts).reindex(df_input.index)
+        df_scored[SCORING_FINGERPRINT_COLUMN] = [
+            scored_input_fingerprint(row, args.evaluator_model)
+            for _, row in df_scored.iterrows()
+        ]
+        df_scored[SCORING_MODEL_COLUMN] = args.evaluator_model
+        df_scored[SCORING_POLICY_COLUMN] = SCORING_POLICY_VERSION
         df_scored.to_csv(scored_path, index=False)
 
         logger.info(f"✅ Saved scored file to '{scored_path}'")
+        terminal_counts = terminal_failure_counts(df_scored)
+        if terminal_counts:
+            details = ", ".join(
+                f"{kind}={count}" for kind, count in sorted(terminal_counts.items())
+            )
+            logger.warning(
+                "%d/%d terminal completion failures counted as zero: %s",
+                sum(terminal_counts.values()),
+                len(df_scored),
+                details,
+            )
         valid_scores = df_scored["coverage_score"].dropna()
         unscored_count = len(df_scored) - len(valid_scores)
         if unscored_count:
@@ -959,7 +1143,14 @@ async def main(args):
                 "from statistics. Inspect coverage_details_json for each reason."
             )
         if len(valid_scores) > 0:
-            logger.info(f"Evaluation complete. Average coverage: {valid_scores.mean():.3f}")
+            # A resumed run judges only what changed, so name the scope: the
+            # average covers the whole dataset, not just this run's rescores.
+            logger.info(
+                f"Evaluation complete. Average coverage over all "
+                f"{len(valid_scores)}/{len(df_scored)} scored tasks: "
+                f"{valid_scores.mean():.3f} "
+                f"(rescored {len(pending)} this run, reused {len(reusable)})"
+            )
         else:
             logger.warning("Evaluation produced no valid coverage scores.")
 
@@ -1034,6 +1225,16 @@ def get_parser(input_path=None, model_label=None):
         default=None,
         help="Limit evaluation to first N tasks (useful for testing). If not specified, processes all tasks.",
     )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help=(
+            "Rescore every task, even ones whose claims and response are "
+            "unchanged since the existing scored_<label>.csv was written."
+        ),
+    )
+    parser.set_defaults(resume=True)
     parser.add_argument(
         "--pass-threshold",
         type=float,

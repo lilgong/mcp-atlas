@@ -585,7 +585,9 @@ data_exports/slack_mcp_eval_export.zip
 可以直接导入官方 zip，并把输入显式指向官方 `MCP-Atlas-origin.csv`。
 
 免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息和两条绑定消息日期的
-claims。脚本始终读取官方文件并生成派生文件，不会修改 Git 中的官方 CSV：
+claims。脚本还会把旧版工具名迁移到当前 runtime，并移除 runtime 已经整服下线、
+没有等价后继的工具名。脚本始终读取官方文件并生成派生文件，不会修改 Git 中的官方
+CSV，也不会改题面或官方轨迹：
 
 ```bash
 cd services/mcp_eval
@@ -1219,6 +1221,11 @@ uv run python mcp_completion_script.py
 - MCP URL。
 - system prompt 开关。
 - retry 次数。
+
+每个进入评测的 `TASK` 最终必须在输出 CSV 中恰好出现一次。单题在空响应、超时或
+非致命 HTTP 错误上耗尽重试后，会写入带 `ERROR [<failure-kind>]` 的终态行并按零分
+处理；模型或 MCP 凭证失效仍会立即停止整批，不会伪造结果。脚本结束前还会核对输入
+与输出 task ID，缺行、重复行或混入其他输入的行都会使命令以错误退出。
 
 默认使用路由感知的可用性过滤任务：公开 API 和云端读取依据共享 runtime 的在线
 状态；Git、filesystem、Mongo、Arxiv/PubMed 等依据任务 fixture、Mongo fixture 镜像

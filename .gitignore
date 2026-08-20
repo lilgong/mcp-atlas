@@ -43,3 +43,5 @@ direct_probe_usage_log/
 # Local benchmark derived from the tracked official baseline. The Slack
 # preparation script regenerates this file for the current workspace dates.
 services/mcp_eval/MCP-Atlas.csv
+services/mcp_eval/verify_v2
+services/mcp_eval/MCP-Atlas.csv.bk

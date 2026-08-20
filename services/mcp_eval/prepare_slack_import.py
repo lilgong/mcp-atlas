@@ -17,6 +17,9 @@
 --fix-claims 就是补上官方漏掉的那一步：把绑定 slack 消息日期的 claim 一起平移。
 只改能对上导出消息的日期，git commit 日期、电影上映日期等一律不碰。
 官方 MCP-Atlas-origin.csv 始终只读；派生结果写到 Git 忽略的 MCP-Atlas.csv。
+派生时还会把官方基准使用的旧版工具目录适配到当前 runtime：有明确一对一
+后继工具的做名称迁移，已经整服下线且没有等价后继的工具从 ENABLED_TOOLS
+移除。这与 runtime 的实际可见工具集合一致，不改题面、claims 或官方轨迹。
 
 两个输入都是官方原版、只读、永不修改，每次运行都从它们重新派生：
 
@@ -46,6 +49,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from mcp_completion.tool_policy import OFFICIAL_RETIRED_SERVERS
+
 SCRIPT_DIR = Path(__file__).parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 SRC_ZIP = REPO_ROOT / "data_exports/slack_mcp_eval_export.zip"
@@ -73,8 +78,26 @@ PROSE_DATE = re.compile(
     r"\b(January|February|March|April|May|June|July|August|September|October|November|December)"
     r"\s+(\d{1,2}),\s*(\d{4})\b"
 )
-MONTHS = ["January", "February", "March", "April", "May", "June",
-          "July", "August", "September", "October", "November", "December"]
+MONTHS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
+
+# 只收录经过 schema/语义核对的一对一后继，绝不按字符串相似度猜测。
+# 当前 ClinicalTrials 1.9.3 删除了 list_studies，以 search_studies 取代。
+TOOL_NAME_MIGRATIONS = {
+    "clinicaltrialsgov-mcp-server_clinicaltrials_list_studies": "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies",
+}
 
 
 # ── 读导出 ────────────────────────────────────────────────────────────────────
@@ -83,7 +106,11 @@ def read_export(zip_path: Path) -> dict[str, list]:
     out = {}
     with zipfile.ZipFile(zip_path) as z:
         for name in z.namelist():
-            if name.startswith("__MACOSX/") or name.endswith("/") or ".DS_Store" in name:
+            if (
+                name.startswith("__MACOSX/")
+                or name.endswith("/")
+                or ".DS_Store" in name
+            ):
                 continue
             if not name.endswith(".json"):
                 continue
@@ -97,8 +124,11 @@ def read_export(zip_path: Path) -> dict[str, list]:
 
 def message_files(files: dict) -> dict[str, list]:
     """只取 <频道>/<日期>.json —— 顶层的 channels/users/... 不含消息。"""
-    return {n: v for n, v in files.items()
-            if DATE_FILE.match(Path(n).name) and isinstance(v, list)}
+    return {
+        n: v
+        for n, v in files.items()
+        if DATE_FILE.match(Path(n).name) and isinstance(v, list)
+    }
 
 
 def all_ts(msg_files: dict) -> list[float]:
@@ -177,14 +207,79 @@ def derive_legacy_offset(csv_path: Path, msg_files: dict) -> int | None:
     return None
 
 
-# ── 改 claims ─────────────────────────────────────────────────────────────────
-def fix_claims(origin_path: Path, out_path: Path, msg_files: dict, legacy: int,
-               new_shift_days: int, apply: bool) -> list[tuple[str, str, str]]:
+# ── 派生运行版 CSV ──────────────────────────────────────────────────────────
+def adapt_enabled_tools(
+    rows: list[dict[str, str]],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """让官方 ENABLED_TOOLS 与当前 runtime 的实际工具目录一致。
+
+    返回（改名记录、下线工具移除记录）。未变化的字段保留原始文本；字典形式
+    的工具项也只修改 name，保留参数元数据。
+    """
+    renamed: list[tuple[str, str, str]] = []
+    removed: list[tuple[str, str]] = []
+    retired_prefixes = tuple(f"{name}_" for name in OFFICIAL_RETIRED_SERVERS)
+
+    for row in rows:
+        raw = row.get("ENABLED_TOOLS") or "[]"
+        tools = json.loads(raw)
+        if not isinstance(tools, list):
+            raise ValueError(
+                f"task {row.get('TASK', '?')}: ENABLED_TOOLS must be a JSON list"
+            )
+
+        changed = False
+        adapted: list = []
+        for item in tools:
+            if isinstance(item, str):
+                name = item
+            elif isinstance(item, dict) and isinstance(item.get("name"), str):
+                name = item["name"]
+            else:
+                raise ValueError(
+                    f"task {row.get('TASK', '?')}: invalid ENABLED_TOOLS entry"
+                )
+
+            replacement = TOOL_NAME_MIGRATIONS.get(name)
+            if replacement is not None:
+                if isinstance(item, str):
+                    item = replacement
+                else:
+                    item = {**item, "name": replacement}
+                renamed.append((row.get("TASK", "?"), name, replacement))
+                name = replacement
+                changed = True
+
+            if name.startswith(retired_prefixes):
+                removed.append((row.get("TASK", "?"), name))
+                changed = True
+                continue
+            adapted.append(item)
+
+        if changed:
+            row["ENABLED_TOOLS"] = json.dumps(adapted, ensure_ascii=False)
+
+    return renamed, removed
+
+
+def fix_claims(
+    origin_path: Path,
+    out_path: Path,
+    msg_files: dict,
+    legacy: int,
+    new_shift_days: int,
+    apply: bool,
+) -> tuple[
+    list[tuple[str, str, str]],
+    list[tuple[str, str, str]],
+    list[tuple[str, str]],
+]:
     """从官方原版派生出目标 CSV：把绑定 slack 消息的日期平移 legacy+new_shift_days 天。
 
     始终读 origin_path、写 out_path，不在上一轮的结果上叠加，所以重复运行幂等。
     判据：claim 日期 + legacy 必须正好落在导出的某个消息日期上 —— 这样 git commit
-    日期、电影上映日期等一律不会被误伤。返回 [(task, 原文, 改后)]。"""
+    日期、电影上映日期等一律不会被误伤。同时返回 claim 变更、工具改名和
+    已下线工具移除记录。"""
     msg_dates = {dt.datetime.fromtimestamp(t, UTC).date() for t in all_ts(msg_files)}
     total = legacy + new_shift_days
     changes: list[tuple[str, str, str]] = []
@@ -200,7 +295,9 @@ def fix_claims(origin_path: Path, out_path: Path, msg_files: dict, legacy: int,
             return mt.group(0)
         if not is_slack_date(d):
             return mt.group(0)
-        return mt.group(0).replace(d.isoformat(), (d + dt.timedelta(days=total)).isoformat(), 1)
+        return mt.group(0).replace(
+            d.isoformat(), (d + dt.timedelta(days=total)).isoformat(), 1
+        )
 
     def sub_prose(mt: re.Match) -> str:
         mon, da, y = mt.group(1), int(mt.group(2)), int(mt.group(3))
@@ -217,6 +314,8 @@ def fix_claims(origin_path: Path, out_path: Path, msg_files: dict, legacy: int,
         reader = csv.DictReader(f)
         fields = reader.fieldnames or []
         rows = list(reader)
+
+    tool_renames, retired_removals = adapt_enabled_tools(rows)
 
     for row in rows:
         if "slack_" not in (row.get("TRAJECTORY") or ""):
@@ -237,22 +336,43 @@ def fix_claims(origin_path: Path, out_path: Path, msg_files: dict, legacy: int,
             w.writeheader()
             w.writerows(rows)
         print(f"  {origin_path.name} → {out_path.name}{backup_note}")
-    return changes
+    return changes, tool_renames, retired_removals
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 def main() -> int:
-    ap = argparse.ArgumentParser(description="平移官方 Slack 导出的时间戳到 90 天窗口内")
-    ap.add_argument("--days-ago", type=int, default=3,
-                    help="让最新一条消息落到几天前（默认 3，尽量吃满 90 天窗口）")
-    ap.add_argument("--fix-claims", action="store_true",
-                    help="从官方 CSV 派生 Slack 对齐版并同步修正绑定消息日期的 claim")
-    ap.add_argument("--src", type=Path, default=SRC_ZIP, help="官方原版导出 zip（只读）")
-    ap.add_argument("--out", type=Path, default=OUT_ZIP, help="产出的 zip，用它导入 Slack")
-    ap.add_argument("--origin", type=Path, default=ORIGIN_CSV,
-                    help="官方原版 CSV（只读）；每次都从它派生，保证幂等")
-    ap.add_argument("--csv", type=Path, default=CSV_PATH,
-                    help="产出的 Slack 对齐版 CSV，免费 Slack 评测使用")
+    ap = argparse.ArgumentParser(
+        description="平移官方 Slack 导出的时间戳到 90 天窗口内"
+    )
+    ap.add_argument(
+        "--days-ago",
+        type=int,
+        default=3,
+        help="让最新一条消息落到几天前（默认 3，尽量吃满 90 天窗口）",
+    )
+    ap.add_argument(
+        "--fix-claims",
+        action="store_true",
+        help="从官方 CSV 派生 Slack/当前 runtime 对齐版",
+    )
+    ap.add_argument(
+        "--src", type=Path, default=SRC_ZIP, help="官方原版导出 zip（只读）"
+    )
+    ap.add_argument(
+        "--out", type=Path, default=OUT_ZIP, help="产出的 zip，用它导入 Slack"
+    )
+    ap.add_argument(
+        "--origin",
+        type=Path,
+        default=ORIGIN_CSV,
+        help="官方原版 CSV（只读）；每次都从它派生，保证幂等",
+    )
+    ap.add_argument(
+        "--csv",
+        type=Path,
+        default=CSV_PATH,
+        help="产出的 Slack 对齐版 CSV，免费 Slack 评测使用",
+    )
     a = ap.parse_args()
 
     if not a.src.exists():
@@ -270,33 +390,67 @@ def main() -> int:
     oldest = dt.datetime.fromtimestamp(min(ts), UTC)
     today = dt.datetime.now(UTC)
     target = today - dt.timedelta(days=a.days_ago)
-    shift_days = (target.date() - newest.date()).days   # 整天 → 时分秒/微秒不变
+    shift_days = (target.date() - newest.date()).days  # 整天 → 时分秒/微秒不变
     secs = shift_days * DAY
 
     print("=" * 74)
     print(f"源文件      : {a.src.name}")
     print(f"消息        : {len(ts)} 条，{len(msgs)} 个频道文件")
-    print(f"原始范围    : {oldest.date()} ~ {newest.date()}  (最新距今 {(today - newest).days} 天)")
+    print(
+        f"原始范围    : {oldest.date()} ~ {newest.date()}  (最新距今 {(today - newest).days} 天)"
+    )
     print(f"平移        : +{shift_days} 天")
-    print(f"平移后范围  : {(oldest + dt.timedelta(days=shift_days)).date()} ~ "
-          f"{(newest + dt.timedelta(days=shift_days)).date()}")
+    print(
+        f"平移后范围  : {(oldest + dt.timedelta(days=shift_days)).date()} ~ "
+        f"{(newest + dt.timedelta(days=shift_days)).date()}"
+    )
     expire = (oldest + dt.timedelta(days=shift_days + 90)).date()
-    print(f"⚠️ 免费版 90 天窗口：最早的消息将于 {expire} 再次隐藏，届时需重跑本脚本并重导")
+    print(
+        f"⚠️ 免费版 90 天窗口：最早的消息将于 {expire} 再次隐藏，届时需重跑本脚本并重导"
+    )
     print("=" * 74)
 
     if not a.origin.exists():
-        print(f"\n⚠️ 找不到官方原版 {a.origin.name}，跳过 claim 处理。"
-              f"\n   它是 claim 平移的唯一基准（每次都从它派生，保证幂等）。")
+        print(
+            f"\n⚠️ 找不到官方原版 {a.origin.name}，跳过 claim 处理。"
+            f"\n   它是 claim 平移的唯一基准（每次都从它派生，保证幂等）。"
+        )
         legacy = None
     else:
         legacy = derive_legacy_offset(a.origin, msgs)
 
     if legacy is not None:
-        print(f"\n官方那次平移量: +{legacy} 天（微秒指纹把原版 claim 与导出消息对上得到，非写死）")
+        print(
+            f"\n官方那次平移量: +{legacy} 天（微秒指纹把原版 claim 与导出消息对上得到，非写死）"
+        )
         print(f"claim 总平移 = {legacy} + {shift_days} = {legacy + shift_days} 天")
-        changes = fix_claims(a.origin, a.csv, msgs, legacy, shift_days, apply=a.fix_claims)
+        changes, tool_renames, retired_removals = fix_claims(
+            a.origin, a.csv, msgs, legacy, shift_days, apply=a.fix_claims
+        )
+        action = "已应用" if a.fix_claims else "将应用（加 --fix-claims 才真正写入）"
+        print(
+            f"\n工具目录适配{action}: "
+            f"改名 {len(tool_renames)} 处，移除已下线工具 {len(retired_removals)} 处"
+        )
+        for old, new in sorted({(old, new) for _, old, new in tool_renames}):
+            count = sum(
+                1
+                for _, source, target in tool_renames
+                if source == old and target == new
+            )
+            print(f"  {count:3} × {old} -> {new}")
+        removed_counts: dict[str, int] = {}
+        for _, name in retired_removals:
+            server = name.split("_", 1)[0]
+            removed_counts[server] = removed_counts.get(server, 0) + 1
+        for server, count in sorted(removed_counts.items()):
+            print(f"  {count:3} × 移除已下线 server: {server}")
         if changes:
-            head = "已修正的 claim" if a.fix_claims else "将会修正的 claim（加 --fix-claims 才真正写入）"
+            head = (
+                "已修正的 claim"
+                if a.fix_claims
+                else "将会修正的 claim（加 --fix-claims 才真正写入）"
+            )
             print(f"\n{head}: {len(changes)} 条任务")
             for task, old, new in changes:
                 print(f"\n  [task {task[:24]}]")
@@ -313,7 +467,8 @@ def main() -> int:
     write_zip(shifted, a.out)
     print(f"\n✅ 已生成: {a.out}")
 
-    print(f"""
+    print(
+        f"""
 下一步（导入必须手动做，Slack 没有导入 API）：
   1. 下载到本地:
        scp <server>:{a.out} .
@@ -324,7 +479,8 @@ def main() -> int:
        uv run test_server_v2.py --server slack --base-url http://localhost:1984
   5. 免费 Slack 评测把 .env 设为:
        MCP_COMPLETION_INPUT={a.csv.name}
-""")
+"""
+    )
     return 0
 
 

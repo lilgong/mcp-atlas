@@ -29,6 +29,7 @@ COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/osm_mcp_compat.py \
      src/agent_environment/oxylabs_mcp_compat.py \
      src/agent_environment/pubmed_mcp_compat.py \
+     src/agent_environment/twelvedata_mcp_compat.py \
      src/agent_environment/run_node_mcp.cjs \
      src/agent_environment/yibu_fetch_preload.cjs \
      src/agent_environment/
@@ -36,6 +37,8 @@ COPY src/agent_environment/mcp_server_template.json \
      src/agent_environment/mcp_server_template.json
 COPY src/agent_environment/wikipedia_preload/sitecustomize.py \
      src/agent_environment/wikipedia_preload/sitecustomize.py
+COPY src/agent_environment/weatherapi_preload/sitecustomize.py \
+     src/agent_environment/weatherapi_preload/sitecustomize.py
 RUN sed -i 's/\r$//' entrypoint.sh \
     && chmod 0755 entrypoint.sh \
     && uv sync --frozen
