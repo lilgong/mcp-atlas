@@ -806,7 +806,12 @@ def write_exclusion_report(
 
 
 def validate_completion_output(df: pd.DataFrame, output_file: str) -> None:
-    """Require exactly one persisted row for every task selected for this run."""
+    """Require one persisted row for every task selected for this run.
+
+    The output may also contain rows completed by an earlier, broader run. This
+    is expected when resuming with ``--num-tasks`` or when the currently
+    available MCP servers select a smaller subset of the original dataset.
+    """
     expected = df["TASK"].astype(str)
     if expected.duplicated().any():
         duplicates = expected[expected.duplicated(keep=False)].unique().tolist()
@@ -823,7 +828,7 @@ def validate_completion_output(df: pd.DataFrame, output_file: str) -> None:
     actual_set = set(actual)
     missing = sorted(expected_set - actual_set)
     extra = sorted(actual_set - expected_set)
-    if duplicate_rows or missing or extra or len(actual) != len(expected):
+    if duplicate_rows or missing:
         raise RuntimeError(
             "completion output task coverage mismatch: "
             f"expected={len(expected)} rows, actual={len(actual)} rows, "
@@ -832,9 +837,12 @@ def validate_completion_output(df: pd.DataFrame, output_file: str) -> None:
         )
 
     logging.info(
-        "Completion output coverage verified: %d/%d unique tasks",
-        len(actual),
+        "Completion output coverage verified: %d/%d selected tasks present "
+        "(%d total unique output tasks, %d from earlier/broader runs)",
         len(expected),
+        len(expected),
+        len(actual_set),
+        len(extra),
     )
 
 

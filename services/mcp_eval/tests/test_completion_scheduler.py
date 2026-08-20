@@ -151,7 +151,7 @@ def test_fatal_account_exception_still_cancels_siblings(tmp_path):
     asyncio.run(run())
 
 
-def test_completion_output_requires_exact_task_coverage(tmp_path):
+def test_completion_output_requires_selected_task_coverage(tmp_path):
     expected = pd.DataFrame([{"TASK": "a"}, {"TASK": "b"}])
     output = tmp_path / "results.csv"
     pd.DataFrame([{"TASK": "a"}]).to_csv(output, index=False)
@@ -161,3 +161,22 @@ def test_completion_output_requires_exact_task_coverage(tmp_path):
 
     pd.DataFrame([{"TASK": "a"}, {"TASK": "b"}]).to_csv(output, index=False)
     validate_completion_output(expected, str(output))
+
+    # A resumed subset may share an output file with tasks completed by an
+    # earlier full run. Those extra rows are valid and must remain available
+    # for downstream scoring.
+    pd.DataFrame([{"TASK": "a"}, {"TASK": "b"}, {"TASK": "c"}]).to_csv(
+        output, index=False
+    )
+    validate_completion_output(expected, str(output))
+
+
+def test_completion_output_rejects_duplicate_tasks(tmp_path):
+    expected = pd.DataFrame([{"TASK": "a"}, {"TASK": "b"}])
+    output = tmp_path / "results.csv"
+    pd.DataFrame([{"TASK": "a"}, {"TASK": "b"}, {"TASK": "b"}]).to_csv(
+        output, index=False
+    )
+
+    with pytest.raises(RuntimeError, match=r"duplicates=\['b'\]"):
+        validate_completion_output(expected, str(output))
