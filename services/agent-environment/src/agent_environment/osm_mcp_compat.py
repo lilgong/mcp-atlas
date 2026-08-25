@@ -20,6 +20,15 @@ SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"
 FALLBACK_OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 RETRYABLE_STATUSES = frozenset({406, 429, 500, 502, 503, 504})
 OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45
+ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20
+EXPLORE_ATTEMPT_TIMEOUT_SECONDS = 25
+EXPLORE_REVERSE_TIMEOUT_SECONDS = 10
+UPSTREAM_ROUTE_URL_PREFIX = "http://router.project-osrm.org/route/v1"
+FALLBACK_ROUTE_URL_PREFIXES = {
+    "car": "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+    "bike": "https://routing.openstreetmap.de/routed-bike/route/v1/driving",
+    "foot": "https://routing.openstreetmap.de/routed-foot/route/v1/driving",
+}
 OVERPASS_HEADERS = {
     "User-Agent": "mcp-atlas/1.0 (MCP evaluation; Overpass read-only client)",
     "Accept": "application/json",
@@ -132,6 +141,62 @@ def install_overpass_redirect() -> None:
     aiohttp.ClientSession.post = redirected_post
 
 
+async def resilient_get_route(
+    self: server.OSMClient,
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str = "car",
+) -> dict[str, Any]:
+    """Preserve the upstream route response with a bounded public fallback."""
+    if not self.session:
+        raise RuntimeError("OSM client not connected")
+
+    params = {
+        "overview": "full",
+        "geometries": "geojson",
+        "steps": "true",
+        "annotations": "true",
+    }
+    coordinates = f"{from_lon},{from_lat};{to_lon},{to_lat}"
+    targets = (
+        f"{UPSTREAM_ROUTE_URL_PREFIX}/{mode}/{coordinates}",
+        f"{FALLBACK_ROUTE_URL_PREFIXES.get(mode, FALLBACK_ROUTE_URL_PREFIXES['car'])}/{coordinates}",
+    )
+    last_error: BaseException | None = None
+    for index, url in enumerate(targets):
+        try:
+            async with self.session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=ROUTE_ATTEMPT_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                error = RuntimeError(f"Failed to get route: {response.status}")
+                if response.status not in RETRYABLE_STATUSES or index + 1 == len(targets):
+                    raise error
+                last_error = error
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if index + 1 == len(targets):
+                raise
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("no routing endpoint was attempted")
+
+
+def install_route_fallback() -> None:
+    original = server.OSMClient.get_route
+    if "router.project-osrm.org" not in inspect.getsource(original):
+        raise RuntimeError(
+            "OSM route compatibility no longer matches the pinned server; "
+            "inspect OSMClient.get_route before upgrading"
+        )
+    server.OSMClient.get_route = resilient_get_route
+
+
 async def optimized_analyze_neighborhood(latitude, longitude, ctx, radius=1000):
     """Preserve upstream scoring while collapsing ten serial queries into one."""
     client = ctx.request_context.lifespan_context.osm_client
@@ -208,9 +273,114 @@ def install_neighborhood_optimization() -> None:
     tool.fn = optimized_analyze_neighborhood
 
 
+async def optimized_explore_area(latitude, longitude, ctx, radius=500):
+    """Preserve the upstream result while replacing seven serial queries with one."""
+    client = ctx.request_context.lifespan_context.osm_client
+    categories = (
+        "amenity",
+        "shop",
+        "tourism",
+        "leisure",
+        "natural",
+        "historic",
+        "public_transport",
+    )
+    lat_delta = radius / 111000
+    lon_delta = radius / (111000 * math.cos(math.radians(latitude)))
+    bbox = (
+        longitude - lon_delta,
+        latitude - lat_delta,
+        longitude + lon_delta,
+        latitude + lat_delta,
+    )
+    bbox_text = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
+    filters = [
+        f'{feature_type}["{category}"]({bbox_text});'
+        for category in categories
+        for feature_type in ("node", "way", "relation")
+    ]
+    query = "[out:json][timeout:20];(" + "".join(filters) + ");out body;"
+
+    await ctx.report_progress(0, len(categories))
+    results: dict[str, dict[str, list[dict[str, Any]]]] = {
+        category: {} for category in categories
+    }
+    try:
+        async with client.session.post(
+            UPSTREAM_OVERPASS_URL,
+            data={"data": query},
+            timeout=aiohttp.ClientTimeout(total=EXPLORE_ATTEMPT_TIMEOUT_SECONDS),
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Failed to explore area: {response.status}")
+            features = (await response.json()).get("elements", [])
+        for feature in features:
+            tags = feature.get("tags") or {}
+            coordinates: dict[str, Any] = {}
+            if feature.get("type") == "node":
+                coordinates = {
+                    "latitude": feature.get("lat"),
+                    "longitude": feature.get("lon"),
+                }
+            elif "center" in feature:
+                coordinates = {
+                    "latitude": (feature.get("center") or {}).get("lat"),
+                    "longitude": (feature.get("center") or {}).get("lon"),
+                }
+            item = {
+                "id": feature.get("id"),
+                "name": tags.get("name", "Unnamed"),
+                "coordinates": coordinates,
+                "type": feature.get("type"),
+                "tags": tags,
+            }
+            for category in categories:
+                subcategory = tags.get(category)
+                if subcategory:
+                    results[category].setdefault(subcategory, []).append(item)
+    except Exception as exc:
+        # Upstream already converts each failed category into an empty mapping;
+        # keep that contract without spending the full router deadline seven times.
+        ctx.warning(f"Error fetching area features: {exc}")
+
+    try:
+        async with asyncio.timeout(EXPLORE_REVERSE_TIMEOUT_SECONDS):
+            address_info = await client.reverse_geocode(latitude, longitude)
+    except Exception:
+        address_info = {"error": "Could not retrieve address information"}
+    await ctx.report_progress(len(categories), len(categories))
+    total_features = sum(
+        len(places)
+        for category_data in results.values()
+        for places in category_data.values()
+    )
+    return {
+        "query": {
+            "latitude": latitude,
+            "longitude": longitude,
+            "radius": radius,
+        },
+        "address": address_info,
+        "categories": results,
+        "total_features": total_features,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+def install_explore_area_optimization() -> None:
+    tool = server.mcp._tool_manager._tools.get("explore_area")
+    if tool is None or tool.fn is not server.explore_area:
+        raise RuntimeError(
+            "OSM explore_area registration changed; inspect the pinned server"
+        )
+    tool.fn = optimized_explore_area
+
+
 def main() -> None:
     install_overpass_redirect()
+    install_route_fallback()
     install_neighborhood_optimization()
+    install_explore_area_optimization()
     server.mcp.run()
 
 

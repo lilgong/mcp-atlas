@@ -50,12 +50,12 @@ SERVER_CALL_POLICIES: dict[str, tuple[int, float, float, float]] = {
     # the small scheduling margin.  TwelveData limits vary by API plan, so use
     # light steady pacing and let observed 429s drive the longer delay.
     "arxiv": (1, 3.0, 15.0, 60.0),
-    "brave-search": (1, 1.2, 2.0, 10.0),
+    "brave-search": (1, 1.5, 2.0, 10.0),
     "osm-mcp-server": (1, 1.0, 0.0, 0.0),
     # The rate-safe server emits two paced requests per search (ESearch plus
     # one batched EFetch). Serialize calls across task containers sharing an IP.
     "pubmed": (1, 1.2, 15.0, 60.0),
-    "twelvedata": (1, 1.0, 15.0, 60.0),
+    "twelvedata": (1, 8.0, 15.0, 60.0),
     # Wikimedia recommends serial Action API requests.  The client also
     # retries 429s internally using Retry-After, so keep the lease for the
     # whole tool call to prevent parallel tasks from piling onto that retry.
@@ -125,9 +125,9 @@ _SERVER_CALL_GATES = {
 # Both repositories use the same per-user host lock directory.
 _SHARED_SERVER_CALL_GATES = {
     "arxiv": SharedRateGate("arxiv", 3.0, 15.0, 60.0),
-    "brave-search": SharedRateGate("brave-search", 1.2, 2.0, 10.0),
+    "brave-search": SharedRateGate("brave-search", 1.5, 2.0, 10.0),
     "osm-mcp-server": SharedRateGate("osm-mcp-server", 1.0),
-    "twelvedata": SharedRateGate("twelvedata", 1.0, 15.0, 60.0),
+    "twelvedata": SharedRateGate("twelvedata", 8.0, 15.0, 60.0),
     "wikipedia": SharedRateGate(
         "wikipedia", 6.0, 60.0, 60.0, completion_spacing=6.0,
     ),

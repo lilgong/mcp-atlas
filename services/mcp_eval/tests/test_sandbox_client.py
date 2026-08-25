@@ -21,7 +21,7 @@ from mcp_completion.tool_policy import ToolRoute
 class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
     def test_public_server_policies_match_upstream_limits(self):
         self.assertEqual(
-            (1, 1.2, 2.0, 10.0),
+            (1, 1.5, 2.0, 10.0),
             isolated_client.SERVER_CALL_POLICIES["brave-search"],
         )
         self.assertEqual(
@@ -33,7 +33,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             isolated_client.SERVER_CALL_POLICIES["pubmed"],
         )
         self.assertEqual(
-            (1, 1.0, 15.0, 60.0),
+            (1, 8.0, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["twelvedata"],
         )
         self.assertEqual(

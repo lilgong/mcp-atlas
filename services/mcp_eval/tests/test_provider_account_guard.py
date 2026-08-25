@@ -82,6 +82,23 @@ def test_context7_monthly_quota_text_is_fatal():
     assert is_fatal_mcp_account_error("context7", result)
 
 
+def test_exa_credit_limit_text_is_fatal():
+    result = {
+        "content": [{
+            "type": "text",
+            "text": (
+                "web_search_exa error (402): You have exceeded your credits "
+                "limit. Please top up to keep using Exa."
+            ),
+        }],
+        # exa-mcp-server returns this provider failure in a normal MCP content
+        # envelope, so the text prefix must carry the error shape.
+        "is_error": False,
+    }
+
+    assert is_fatal_mcp_account_error("exa", result)
+
+
 @pytest.mark.parametrize(
     ("server", "text"),
     [

@@ -37,6 +37,7 @@ MIN_INTERVAL = float(os.getenv("PUBMED_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
 UPSTREAM_TIMEOUT = float(os.getenv("PUBMED_RELAY_UPSTREAM_TIMEOUT_SECONDS") or "45")
 MAX_RESPONSE_BYTES = int(os.getenv("PUBMED_RELAY_MAX_RESPONSE_BYTES") or str(64 * 1024 * 1024))
 LOG_PATH = Path(os.getenv("PUBMED_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
+WIKIPEDIA_LANES = 4
 
 
 class RelayAccountError(RuntimeError):
@@ -65,7 +66,11 @@ def _validate_ipwo_config() -> None:
         )
 
 
-def _ipwo_username_for_request() -> str:
+def _new_ipwo_session_id() -> str:
+    return str(secrets.randbelow(90_000_000) + 10_000_000)
+
+
+def _ipwo_username_for_request(session_id: str | None = None) -> str:
     username = IPWO_PROXY_USERNAME
     if IPWO_PROXY_COUNTRY:
         username = re.sub(
@@ -74,15 +79,19 @@ def _ipwo_username_for_request() -> str:
             username,
             count=1,
         )
-    # IPWO documents sid changes as the way to obtain another dynamic exit.
-    # A fresh sid per upstream attempt avoids pinning the relay to one blocked
-    # residential address while preserving all other account parameters.
-    username = re.sub(
-        r"_sid_[^_]+",
-        f"_sid_{secrets.randbelow(90_000_000) + 10_000_000}",
-        username,
-        count=1,
-    )
+    session_id = session_id or _new_ipwo_session_id()
+    if re.search(r"_sid_[^_]+", username):
+        username = re.sub(
+            r"_sid_[^_]+",
+            f"_sid_{session_id}",
+            username,
+            count=1,
+        )
+    else:
+        # A dashboard-generated rotating username has no sid/time suffix.
+        # Pin it for ten minutes so one API workflow keeps a stable identity;
+        # Controller rotates the sid immediately when this exit actually fails.
+        username = f"{username}_sid_{session_id}_time_10"
     return username
 
 
@@ -97,6 +106,8 @@ class Controller:
         self.last_started = 0.0
         self.blocked_until = 0.0
         self.account_error: str | None = None
+        self.session_id = _new_ipwo_session_id()
+        self.rotation_count = 0
 
     def current_account_error(self) -> str | None:
         with self.lock:
@@ -131,6 +142,21 @@ class Controller:
             error = self.account_error
         raise RelayAccountError(error)
 
+    def _current_session_id(self) -> str:
+        with self.lock:
+            return self.session_id
+
+    def _rotate_session(self) -> None:
+        with self.lock:
+            previous = self.session_id
+            while self.session_id == previous:
+                self.session_id = _new_ipwo_session_id()
+            self.rotation_count += 1
+
+    def current_rotation_count(self) -> int:
+        with self.lock:
+            return self.rotation_count
+
     def fetch(self, url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str, int, float]:
         started = time.monotonic()
         queued_ms: float | None = None
@@ -140,12 +166,17 @@ class Controller:
             if queued_ms is None:
                 queued_ms = (time.monotonic() - started) * 1000
             try:
-                final = _fetch_once(url, allow_redirects)
+                final = _fetch_once(
+                    url,
+                    allow_redirects,
+                    session_id=self._current_session_id(),
+                )
             except RelayAccountError as exc:
                 self._latch_account_error(str(exc))
             except RelayUpstreamError:
                 if attempt == 2:
                     raise
+                self._rotate_session()
                 self._set_cooldown(5.0 * (2**attempt))
                 continue
             status, headers, _, _ = final
@@ -155,14 +186,14 @@ class Controller:
                 )
             if _is_abuse_response(final):
                 if attempt < 2:
-                    # A new sid selects another residential exit, so do not
-                    # poison unrelated requests with one exit's abuse page.
+                    self._rotate_session()
                     self._set_cooldown(5.0 * (2**attempt))
                     continue
                 return (*final, attempt + 1, queued_ms)
             if status != 429 and status < 500:
                 return (*final, attempt + 1, queued_ms)
             if attempt < 2:
+                self._rotate_session()
                 retry_after = _retry_after(headers)
                 self._set_cooldown(max(retry_after, 5.0 * (2**attempt)))
         assert final is not None
@@ -172,9 +203,61 @@ class Controller:
         return (*final, 3, queued_ms or 0.0)
 
 
+class ControllerPool:
+    """Round-robin requests across independent sticky residential exits."""
+
+    def __init__(self, size: int) -> None:
+        if size < 1:
+            raise ValueError("controller pool size must be positive")
+        self.controllers = tuple(Controller() for _ in range(size))
+        self.lock = threading.Lock()
+        self.next_index = 0
+        self.account_error: str | None = None
+
+    def current_account_error(self) -> str | None:
+        with self.lock:
+            if self.account_error:
+                return self.account_error
+        return next(
+            (
+                error
+                for controller in self.controllers
+                if (error := controller.current_account_error())
+            ),
+            None,
+        )
+
+    def current_rotation_count(self) -> int:
+        return sum(
+            controller.current_rotation_count()
+            for controller in self.controllers
+        )
+
+    def fetch(
+        self, url: str, allow_redirects: bool,
+    ) -> tuple[int, dict[str, str], bytes, str, int, float]:
+        with self.lock:
+            if self.account_error:
+                raise RelayAccountError(self.account_error)
+            controller = self.controllers[self.next_index]
+            self.next_index = (self.next_index + 1) % len(self.controllers)
+        try:
+            return controller.fetch(url, allow_redirects)
+        except RelayAccountError as exc:
+            with self.lock:
+                if not self.account_error:
+                    self.account_error = str(exc)
+                error = self.account_error
+            raise RelayAccountError(error) from None
+
+
 CONTROLLERS = {
     "ncbi": Controller(),
-    "wikipedia": Controller(),
+    # Wikipedia Action API calls are stateless. Four independently paced,
+    # sticky exits prevent Atlas evaluation and P2 from building a multi-minute
+    # queue behind one residential IP. NCBI remains single-exit because one
+    # PubMed workflow benefits from a stable identity.
+    "wikipedia": ControllerPool(WIKIPEDIA_LANES),
 }
 
 
@@ -217,12 +300,17 @@ def _proxy_tunnel_status(exc: Exception) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str]:
+def _fetch_once(
+    url: str,
+    allow_redirects: bool,
+    *,
+    session_id: str | None = None,
+) -> tuple[int, dict[str, str], bytes, str]:
     # Proxy credentials stay in this relay and are never passed into task
     # containers. IPWO tunnels the target TLS connection normally.
     proxy_url = (
         "http://"
-        f"{urllib.parse.quote(_ipwo_username_for_request(), safe='')}:"
+        f"{urllib.parse.quote(_ipwo_username_for_request(session_id), safe='')}:"
         f"{urllib.parse.quote(IPWO_PROXY_PASSWORD, safe='')}@"
         f"{IPWO_PROXY_HOST}:{IPWO_PROXY_PORT}"
     )
@@ -238,9 +326,20 @@ def _fetch_once(url: str, allow_redirects: bool) -> tuple[int, dict[str, str], b
     except urllib.error.HTTPError as exc:
         response = exc
     except Exception as exc:
-        if _proxy_tunnel_status(exc) == 407:
+        tunnel_status = _proxy_tunnel_status(exc)
+        if tunnel_status in {401, 407}:
             raise RelayAccountError(
                 "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
+            ) from None
+        if tunnel_status == 403:
+            raise RelayAccountError(
+                "IPWO_PROXY_ACCESS_DENIED: IPWO denied the proxy tunnel; "
+                "check subaccount status, traffic allocation, and whitelist"
+            ) from None
+        if tunnel_status == 431:
+            raise RelayAccountError(
+                "IPWO_PROXY_ACCOUNT_LIMIT: IPWO rejected the proxy tunnel; "
+                "check subaccount traffic allocation and session settings"
             ) from None
         # Proxy exceptions can embed the authenticated proxy URL. Preserve only
         # the exception type for retry/diagnostics so credentials never leak.
@@ -298,6 +397,15 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "egress_backend": "ipwo",
                     "min_interval_seconds": MIN_INTERVAL,
+                    "ip_policy": "sticky_pool_until_failure",
+                    "lane_counts": {
+                        "ncbi": 1,
+                        "wikipedia": WIKIPEDIA_LANES,
+                    },
+                    "rotation_counts": {
+                        name: controller.current_rotation_count()
+                        for name, controller in CONTROLLERS.items()
+                    },
                 })
         else:
             self._json(404, {"error": "not found"})

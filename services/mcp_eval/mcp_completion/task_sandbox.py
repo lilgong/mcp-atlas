@@ -866,6 +866,7 @@ class TaskSandbox:
         )
 
     async def _close_resources(self) -> None:
+        await self._restore_task_data_permissions()
         for container in reversed(self.containers):
             try:
                 await self._capture_logs(container)
@@ -918,13 +919,26 @@ class TaskSandbox:
 
         if self.task_workspace:
             workspace = self.task_workspace
-            await asyncio.to_thread(shutil.rmtree, workspace, True)
-            write_runtime_event(
-                "sandbox",
-                "task_data_removed",
-                task_id=self.task_id,
-                workspace=str(workspace),
-            )
+            try:
+                await asyncio.to_thread(shutil.rmtree, workspace)
+            except Exception as exc:
+                write_runtime_event(
+                    "sandbox",
+                    "task_data_removed",
+                    task_id=self.task_id,
+                    workspace=str(workspace),
+                    ok=False,
+                    error=str(exc),
+                )
+            else:
+                write_runtime_event(
+                    "sandbox",
+                    "task_data_removed",
+                    task_id=self.task_id,
+                    workspace=str(workspace),
+                    ok=True,
+                    error=None,
+                )
             self.task_workspace = None
             self.task_data_dir = None
 
@@ -934,6 +948,49 @@ class TaskSandbox:
             task_id=self.task_id,
             duration_seconds=round(time.monotonic() - self._started_at, 3),
         )
+
+    async def _restore_task_data_permissions(self) -> None:
+        """Make the disposable bind mount removable by the host user.
+
+        Local MCP processes run as root and Git/file writes can create
+        root-owned directories below ``/data``.  Restore permission bits before
+        the owning containers are removed so host-side teardown cannot silently
+        leak the per-task workspace.
+        """
+        last_error = ""
+        candidates = [
+            container for container in self.containers
+            if container.kind in {"local", "network"}
+        ]
+        for container in candidates:
+            try:
+                _, stderr, code = await _run(
+                    "docker", "exec", container.name,
+                    "chmod", "-R", "a+rwX", "/data",
+                    timeout=30, check=False,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+            if code == 0:
+                write_runtime_event(
+                    "sandbox",
+                    "task_data_permissions_restored",
+                    task_id=self.task_id,
+                    container=container.name,
+                    ok=True,
+                    error=None,
+                )
+                return
+            last_error = stderr or f"docker exec chmod exited {code}"
+        if candidates:
+            write_runtime_event(
+                "sandbox",
+                "task_data_permissions_restored",
+                task_id=self.task_id,
+                ok=False,
+                error=last_error or "no live task container",
+            )
 
     async def _capture_logs(self, container: ManagedContainer) -> None:
         stdout, stderr, _ = await _run(

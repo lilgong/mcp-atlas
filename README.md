@@ -505,7 +505,7 @@ curl http://<relay内网IP>:3985/health
 ```
 
 relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议使用
-`IPWO_PROXY_COUNTRY=US`；relay 会为每次上游尝试更换动态
+`IPWO_PROXY_COUNTRY=US`；relay 为 NCBI 复用一条粘性出口，为无状态的 Wikipedia Action API 使用四条独立粘性出口 lane。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
 住宅代理的 `sid`。请求记录
 写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。

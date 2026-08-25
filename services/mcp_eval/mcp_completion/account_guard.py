@@ -116,6 +116,7 @@ _FATAL_ACCOUNT_MARKERS = (
     "insufficient credit",
     "not enough credits",
     "out of credits",
+    "exceeded your credits limit",
     "credits exhausted",
     "credit balance exhausted",
     "no credits remaining",
@@ -207,5 +208,6 @@ def is_fatal_tool_result(result: Any) -> bool:
         "monthly quota exceeded",
         "quota exceeded",
         "quota exhausted",
+        "web_search_exa error",
     )
     return any(text.lstrip().casefold().startswith(error_prefixes) for text in texts)

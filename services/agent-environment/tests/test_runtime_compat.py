@@ -321,8 +321,18 @@ def test_osm_has_ordered_fallbacks_inside_a_sufficient_router_budget():
     assert '"User-Agent": "mcp-atlas/1.0' in compat
     assert "{406, 429, 500, 502, 503, 504}" in compat
     assert DEFAULT_TOOL_CALL_TIMEOUT_SECONDS >= 3 * 45
+    assert "ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20" in compat
+    assert "routing.openstreetmap.de/routed-car" in compat
+    assert "routing.openstreetmap.de/routed-bike" in compat
+    assert "routing.openstreetmap.de/routed-foot" in compat
+    assert "install_route_fallback()" in compat
     assert "install_neighborhood_optimization()" in compat
     assert "tool.fn = optimized_analyze_neighborhood" in compat
+    assert "install_explore_area_optimization()" in compat
+    assert "tool.fn = optimized_explore_area" in compat
+    assert 'for feature_type in ("node", "way", "relation")' in compat
+    assert "EXPLORE_ATTEMPT_TIMEOUT_SECONDS = 25" in compat
+    assert 'query = "[out:json][timeout:20];("' in compat
 
 
 def test_context7_uses_authenticated_schema_compatible_release():
