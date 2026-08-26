@@ -116,7 +116,8 @@ class RunAgentAPIRequestBody(BaseModel):
     model: str
     messages: List[Message]
     enabled_tools: List[str] = Field(alias="enabledTools")
-    max_turns: int = Field(20, alias="maxTurns")
+    max_turns: int = Field(256, alias="maxTurns", ge=1)
+    max_tool_calls: int = Field(100, alias="maxToolCalls", ge=1)
     extra_body: Optional[Dict[str, Any]] = Field(None, alias="extraBody")
     retry_thinking_contract_violations: bool = Field(
         False,

@@ -117,6 +117,7 @@ async def run_mcp_eval(
     model: str,
     messages: List[Message],
     max_turns: int,
+    max_tool_calls: int,
     extra_body: Optional[Dict[str, Any]] = None,
     retry_thinking_contract_violations: bool = False,
     task_id: str = "unknown",
@@ -129,8 +130,15 @@ async def run_mcp_eval(
 
     all_messages: List[Message] = list(messages)
     malformed_turns = 0
+    total_tool_calls = 0
+    reached_max_turns = True
+    reached_max_tool_calls = False
 
     for i in range(max_turns):
+        if total_tool_calls >= max_tool_calls:
+            reached_max_turns = False
+            reached_max_tool_calls = True
+            break
         assistant_message = None
         original_content = None
 
@@ -168,6 +176,11 @@ async def run_mcp_eval(
             turn_budget = _turn_result_char_limit()
 
             for call_index, tool_call in enumerate(tool_calls):
+                if total_tool_calls >= max_tool_calls:
+                    reached_max_turns = False
+                    reached_max_tool_calls = True
+                    break
+                total_tool_calls += 1
                 # Recomputed per call so a failed call does not skew the split.
                 calls_left = len(tool_calls) - call_index
                 try:
@@ -229,12 +242,15 @@ async def run_mcp_eval(
                     )
                     all_messages.append(tool_call_message)
                     yield AgentOutput("message", tool_call_message.model_dump())
+            if reached_max_tool_calls:
+                break
         elif result.dropped_tool_calls:
             # Every tool call this turn was malformed (a null function.name).
             # Treat it like a failed tool call: tell the model what went wrong
             # and let it retry, rather than ending the task as if it were done.
             malformed_turns += 1
             if malformed_turns > _MAX_MALFORMED_TURNS:
+                reached_max_turns = False
                 write_runtime_event(
                     "model_calls",
                     "malformed_tool_calls_gave_up",
@@ -256,7 +272,30 @@ async def run_mcp_eval(
             yield AgentOutput("message", retry_message.model_dump())
         else:
             # No more tool calls, agent is done
+            reached_max_turns = False
             break
+
+    if reached_max_tool_calls:
+        data = {
+            "reason": "max_tool_calls_reached",
+            "maxToolCalls": max_tool_calls,
+            "totalToolCalls": total_tool_calls,
+        }
+        logger.warning("Agent loop reached max tool calls: %s", data)
+        write_runtime_event(
+            "model_calls",
+            "max_tool_calls_reached",
+            task_id=task_id,
+            **data,
+        )
+        yield AgentOutput("error", data)
+    elif reached_max_turns:
+        data = {"reason": "max_turns_reached", "maxTurns": max_turns}
+        logger.warning("Agent loop reached max turns: %s", data)
+        write_runtime_event(
+            "model_calls", "max_turns_reached", task_id=task_id, **data
+        )
+        yield AgentOutput("error", data)
 
 
 async def handle_run_mcp_eval(
@@ -284,6 +323,7 @@ async def handle_run_mcp_eval(
             model=body.model,
             messages=body.messages,
             max_turns=body.max_turns,
+            max_tool_calls=body.max_tool_calls,
             extra_body=body.extra_body,
             retry_thinking_contract_violations=body.retry_thinking_contract_violations,
             task_id=task_id,

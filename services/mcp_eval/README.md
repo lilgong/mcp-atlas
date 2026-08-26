@@ -47,6 +47,7 @@ curl -X POST http://localhost:3000/v2/mcp_eval/run_agent \
     "model": "openai/gpt-4o",
     "messages": [{"role": "user", "content": "What is the square root if 95?"}],
     "enabledTools": ["calculator_calculate"],
-    "maxTurns": 20
+    "maxTurns": 256,
+    "maxToolCalls": 100
   }'
 ```

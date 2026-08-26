@@ -312,7 +312,7 @@ class MalformedTurnLoopTests(unittest.IsolatedAsyncioTestCase):
             dropped_tool_calls=dropped,
         )
 
-    async def _drive(self, dropped_per_turn, max_turns=6):
+    async def _drive(self, dropped_per_turn, max_turns=6, max_tool_calls=100):
         from mcp_completion import agent_eval
 
         class FakeClient:
@@ -339,6 +339,7 @@ class MalformedTurnLoopTests(unittest.IsolatedAsyncioTestCase):
                     model="m",
                     messages=[],
                     max_turns=max_turns,
+                    max_tool_calls=max_tool_calls,
                     task_id="syn-loop",
                 )
             ]
@@ -362,6 +363,89 @@ class MalformedTurnLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_clean_turn_with_no_tool_calls_still_ends_immediately(self):
         turns, _ = await self._drive([0])
         self.assertEqual(turns, 1)
+
+
+class AgentLoopLimitTests(unittest.IsolatedAsyncioTestCase):
+    """Turn and tool-call limits must be independent and observable."""
+
+    @staticmethod
+    def _tool_response(tool_call_count):
+        from litellm.types.utils import Message as LiteLLMMessage
+        from mcp_completion.llm import LLMResponse
+        from mcp_completion.schema import AssistantMessage, ToolCall
+
+        tool_calls = [
+            ToolCall(
+                id=f"call-{index}",
+                type="function",
+                function={"name": "test_tool", "arguments": "{}"},
+            )
+            for index in range(tool_call_count)
+        ]
+        return LLMResponse(
+            message=AssistantMessage(
+                role="assistant",
+                content=None,
+                original_message=LiteLLMMessage(
+                    role="assistant", content=None, tool_calls=[]
+                ),
+                tool_calls=tool_calls,
+            ),
+            dropped_tool_calls=0,
+        )
+
+    async def _drive(self, *, max_turns, max_tool_calls, calls_per_turn):
+        from mcp_completion import agent_eval
+        from mcp_completion.schema import CallToolResponse, TextContent
+
+        state = {"model_calls": 0, "tool_calls": 0}
+
+        class FakeClient:
+            async def list_tools(self):
+                return []
+
+            async def call_tool(self, name, args):
+                state["tool_calls"] += 1
+                return CallToolResponse(
+                    content=[TextContent(type="text", text="ok")]
+                )
+
+        async def fake_completion(**kwargs):
+            state["model_calls"] += 1
+            return self._tool_response(calls_per_turn)
+
+        with patch.object(agent_eval, "create_completion", fake_completion), \
+             patch.object(agent_eval, "_transform_tool_calls", lambda t: []), \
+             patch.object(agent_eval, "write_runtime_event"):
+            outputs = [
+                output
+                async for output in agent_eval.run_mcp_eval(
+                    mcp_client=FakeClient(),
+                    model="m",
+                    messages=[],
+                    max_turns=max_turns,
+                    max_tool_calls=max_tool_calls,
+                    task_id="limit-test",
+                )
+            ]
+        return state, outputs
+
+    async def test_turn_limit_emits_explicit_error(self):
+        state, outputs = await self._drive(
+            max_turns=2, max_tool_calls=100, calls_per_turn=1
+        )
+        self.assertEqual(state, {"model_calls": 2, "tool_calls": 2})
+        self.assertEqual(outputs[-1].type, "error")
+        self.assertEqual(outputs[-1].data["reason"], "max_turns_reached")
+
+    async def test_tool_call_limit_stops_mid_turn(self):
+        state, outputs = await self._drive(
+            max_turns=10, max_tool_calls=2, calls_per_turn=3
+        )
+        self.assertEqual(state, {"model_calls": 1, "tool_calls": 2})
+        self.assertEqual(outputs[-1].type, "error")
+        self.assertEqual(outputs[-1].data["reason"], "max_tool_calls_reached")
+        self.assertEqual(outputs[-1].data["totalToolCalls"], 2)
 
 
 if __name__ == "__main__":
