@@ -26,6 +26,7 @@ from mcp_completion.task_data import (  # noqa: E402
 from mcp_completion.task_sandbox import (  # noqa: E402
     TaskSandbox,
     TaskSandboxError,
+    _requires_git_repositories,
     _release_sandbox_names,
     inspect_runtime_image,
 )
@@ -35,6 +36,21 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
     FIXTURE_V2_VECTOR_SHA256 = (
         "857ee1508a17cca148ee326d72141926e9b2abfe0797a3f70a5a9d4efce51182"
     )
+
+    def test_repo_capable_local_servers_materialize_fixture_repositories(self):
+        for server in (
+            "cli-mcp-server",
+            "desktop-commander",
+            "filesystem",
+            "git",
+            "mcp-code-executor",
+            "mcp-server-code-runner",
+        ):
+            with self.subTest(server=server):
+                self.assertTrue(_requires_git_repositories({server}))
+
+        self.assertFalse(_requires_git_repositories({"memory", "mongodb"}))
+        self.assertFalse(_requires_git_repositories(set()))
 
     def test_materialized_git_repo_keeps_canonical_origin_url(self):
         with tempfile.TemporaryDirectory() as raw:

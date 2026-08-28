@@ -427,7 +427,7 @@ def test_python_mcp_servers_pin_their_sdk():
         AGENT_ROOT / "dev_scripts/install_mcp_packages.sh"
     ).read_text(encoding="utf-8")
     assert (
-        "uv tool install arxiv-mcp-server==0.2.11 --with mcp==1.28.1"
+        "uv tool install arxiv-mcp-server==0.6.2 --with mcp==1.28.1"
         in installer
     )
 

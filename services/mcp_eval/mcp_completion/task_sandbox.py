@@ -25,6 +25,7 @@ from .task_data import (
     TaskDataFixture,
     prepare_task_workspace,
 )
+from .tool_policy import TASK_LOCAL_SERVERS
 
 load_dotenv()
 
@@ -35,6 +36,12 @@ class TaskSandboxError(RuntimeError):
 
 DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
 RUNTIME_DATA_CONTRACT = "external-data-v1"
+REPOSITORY_ACCESS_SERVERS = TASK_LOCAL_SERVERS - {"memory", "mongodb"}
+
+
+def _requires_git_repositories(local_servers: Iterable[str]) -> bool:
+    """Match the official runtime's repository visibility for local tools."""
+    return bool(REPOSITORY_ACCESS_SERVERS.intersection(local_servers))
 
 
 def _safe_fragment(value: str, limit: int = 30) -> str:
@@ -328,7 +335,7 @@ class TaskSandbox:
                 prepare_task_workspace,
                 source_dir=self.task_data_source,
                 task_id=_safe_fragment(self.task_id, 24),
-                include_git="git" in self.local_servers,
+                include_git=_requires_git_repositories(self.local_servers),
             )
             self.task_workspace = self.task_data_dir.parent
             write_runtime_event(

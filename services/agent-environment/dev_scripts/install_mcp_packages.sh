@@ -34,7 +34,7 @@ test "$(cat /agent-environment/node_modules/@smithery/mcp-github/.atlas-revision
 
 echo "Installing UVX MCP server packages..."
 # Pre-install all UVX MCP server packages to eliminate download time during runtime
-uv tool install arxiv-mcp-server==0.2.11 --with mcp==1.28.1
+uv tool install arxiv-mcp-server==0.6.2 --with mcp==1.28.1
 uv tool install mcp-server-calculator==0.2.0 --with mcp==1.28.1
 uv tool install cli-mcp-server==0.2.5 --with mcp==1.28.1
 uv tool install 'duckduckgo-mcp-server[browser]==0.6.1' --with mcp==1.28.1
