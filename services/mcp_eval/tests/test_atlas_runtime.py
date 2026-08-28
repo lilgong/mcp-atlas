@@ -1,7 +1,8 @@
+import json
+import subprocess
 import sys
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -18,6 +19,7 @@ from mcp_completion.task_data import (  # noqa: E402
     content_digest,
     load_fixture,
     make_task_copy_writable,
+    materialize_git_repositories,
     prepare_task_workspace,
     write_git_safe_directory_config,
 )
@@ -33,6 +35,69 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
     FIXTURE_V2_VECTOR_SHA256 = (
         "857ee1508a17cca148ee326d72141926e9b2abfe0797a3f70a5a9d4efce51182"
     )
+
+    def test_materialized_git_repo_keeps_canonical_origin_url(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            upstream = root / "upstream"
+            data_dir = root / "data"
+            manifest = data_dir / "repos/git_submodule_info.csv"
+            upstream.mkdir()
+            manifest.parent.mkdir(parents=True)
+            subprocess.run(
+                ["git", "init", "-q", str(upstream)], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(upstream), "config", "user.name", "Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(upstream), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            (upstream / "README.md").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(upstream), "add", "README.md"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(upstream), "commit", "-qm", "fixture"],
+                check=True,
+            )
+            sha = subprocess.run(
+                ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            manifest.write_text(
+                f"{upstream},{sha},/data/repos/example\n", encoding="utf-8"
+            )
+
+            materialize_git_repositories(data_dir, root / "cache")
+            repository = data_dir / "repos/example"
+            origin = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(str(upstream), origin)
+
+            subprocess.run(
+                [
+                    "git", "-C", str(repository), "remote", "set-url",
+                    "origin", str(root / "cache/example.git"),
+                ],
+                check=True,
+            )
+            materialize_git_repositories(data_dir, root / "cache")
+            restored = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(str(upstream), restored)
 
     def test_task_copy_allows_only_workspace_internal_symlinks(self):
         with tempfile.TemporaryDirectory() as raw:

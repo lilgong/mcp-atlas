@@ -268,6 +268,17 @@ def _commit_exists(bare_repo: Path, sha: str) -> bool:
     return result.returncode == 0
 
 
+def _set_origin_url(repository: Path, url: str) -> None:
+    """Expose the fixture's canonical upstream, not the host-side clone cache."""
+    result = subprocess.run(
+        ["git", "-C", str(repository), "remote", "get-url", "origin"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    action = "set-url" if result.returncode == 0 else "add"
+    _run_git("-C", str(repository), "remote", action, "origin", url)
+
+
 def materialize_git_repositories(data_dir: Path, cache_root: Path) -> list[str]:
     manifest = data_dir / "repos/git_submodule_info.csv"
     if not manifest.is_file():
@@ -294,6 +305,7 @@ def materialize_git_repositories(data_dir: Path, cache_root: Path) -> list[str]:
                     raise TaskDataError(
                         f"fixture Git repository lacks {spec.sha}: {destination}"
                     )
+                _set_origin_url(destination, spec.url)
                 created.append(os.fspath(destination))
                 continue
             bare_repo = cache_root / f"{spec.name}.git"
@@ -313,6 +325,7 @@ def materialize_git_repositories(data_dir: Path, cache_root: Path) -> list[str]:
                 str(destination),
             )
             _run_git("-C", str(destination), "checkout", "--detach", spec.sha)
+            _set_origin_url(destination, spec.url)
             created.append(os.fspath(destination))
     return created
 
