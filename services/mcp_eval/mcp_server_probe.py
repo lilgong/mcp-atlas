@@ -311,19 +311,16 @@ async def probe_slack(call) -> str:
     csv = _texts(await call(
         "slack_channels_list", {"channel_types": "public_channel, private_channel"}
     ))
-    chan_id = None
+    channels = {}
     for line in csv.splitlines()[1:]:
         parts = line.split(",")
-        if len(parts) >= 2 and parts[1].strip() == "#movie-suggestions":
-            chan_id = parts[0].strip()
-            break
+        if len(parts) >= 2:
+            channels[parts[1].strip()] = parts[0].strip()
+    chan_id = channels.get("#movie-suggestions")
     if not chan_id:
-        found = [
-            line.split(",")[1]
-            for line in csv.splitlines()[1:]
-            if len(line.split(",")) >= 2
-        ]
-        raise DataMismatch(f"没找到 #movie-suggestions 频道（Slack 导出未导入？）；现有: {found}")
+        raise DataMismatch(
+            f"没找到 #movie-suggestions 频道（Slack 导出未导入？）；现有: {sorted(channels)}"
+        )
     hist = _texts(await call("slack_conversations_history", {"channel_id": chan_id}))
     _need(hist, "Akira", "#movie-suggestions 应含 GT 的历史消息")
     if "Omari West" not in hist and "hiphopluvr1989" not in hist:
@@ -331,7 +328,21 @@ async def probe_slack(call) -> str:
             "消息在，但发送者名字解析不出来（GT 里这条是 hiphopluvr1989 / Omari West）。"
             "导入时应选『请勿导入这些用户，但仅导入其消息』，不要整个排除用户"
         )
-    return f"#movie-suggestions({chan_id}) 历史消息在位，且用户名可解析"
+    gaming_id = channels.get("#gaming-suggestions")
+    if not gaming_id:
+        raise DataMismatch("没找到 #gaming-suggestions 频道，无法验证导入用户的真实姓名")
+    gaming = _texts(await call(
+        "slack_conversations_history", {"channel_id": gaming_id}
+    ))
+    if "steve_shins" not in gaming and "Steve Shins" not in gaming:
+        raise DataMismatch(
+            "#gaming-suggestions 消息在，但 shinsplints7070 的真实姓名 Steve Shins "
+            "没有被 Slack MCP 解析出来"
+        )
+    return (
+        f"#movie-suggestions({chan_id}) 与 #gaming-suggestions({gaming_id}) 历史消息在位，"
+        "且用户名/真实姓名可解析"
+    )
 
 
 def resolve_completion_input(explicit: str | None) -> Path:

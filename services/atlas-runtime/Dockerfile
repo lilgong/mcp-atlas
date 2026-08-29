@@ -1,4 +1,30 @@
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS slack-mcp-builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG SLACK_MCP_COMMIT=21eaf72a3be33e7f3fd44c61a07645bedc376ff4
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/korotovsky/slack-mcp-server.git /src \
+    && git -C /src checkout --detach "$SLACK_MCP_COMMIT"
+COPY vendor/slack-mcp-server/realname-fallback.patch /tmp/slack-realname.patch
+RUN git -C /src apply --check /tmp/slack-realname.patch \
+    && git -C /src apply /tmp/slack-realname.patch \
+    && cd /src \
+    && go test -count=1 -run '^TestUnitEffectiveRealName$' ./pkg/handler \
+    && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+       go build -ldflags="-s -w \
+         -X github.com/korotovsky/slack-mcp-server/pkg/version.CommitHash=$SLACK_MCP_COMMIT \
+         -X github.com/korotovsky/slack-mcp-server/pkg/version.Version=v1.1.23 \
+         -X github.com/korotovsky/slack-mcp-server/pkg/version.BuildTime=source-patched \
+         -X github.com/korotovsky/slack-mcp-server/pkg/version.BinaryName=slack-mcp-server" \
+         -o /out/slack-mcp-server ./cmd/slack-mcp-server
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+ARG TARGETARCH
 
 LABEL mcp-atlas.runtime="true" \
       mcp-atlas.runtime-version="20260810" \
@@ -20,6 +46,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 WORKDIR /agent-environment
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
+COPY --from=slack-mcp-builder /out/slack-mcp-server /tmp/slack-mcp-server
+RUN install -m 0755 /tmp/slack-mcp-server \
+      "/agent-environment/node_modules/slack-mcp-server-linux-${TARGETARCH}/bin/slack-mcp-server-linux-${TARGETARCH}" \
+    && rm /tmp/slack-mcp-server
 COPY install_mcp_packages.sh /install_mcp_packages.sh
 RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
 COPY pyproject.toml uv.lock README.md entrypoint.sh ./

@@ -1,0 +1,84 @@
+diff --git a/pkg/handler/conversations.go b/pkg/handler/conversations.go
+index 7babf02..fe5c661 100644
+--- a/pkg/handler/conversations.go
++++ b/pkg/handler/conversations.go
+@@ -129,7 +129,7 @@ func (ch *ConversationsHandler) UsersResource(ctx context.Context, request mcp.R
+ 		usersList = append(usersList, User{
+ 			UserID:   user.ID,
+ 			UserName: user.Name,
+-			RealName: user.RealName,
++			RealName: effectiveRealName(user),
+ 		})
+ 	}
+ 
+@@ -694,9 +694,18 @@ func marshalMessagesToCSV(messages []Message) (*mcp.CallToolResult, error) {
+ 	return mcp.NewToolResultText(string(csvBytes)), nil
+ }
+ 
++func effectiveRealName(user slack.User) string {
++	for _, candidate := range []string{user.RealName, user.Profile.RealName, user.Profile.DisplayName, user.Name} {
++		if strings.TrimSpace(candidate) != "" {
++			return candidate
++		}
++	}
++	return ""
++}
++
+ func getUserInfo(userID string, usersMap map[string]slack.User) (userName, realName string, ok bool) {
+ 	if u, ok := usersMap[userID]; ok {
+-		return u.Name, u.RealName, true
++		return u.Name, effectiveRealName(u), true
+ 	}
+ 	return userID, userID, false
+ }
+diff --git a/pkg/handler/conversations_test.go b/pkg/handler/conversations_test.go
+index be0ba58..df5bc43 100644
+--- a/pkg/handler/conversations_test.go
++++ b/pkg/handler/conversations_test.go
+@@ -17,10 +17,46 @@ import (
+ 	"github.com/openai/openai-go/option"
+ 	"github.com/openai/openai-go/packages/param"
+ 	"github.com/openai/openai-go/responses"
++	"github.com/slack-go/slack"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
++func TestUnitEffectiveRealName(t *testing.T) {
++	tests := []struct {
++		name string
++		user slack.User
++		want string
++	}{
++		{
++			name: "top-level real name keeps official behavior",
++			user: slack.User{Name: "handle", RealName: "Top Level", Profile: slack.UserProfile{RealName: "Profile Name"}},
++			want: "Top Level",
++		},
++		{
++			name: "deactivated imported user uses profile real name",
++			user: slack.User{Name: "shinsplints7070", Profile: slack.UserProfile{RealName: "steve_shins", DisplayName: "Steve"}},
++			want: "steve_shins",
++		},
++		{
++			name: "display name is the next fallback",
++			user: slack.User{Name: "handle", Profile: slack.UserProfile{DisplayName: "Display Name"}},
++			want: "Display Name",
++		},
++		{
++			name: "username is always available as a final fallback",
++			user: slack.User{Name: "handle"},
++			want: "handle",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			assert.Equal(t, tt.want, effectiveRealName(tt.user))
++		})
++	}
++}
++
+ func TestIntegrationConversations(t *testing.T) {
+ 	sseKey := uuid.New().String()
+ 	require.NotEmpty(t, sseKey, "sseKey must be generated for integration tests")

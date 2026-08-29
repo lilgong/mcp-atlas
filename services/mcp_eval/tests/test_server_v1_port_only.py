@@ -24,6 +24,7 @@ from test_server_v1 import (  # noqa: E402
 )
 from test_server_v2 import main as run_isolated_checks  # noqa: E402
 from mcp_server_probe import (  # noqa: E402
+    probe_slack,
     probe_slack_timestamp_alignment,
     resolve_completion_input,
 )
@@ -290,6 +291,42 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("e2b-server_run_code", calls[0][0])
         self.assertIn("OK        e2b-server", output.getvalue())
         self.assertNotIn("POLICY SKIP", output.getvalue())
+
+
+class SlackIdentityProbeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    async def _call(tool, args):
+        if tool == "slack_channels_list":
+            return text_response(
+                "ID,Name,Topic,Purpose,MemberCount,Cursor\n"
+                "C1,#movie-suggestions,,,8,\n"
+                "C2,#gaming-suggestions,,,8,\n"
+            )
+        if tool == "slack_conversations_history" and args["channel_id"] == "C1":
+            return text_response(
+                "UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor\n"
+                "U1,hiphopluvr1989,Omari West,C1,,Akira,1.0,\n"
+            )
+        if tool == "slack_conversations_history" and args["channel_id"] == "C2":
+            return text_response(
+                "UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor\n"
+                "U2,shinsplints7070,steve_shins,C2,,Apex Legends,2.0,\n"
+            )
+        raise AssertionError(f"unexpected tool call: {tool} {args}")
+
+    async def test_requires_imported_user_real_name(self) -> None:
+        detail = await probe_slack(self._call)
+        self.assertIn("真实姓名可解析", detail)
+
+    async def test_rejects_blank_imported_user_real_name(self) -> None:
+        async def call(tool, args):
+            response = await self._call(tool, args)
+            if tool == "slack_conversations_history" and args["channel_id"] == "C2":
+                return response.replace("steve_shins", "")
+            return response
+
+        with self.assertRaisesRegex(DataMismatch, "Steve Shins"):
+            await probe_slack(call)
 
 
 class SlackTimestampAlignmentTests(unittest.IsolatedAsyncioTestCase):
