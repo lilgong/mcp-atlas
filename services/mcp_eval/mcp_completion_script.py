@@ -142,6 +142,22 @@ class GenerationResult:
     num_retry: Optional[int] = None
 
 
+def extract_final_assistant_content(trajectory_response: str) -> str:
+    """Match the official runner's final-response extraction contract."""
+    try:
+        conversation = json.loads(trajectory_response)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    for item in reversed(conversation):
+        if item.get("type") != "message":
+            continue
+        message = item.get("data", {})
+        if message.get("role") == "assistant" and message.get("content"):
+            return message["content"]
+    return ""
+
+
 class AsyncMCPTrajectoryGenerator:
     """Fully async MCP trajectory generator - each task is independent"""
 
@@ -471,35 +487,12 @@ class AsyncMCPTrajectoryGenerator:
             result.raw_conversation_history = (
                 json.dumps(clean_conversation) if clean_conversation else None
             )
-            # Extract model response from AgentOutput format
-            if trajectory_response:
-                try:
-                    conversation = json.loads(trajectory_response)
-
-                    # Handle AgentOutput format: array of {type: 'message'|'error', data: ...} objects
-                    for item in reversed(conversation):
-                        # 只看 message 类型；否则 msg 会是上一轮的残留值或未定义
-                        if item.get("type") != "message":
-                            continue
-                        msg = item.get("data", {})
-                        if msg.get("role") == "assistant" and msg.get("content"):
-                            result.script_model_response = msg["content"]
-                            break
-                        elif msg.get("role") == "tool" and msg.get("content"):
-                            result.script_model_response = (
-                                msg["content"][0]["text"]
-                                if isinstance(msg["content"], list)
-                                and len(msg["content"]) > 0
-                                else str(msg["content"])
-                            )
-                            break
-                        elif msg.get("role") == "assistant" and not msg.get("content"):
-                            result.script_model_response = str(
-                                msg.get("tool_calls", "")
-                            )
-                            break
-                except Exception:
-                    pass
+            # Match the official public runner: only a non-empty assistant
+            # message can be the final response. Tool output is evidence, not
+            # an answer, even when a tool/turn limit ends the trajectory.
+            result.script_model_response = extract_final_assistant_content(
+                trajectory_response
+            )
 
             # Parse trajectories and errors
             gt_trajectory = self.parse_trajectory(row_data.get("TRAJECTORY", "[]"))

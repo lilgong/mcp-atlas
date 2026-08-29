@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -18,10 +19,57 @@ try:
     from mcp_completion_script import (
         AsyncMCPTrajectoryGenerator,
         TerminalTaskError,
+        extract_final_assistant_content,
         validate_completion_output,
     )
 finally:
     os.chdir(original_cwd)
+
+
+def test_final_response_matches_official_runner_when_tool_message_is_last():
+    trajectory = json.dumps(
+        [
+            {
+                "type": "message",
+                "data": {
+                    "role": "assistant",
+                    "content": "latest assistant content",
+                    "tool_calls": [{"id": "call-1"}],
+                },
+            },
+            {
+                "type": "message",
+                "data": {
+                    "role": "tool",
+                    "content": "tool evidence must not become the answer",
+                    "tool_call_id": "call-1",
+                },
+            },
+            {
+                "type": "error",
+                "data": {"reason": "max_tool_calls_reached"},
+            },
+        ]
+    )
+
+    assert extract_final_assistant_content(trajectory) == "latest assistant content"
+
+
+def test_final_response_is_empty_without_nonempty_assistant_content():
+    trajectory = json.dumps(
+        [
+            {
+                "type": "message",
+                "data": {"role": "assistant", "content": "", "tool_calls": []},
+            },
+            {
+                "type": "message",
+                "data": {"role": "tool", "content": "tool evidence"},
+            },
+        ]
+    )
+
+    assert extract_final_assistant_content(trajectory) == ""
 
 
 def test_unexpected_task_exception_does_not_cancel_siblings(tmp_path):
