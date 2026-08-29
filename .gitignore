@@ -31,6 +31,10 @@ services/mcp_eval/evaluation_results/*
 !services/mcp_eval/completion_results/.gitkeep
 !services/mcp_eval/evaluation_results/.gitkeep
 
+# Local CSV-to-JSONL inspection helper and its generated artifacts.
+services/mcp_eval/scored_csv_to_jsonl.py
+services/mcp_eval/convert_jsonl/
+
 # MCP/tool API call logs (per-key request counts)
 mcp_usage_log/
 token_usage_log/
