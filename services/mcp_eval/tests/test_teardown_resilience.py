@@ -110,6 +110,27 @@ class TeardownFailureIsolationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(removed, ["c1"])
 
+    async def test_permission_restore_runs_as_container_root(self):
+        sandbox = _sandbox()
+        sandbox.containers.append(
+            ManagedContainer(kind="local", name="c1", task_id="syn-teardown")
+        )
+
+        with patch.object(
+            task_sandbox,
+            "_run",
+            new=AsyncMock(return_value=("", "", 0)),
+        ) as run, patch.object(task_sandbox, "write_runtime_event"):
+            await sandbox._restore_task_data_permissions()
+
+        self.assertEqual(
+            run.await_args.args,
+            (
+                "docker", "exec", "--user", "0:0", "c1",
+                "chmod", "-R", "a+rwX", "/data",
+            ),
+        )
+
     async def test_cancellation_still_propagates(self):
         sandbox = _sandbox()
         sandbox.containers.append(
@@ -446,6 +467,82 @@ class AgentLoopLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outputs[-1].type, "error")
         self.assertEqual(outputs[-1].data["reason"], "max_tool_calls_reached")
         self.assertEqual(outputs[-1].data["totalToolCalls"], 2)
+
+    async def test_later_model_failure_preserves_completed_turns(self):
+        from mcp_completion import agent_eval
+        from mcp_completion.schema import CallToolResponse, TextContent
+
+        state = {"model_calls": 0}
+
+        class FakeClient:
+            async def list_tools(self):
+                return []
+
+            async def call_tool(self, name, args):
+                return CallToolResponse(
+                    content=[TextContent(type="text", text="evidence")]
+                )
+
+        async def fake_completion(**kwargs):
+            state["model_calls"] += 1
+            if state["model_calls"] == 1:
+                response = self._tool_response(1)
+                response.message.content = "partial answer"
+                return response
+            raise RuntimeError("upstream failed")
+
+        with patch.object(agent_eval, "create_completion", fake_completion), \
+             patch.object(agent_eval, "_transform_tool_calls", lambda t: []), \
+             patch.object(agent_eval, "write_runtime_event"):
+            outputs = [
+                output
+                async for output in agent_eval.run_mcp_eval(
+                    mcp_client=FakeClient(),
+                    model="m",
+                    messages=[],
+                    max_turns=3,
+                    max_tool_calls=100,
+                    task_id="partial-test",
+                )
+            ]
+
+        self.assertEqual(
+            [o.type for o in outputs],
+            ["message", "message", "error"],
+        )
+        self.assertEqual(outputs[0].data["content"], "partial answer")
+        self.assertEqual(outputs[-1].data["message"], "upstream failed")
+
+    async def test_tool_failure_uses_official_single_line_feedback(self):
+        from mcp_completion import agent_eval
+
+        class FakeClient:
+            async def list_tools(self):
+                return []
+
+            async def call_tool(self, name, args):
+                raise RuntimeError("first line\ninternal detail")
+
+        async def fake_completion(**kwargs):
+            return self._tool_response(1)
+
+        with patch.object(agent_eval, "create_completion", fake_completion), \
+             patch.object(agent_eval, "_transform_tool_calls", lambda t: []), \
+             patch.object(agent_eval, "write_runtime_event"):
+            outputs = [
+                output
+                async for output in agent_eval.run_mcp_eval(
+                    mcp_client=FakeClient(),
+                    model="m",
+                    messages=[],
+                    max_turns=1,
+                    max_tool_calls=100,
+                    task_id="tool-error-test",
+                )
+            ]
+
+        self.assertEqual(outputs[1].data["role"], "tool")
+        self.assertEqual(outputs[1].data["content"], "Error: first line")
 
 
 if __name__ == "__main__":

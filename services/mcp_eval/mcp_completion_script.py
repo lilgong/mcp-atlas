@@ -71,7 +71,7 @@ logging.basicConfig(
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:3000")
 
 # Retry configuration
-MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "20"))
+MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
 # A long-context task can legitimately run for most of an hour; the timeout is
 # only meant to catch a genuinely wedged request.

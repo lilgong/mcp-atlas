@@ -72,6 +72,23 @@ def test_final_response_is_empty_without_nonempty_assistant_content():
     assert extract_final_assistant_content(trajectory) == ""
 
 
+def test_final_response_does_not_stringify_none_content():
+    trajectory = json.dumps(
+        [
+            {
+                "type": "message",
+                "data": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [],
+                },
+            }
+        ]
+    )
+
+    assert extract_final_assistant_content(trajectory) == ""
+
+
 def test_unexpected_task_exception_does_not_cancel_siblings(tmp_path):
     async def run():
         generator = AsyncMCPTrajectoryGenerator("test-model")

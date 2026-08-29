@@ -972,7 +972,7 @@ class TaskSandbox:
         for container in candidates:
             try:
                 _, stderr, code = await _run(
-                    "docker", "exec", container.name,
+                    "docker", "exec", "--user", "0:0", container.name,
                     "chmod", "-R", "a+rwX", "/data",
                     timeout=30, check=False,
                 )

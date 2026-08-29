@@ -161,8 +161,18 @@ async def run_mcp_eval(
             raise
         except Exception as error:
             logger.error(f"Model create completion or parsing failed: {error}")
-            # Re-raise as server error instead of graceful handling
-            raise Exception(f"LLM completion failed: {error}")
+            # Match the official generator contract: retain every output from
+            # earlier turns and terminate this run with an error event instead
+            # of turning the whole request into an HTTP 500.
+            reached_max_turns = False
+            yield AgentOutput(
+                "error",
+                {"message": str(error), "serverResponse": None},
+            )
+            break
+
+        if assistant_message is None:
+            break
 
         all_messages.append(assistant_message)
 
@@ -228,14 +238,18 @@ async def run_mcp_eval(
                     logger.error(
                         f"Tool call failed: {error}, tool: {tool_call.function['name']}"
                     )
-                    # 不再因单个工具失败而中断整条轨迹：把错误作为 tool result
-                    # 回灌给模型，让它有机会换工具/换参数恢复。
+                    # Match the official harness feedback exactly: expose only
+                    # the first error line and let the model recover next turn.
+                    error_lines = str(error).splitlines()
+                    error_message = (
+                        error_lines[0] if error_lines else type(error).__name__
+                    )
                     tool_call_message = ToolCallOutputMessage(
                         role="tool",
                         content=[
                             TextContent(
                                 type="text",
-                                text=f"Tool execution failed - tool: {tool_call.function['name']}, error: {error}",
+                                text=f"Error: {error_message}",
                             )
                         ],
                         tool_call_id=tool_call.id,

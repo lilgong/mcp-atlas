@@ -29,6 +29,10 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             isolated_client.SERVER_CALL_POLICIES["arxiv"],
         )
         self.assertEqual(
+            (1, 15.0, 60.0, 240.0),
+            isolated_client.SERVER_CALL_POLICIES["e2b-server"],
+        )
+        self.assertEqual(
             (1, 1.2, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["pubmed"],
         )
@@ -43,8 +47,8 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ddg-search", isolated_client.SERVER_CALL_POLICIES)
         self.assertEqual(
             {
-                "arxiv", "brave-search", "osm-mcp-server", "twelvedata",
-                "wikipedia",
+                "arxiv", "brave-search", "e2b-server", "osm-mcp-server",
+                "twelvedata", "wikipedia",
             },
             set(isolated_client._SHARED_SERVER_CALL_GATES),
         )
