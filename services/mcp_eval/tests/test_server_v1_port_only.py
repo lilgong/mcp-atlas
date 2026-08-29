@@ -352,6 +352,12 @@ class SlackTimestampAlignmentTests(unittest.IsolatedAsyncioTestCase):
                 "U123,mcpdumle,,C123,,You cant go wrong with Napoleon Dynamite,"
                 "1783615136.421649,\n"
             )
+        if tool == "slack_conversations_search_messages":
+            return text_response(
+                "UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor\n"
+                "U123,mcpdumle,,C123,,You cant go wrong with Napoleon Dynamite,"
+                "1783615136.421649,\n"
+            )
         raise AssertionError(f"unexpected tool call: {tool} {args}")
 
     async def test_selected_csv_matches_cloud_timestamp(self) -> None:
@@ -370,6 +376,21 @@ class SlackTimestampAlignmentTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaisesRegex(DataMismatch, "时间不对应"):
                 await probe_slack_timestamp_alignment(self._call, path)
+
+    async def test_non_utc_slack_date_filter_is_data_bad(self) -> None:
+        async def call(tool, args):
+            if tool == "slack_conversations_search_messages":
+                return text_response(
+                    "UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Cursor\n"
+                )
+            return await self._call(tool, args)
+
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "aligned.csv"
+            self._write_input(path, "2026-07-09 at 16:38:56.421649+00:00")
+
+            with self.assertRaisesRegex(DataMismatch, "个人时区"):
+                await probe_slack_timestamp_alignment(call, path)
 
     def test_explicit_input_path_has_highest_priority(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -10,10 +10,13 @@ RUN apt-get update \
 RUN git clone https://github.com/korotovsky/slack-mcp-server.git /src \
     && git -C /src checkout --detach "$SLACK_MCP_COMMIT"
 COPY vendor/slack-mcp-server/realname-fallback.patch /tmp/slack-realname.patch
+COPY vendor/slack-mcp-server/imported-date-filter.patch /tmp/slack-date-filter.patch
 RUN git -C /src apply --check /tmp/slack-realname.patch \
     && git -C /src apply /tmp/slack-realname.patch \
+    && git -C /src apply --check /tmp/slack-date-filter.patch \
+    && git -C /src apply /tmp/slack-date-filter.patch \
     && cd /src \
-    && go test -count=1 -run '^TestUnitEffectiveRealName$' ./pkg/handler \
+    && go test -count=1 -run '^(TestUnitEffectiveRealName|TestUnitBuildDateFiltersUnit)$' ./pkg/handler \
     && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
        go build -ldflags="-s -w \
          -X github.com/korotovsky/slack-mcp-server/pkg/version.CommitHash=$SLACK_MCP_COMMIT \

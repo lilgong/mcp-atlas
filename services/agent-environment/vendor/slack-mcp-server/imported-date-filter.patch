@@ -1,0 +1,74 @@
+diff --git a/pkg/handler/conversations.go b/pkg/handler/conversations.go
+index 7babf02..623e233 100644
+--- a/pkg/handler/conversations.go
++++ b/pkg/handler/conversations.go
+@@ -877,22 +877,34 @@ func buildDateFilters(before, after, on, during string) (map[string]string, erro
+ 		if during != "" || before != "" || after != "" {
+ 			return nil, fmt.Errorf("'on' cannot be combined with other date filters")
+ 		}
+-		_, normalized, err := parseFlexibleDate(on)
++		parsed, _, err := parseFlexibleDate(on)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("invalid 'on' date: %v", err)
+ 		}
+-		out["on"] = normalized
++		// Slack's on: modifier is unreliable for imported messages when the
++		// token owner uses a fixed UTC+0 timezone. The equivalent exclusive range is stable and
++		// keeps the public tool semantics unchanged.
++		out["after"] = parsed.AddDate(0, 0, -1).Format("2006-01-02")
++		out["before"] = parsed.AddDate(0, 0, 1).Format("2006-01-02")
+ 		return out, nil
+ 	}
+ 	if during != "" {
+ 		if before != "" || after != "" {
+ 			return nil, fmt.Errorf("'during' cannot be combined with 'before' or 'after'")
+ 		}
+-		_, normalized, err := parseFlexibleDate(during)
++		parsed, _, err := parseFlexibleDate(during)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("invalid 'during' date: %v", err)
+ 		}
+-		out["during"] = normalized
++		monthYear := regexp.MustCompile(`^(?:\d{4}\s+[A-Za-z]+|[A-Za-z]+\s+\d{4})$`)
++		if monthYear.MatchString(strings.TrimSpace(during)) {
++			firstNextMonth := parsed.AddDate(0, 1, 0)
++			out["after"] = parsed.AddDate(0, 0, -1).Format("2006-01-02")
++			out["before"] = firstNextMonth.Format("2006-01-02")
++		} else {
++			out["after"] = parsed.AddDate(0, 0, -1).Format("2006-01-02")
++			out["before"] = parsed.AddDate(0, 0, 1).Format("2006-01-02")
++		}
+ 		return out, nil
+ 	}
+ 	if after != "" {
+diff --git a/pkg/handler/conversations_test.go b/pkg/handler/conversations_test.go
+index be0ba58..9a3e0f5 100644
+--- a/pkg/handler/conversations_test.go
++++ b/pkg/handler/conversations_test.go
+@@ -421,7 +421,7 @@ func TestUnitBuildDateFiltersUnit(t *testing.T) {
+ 			after:   "",
+ 			on:      "July 2025",
+ 			during:  "",
+-			want:    map[string]string{"on": "2025-07-01"},
++			want:    map[string]string{"after": "2025-06-30", "before": "2025-07-02"},
+ 			wantErr: false,
+ 		},
+ 		{
+@@ -439,7 +439,16 @@ func TestUnitBuildDateFiltersUnit(t *testing.T) {
+ 			after:   "",
+ 			on:      "",
+ 			during:  "15-July-2025",
+-			want:    map[string]string{"during": "2025-07-15"},
++			want:    map[string]string{"after": "2025-07-14", "before": "2025-07-16"},
++			wantErr: false,
++		},
++		{
++			name:    "During with month format",
++			before:  "",
++			after:   "",
++			on:      "",
++			during:  "July 2025",
++			want:    map[string]string{"after": "2025-06-30", "before": "2025-08-01"},
+ 			wantErr: false,
+ 		},
+ 		{

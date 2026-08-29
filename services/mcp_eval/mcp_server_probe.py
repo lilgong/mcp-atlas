@@ -395,7 +395,13 @@ def _slack_time(raw: str) -> dt.datetime:
 
 
 async def probe_slack_timestamp_alignment(call, input_path: Path) -> str:
-    """Verify that the selected evaluation CSV matches the imported Slack shift."""
+    """Verify CSV timestamps and Slack date-filter semantics are both aligned.
+
+    Slack interprets ``on:YYYY-MM-DD`` in the API caller's Slack profile
+    timezone. MCP-Atlas date tasks and their exact timestamp claim use UTC. A
+    non-UTC token owner can therefore expose the right epoch while making the
+    benchmark's calendar-date query return no rows.
+    """
     channels = _texts(await call(
         "slack_channels_list", {"channel_types": "public_channel, private_channel"}
     ))
@@ -427,8 +433,24 @@ async def probe_slack_timestamp_alignment(call, input_path: Path) -> str:
             f"CSV={expected.isoformat()}，Slack={actual.isoformat()}，"
             f"输入={input_path}"
         )
+
+    date_filtered = _texts(await call(
+        "slack_conversations_search_messages",
+        {
+            "search_query": "Napoleon Dynamite",
+            "filter_date_on": expected.date().isoformat(),
+        },
+    ))
+    if "Napoleon Dynamite" not in date_filtered:
+        raise DataMismatch(
+            "Slack 时间戳与 CSV 一致，但精确日期过滤无法在 UTC 日期 "
+            f"{expected.date().isoformat()} 命中该消息。请确认 API token 所属账号的"
+            "个人时区为固定 UTC+0（Slack 界面选择 Monrovia，不要选择 London），"
+            "并确认 runtime 镜像包含 imported-date-filter.patch；"
+            "修改后需重建镜像并重启服务，无需重新导入消息"
+        )
     return (
-        f"测试集 {input_path.name} 与 Slack 时间锚点一致："
+        f"测试集 {input_path.name} 与 Slack 时间锚点、UTC 日期过滤均一致："
         f"{actual.isoformat()}"
     )
 
@@ -469,6 +491,7 @@ PROBE_TOOLS: dict[str, tuple[str, ...]] = {
     "slack": (
         "slack_channels_list",
         "slack_conversations_history",
+        "slack_conversations_search_messages",
     ),
     "google-workspace": ("google-workspace_list_events",),
 }

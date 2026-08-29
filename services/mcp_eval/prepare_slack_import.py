@@ -7,24 +7,26 @@
     2025-12-01~10，早就超期，导进去也查不到 —— 依赖 slack 的评测任务会全部拿不到分。
 
 为什么安全：
-    - 33 条 slack 任务的题面里没有任何一条提到日期（已核查）。
-    - 平移量取整天数，时分秒/微秒/相对间隔全部原样保留，
-      所以"谁先发的"、"某人当天发了几条"这类相对/计数类 claim 不受影响。
+    - 平移量取整天数，时分秒/微秒/相对间隔全部原样保留。
+    - 绑定 Slack 消息日期的题面和 claims 会一起平移；只有能由导出消息日期
+      唯一验证的完整日期或月份才会改，电影上映、Git commit 等日期不会动。
+    - 日期变化导致的年份算术（例如 4 × 2025）会在验证原算式正确后重算。
     - ScaleAI 自己就这么干过：GT claims 记的是 2025-06-27 16:38:56.421649，
       而发布的导出里同一条消息是 2025-12-05 16:38:56.421649 —— 正好 +161 天，
       时分秒与微秒完全一致。也就是说官方平移过一次，只是忘了同步改 claims。
 
---fix-claims 就是补上官方漏掉的那一步：把绑定 slack 消息日期的 claim 一起平移。
+--fix-claims 就是补上官方漏掉的那一步：把绑定 slack 消息日期的题面和 claim 一起平移。
 只改能对上导出消息的日期，git commit 日期、电影上映日期等一律不碰。
 官方 MCP-Atlas-origin.csv 始终只读；派生结果写到 Git 忽略的 MCP-Atlas.csv。
 派生时还会把官方基准使用的旧版工具目录适配到当前 runtime：有明确一对一
 后继工具的做名称迁移，已经整服下线且没有等价后继的工具从 ENABLED_TOOLS
-移除。这与 runtime 的实际可见工具集合一致，不改题面、claims 或官方轨迹。
+移除。这与 runtime 的实际可见工具集合一致；工具目录适配本身不改题面、claims
+或官方轨迹。
 
 两个输入都是官方原版、只读、永不修改，每次运行都从它们重新派生：
 
     data_exports/slack_mcp_eval_export.zip  →  ..._<MMDD>.zip  （平移时间戳）
-    services/mcp_eval/MCP-Atlas-origin.csv  →  MCP-Atlas.csv（平移 claim 日期）
+    services/mcp_eval/MCP-Atlas-origin.csv  →  MCP-Atlas.csv（同步题面、claims、年份算术）
 
 不在上一轮结果上叠加，所以重复运行幂等：跑几次 md5 都一样，不会二次平移。
 
@@ -32,7 +34,7 @@
 脚本打好包后会打印手动导入指引。
 
 Usage:
-    uv run prepare_slack_import.py                 # dry-run：产出 zip，只打印 claim 会怎么改
+    uv run prepare_slack_import.py                 # dry-run：产出 zip，只打印 CSV 会怎么改
     uv run prepare_slack_import.py --fix-claims    # 同时从官方原版派生 MCP-Atlas.csv
     uv run prepare_slack_import.py --days-ago 3    # 让最新消息落到 3 天前（默认 3）
 """
@@ -69,7 +71,7 @@ csv.field_size_limit(sys.maxsize)
 
 # 导出里 <频道目录>/<YYYY-MM-DD>.json
 DATE_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}\.json$")
-# claims 里的两种日期写法。时间部分的分隔符可能是空格/T，也可能是 " at "
+# 题面/claims 里的 ISO 日期；时间分隔符可能是空格/T，也可能是 " at "
 # （实际 claim 长这样：2025-06-27 at 16:38:56.421649+00:00）
 ISO_DT = re.compile(
     r"\b(\d{4})-(\d{2})-(\d{2})(?:(?:[ T]|\s+at\s+)(\d{2}):(\d{2}):(\d{2})(\.\d+)?)?"
@@ -77,6 +79,22 @@ ISO_DT = re.compile(
 PROSE_DATE = re.compile(
     r"\b(January|February|March|April|May|June|July|August|September|October|November|December)"
     r"\s+(\d{1,2}),\s*(\d{4})\b"
+)
+DAY_PROSE_DATE = re.compile(
+    r"\b(\d{1,2})\s+"
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+MONTH_YEAR = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+YEAR_ARITHMETIC = re.compile(
+    r"\b(?P<count>\d+)(?P<op>\s+(?:times|x|\*)\s+)"
+    r"(?P<year>\d{4})(?P<eq>\s+(?:equals|=)\s+)(?P<result>[\d,]+)\b",
+    re.IGNORECASE,
 )
 MONTHS = [
     "January",
@@ -92,6 +110,7 @@ MONTHS = [
     "November",
     "December",
 ]
+MONTH_NUMBER = {name.lower(): i for i, name in enumerate(MONTHS, 1)}
 
 # 只收录经过 schema/语义核对的一对一后继，绝不按字符串相似度猜测。
 # 当前 ClinicalTrials 1.9.3 删除了 list_studies，以 search_studies 取代。
@@ -133,6 +152,31 @@ def message_files(files: dict) -> dict[str, list]:
 
 def all_ts(msg_files: dict) -> list[float]:
     return [float(m["ts"]) for msgs in msg_files.values() for m in msgs if m.get("ts")]
+
+
+def trajectory_uses_slack(raw: str) -> bool:
+    """Return whether a reference trajectory actually calls a Slack tool.
+
+    A substring check is unsafe: repository-only trajectories contain symbols
+    such as ``slackr_msg()`` even though no Slack MCP tool is enabled or used.
+    """
+    try:
+        messages = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            name = function.get("name") if isinstance(function, dict) else None
+            if isinstance(name, str) and name.startswith("slack_"):
+                return True
+    return False
 
 
 # ── 平移 ──────────────────────────────────────────────────────────────────────
@@ -192,7 +236,7 @@ def derive_legacy_offset(csv_path: Path, msg_files: dict) -> int | None:
     offsets = set()
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if "slack_" not in (row.get("TRAJECTORY") or ""):
+            if not trajectory_uses_slack(row.get("TRAJECTORY") or ""):
                 continue
             for mt in ISO_DT.finditer(row.get("GTFA_CLAIMS") or ""):
                 y, mo, da, hh, mi, se, frac = mt.groups()
@@ -262,6 +306,126 @@ def adapt_enabled_tools(
     return renamed, removed
 
 
+def _month_with_case(month: int, template: str) -> str:
+    value = MONTHS[month - 1]
+    if template.islower():
+        return value.lower()
+    if template.isupper():
+        return value.upper()
+    return value
+
+
+def shift_bound_dates(
+    text: str,
+    msg_dates: set[dt.date],
+    legacy: int,
+    new_shift_days: int,
+) -> tuple[str, set[tuple[int, int]]]:
+    """Shift date expressions that can be tied safely to Slack message dates.
+
+    Full dates must map to an exact source-export date after the official legacy
+    shift. A month/year expression is shifted only when every Slack message from
+    that original month lands in one target month, so an imprecise date never
+    becomes ambiguous. Returns the changed (old year, new year) pairs for
+    dependent arithmetic repair.
+    """
+    total = legacy + new_shift_days
+    year_changes: set[tuple[int, int]] = set()
+
+    month_targets: dict[tuple[int, int], set[tuple[int, int]]] = {}
+    for source_date in msg_dates:
+        original = source_date - dt.timedelta(days=legacy)
+        target = source_date + dt.timedelta(days=new_shift_days)
+        month_targets.setdefault((original.year, original.month), set()).add(
+            (target.year, target.month)
+        )
+
+    def shifted(d: dt.date) -> dt.date | None:
+        if d + dt.timedelta(days=legacy) not in msg_dates:
+            return None
+        target = d + dt.timedelta(days=total)
+        if d.year != target.year:
+            year_changes.add((d.year, target.year))
+        return target
+
+    def sub_iso(mt: re.Match) -> str:
+        y, mo, da = int(mt.group(1)), int(mt.group(2)), int(mt.group(3))
+        try:
+            target = shifted(dt.date(y, mo, da))
+        except ValueError:
+            return mt.group(0)
+        if target is None:
+            return mt.group(0)
+        return mt.group(0).replace(
+            f"{y:04d}-{mo:02d}-{da:02d}", target.isoformat(), 1
+        )
+
+    def sub_month_first(mt: re.Match) -> str:
+        mon, da, y = mt.group(1), int(mt.group(2)), int(mt.group(3))
+        try:
+            target = shifted(dt.date(y, MONTH_NUMBER[mon.lower()], da))
+        except ValueError:
+            return mt.group(0)
+        if target is None:
+            return mt.group(0)
+        return f"{_month_with_case(target.month, mon)} {target.day}, {target.year}"
+
+    def sub_day_first(mt: re.Match) -> str:
+        da, mon, y = int(mt.group(1)), mt.group(2), int(mt.group(3))
+        try:
+            target = shifted(dt.date(y, MONTH_NUMBER[mon.lower()], da))
+        except ValueError:
+            return mt.group(0)
+        if target is None:
+            return mt.group(0)
+        return f"{target.day} {_month_with_case(target.month, mon)} {target.year}"
+
+    def sub_month_year(mt: re.Match) -> str:
+        # Do not partially rewrite a day-first full date that failed exact matching.
+        if re.search(r"\b\d{1,2}\s+$", value[: mt.start()]):
+            return mt.group(0)
+        mon, y = mt.group(1), int(mt.group(2))
+        targets = month_targets.get((y, MONTH_NUMBER[mon.lower()]), set())
+        if len(targets) != 1:
+            return mt.group(0)
+        target_year, target_month = next(iter(targets))
+        if y != target_year:
+            year_changes.add((y, target_year))
+        return f"{_month_with_case(target_month, mon)} {target_year}"
+
+    value = ISO_DT.sub(sub_iso, text)
+    value = PROSE_DATE.sub(sub_month_first, value)
+    value = DAY_PROSE_DATE.sub(sub_day_first, value)
+    value = MONTH_YEAR.sub(sub_month_year, value)
+    return value, year_changes
+
+
+def repair_year_arithmetic(
+    text: str, year_changes: set[tuple[int, int]]
+) -> str:
+    """Recompute simple count×year claims after a verified Slack year shift."""
+    targets: dict[int, set[int]] = {}
+    for old, new in year_changes:
+        targets.setdefault(old, set()).add(new)
+
+    def sub(mt: re.Match) -> str:
+        count = int(mt.group("count"))
+        old_year = int(mt.group("year"))
+        old_result = int(mt.group("result").replace(",", ""))
+        candidates = targets.get(old_year, set())
+        if len(candidates) != 1 or old_result != count * old_year:
+            return mt.group(0)
+        new_year = next(iter(candidates))
+        new_result = count * new_year
+        result = f"{new_result:,}" if "," in mt.group("result") else str(new_result)
+        return (
+            f"{mt.group('count')}{mt.group('op')}{new_year}"
+            f"{mt.group('eq')}{result}"
+        )
+
+    return YEAR_ARITHMETIC.sub(sub, text)
+
+
 def fix_claims(
     origin_path: Path,
     out_path: Path,
@@ -270,45 +434,19 @@ def fix_claims(
     new_shift_days: int,
     apply: bool,
 ) -> tuple[
-    list[tuple[str, str, str]],
+    list[tuple[str, str, str, str]],
     list[tuple[str, str, str]],
     list[tuple[str, str]],
 ]:
-    """从官方原版派生出目标 CSV：把绑定 slack 消息的日期平移 legacy+new_shift_days 天。
+    """从官方原版派生出目标 CSV：同步平移绑定 Slack 消息的题面和 claims。
 
     始终读 origin_path、写 out_path，不在上一轮的结果上叠加，所以重复运行幂等。
-    判据：claim 日期 + legacy 必须正好落在导出的某个消息日期上 —— 这样 git commit
-    日期、电影上映日期等一律不会被误伤。同时返回 claim 变更、工具改名和
+    判据：完整日期 + legacy 必须正好落在导出的某个消息日期上；月份也必须能
+    唯一映射到目标月份。这样 Git commit、电影上映日期等不会被误伤。同时返回
+    题面/claim 变更、工具改名和
     已下线工具移除记录。"""
     msg_dates = {dt.datetime.fromtimestamp(t, UTC).date() for t in all_ts(msg_files)}
-    total = legacy + new_shift_days
-    changes: list[tuple[str, str, str]] = []
-
-    def is_slack_date(d: dt.date) -> bool:
-        return (d + dt.timedelta(days=legacy)) in msg_dates
-
-    def sub_iso(mt: re.Match) -> str:
-        y, mo, da = int(mt.group(1)), int(mt.group(2)), int(mt.group(3))
-        try:
-            d = dt.date(y, mo, da)
-        except ValueError:
-            return mt.group(0)
-        if not is_slack_date(d):
-            return mt.group(0)
-        return mt.group(0).replace(
-            d.isoformat(), (d + dt.timedelta(days=total)).isoformat(), 1
-        )
-
-    def sub_prose(mt: re.Match) -> str:
-        mon, da, y = mt.group(1), int(mt.group(2)), int(mt.group(3))
-        try:
-            d = dt.date(y, MONTHS.index(mon) + 1, da)
-        except ValueError:
-            return mt.group(0)
-        if not is_slack_date(d):
-            return mt.group(0)
-        n = d + dt.timedelta(days=total)
-        return f"{MONTHS[n.month - 1]} {n.day}, {n.year}"
+    changes: list[tuple[str, str, str, str]] = []
 
     with open(origin_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -318,13 +456,23 @@ def fix_claims(
     tool_renames, retired_removals = adapt_enabled_tools(rows)
 
     for row in rows:
-        if "slack_" not in (row.get("TRAJECTORY") or ""):
+        if not trajectory_uses_slack(row.get("TRAJECTORY") or ""):
             continue
-        old = row.get("GTFA_CLAIMS") or ""
-        new = PROSE_DATE.sub(sub_prose, ISO_DT.sub(sub_iso, old))
-        if new != old:
-            changes.append((row.get("TASK", "?"), old, new))
-            row["GTFA_CLAIMS"] = new
+        rewritten: dict[str, tuple[str, str]] = {}
+        year_changes: set[tuple[int, int]] = set()
+        for field in ("PROMPT", "GTFA_CLAIMS"):
+            old = row.get(field) or ""
+            new, field_year_changes = shift_bound_dates(
+                old, msg_dates, legacy, new_shift_days
+            )
+            rewritten[field] = (old, new)
+            year_changes.update(field_year_changes)
+
+        for field, (old, shifted_text) in rewritten.items():
+            new = repair_year_arithmetic(shifted_text, year_changes)
+            if new != old:
+                changes.append((row.get("TASK", "?"), field, old, new))
+                row[field] = new
 
     if apply:
         backup_note = ""
@@ -412,8 +560,8 @@ def main() -> int:
 
     if not a.origin.exists():
         print(
-            f"\n⚠️ 找不到官方原版 {a.origin.name}，跳过 claim 处理。"
-            f"\n   它是 claim 平移的唯一基准（每次都从它派生，保证幂等）。"
+            f"\n⚠️ 找不到官方原版 {a.origin.name}，跳过题面/claim 处理。"
+            f"\n   它是日期平移的唯一基准（每次都从它派生，保证幂等）。"
         )
         legacy = None
     else:
@@ -423,7 +571,7 @@ def main() -> int:
         print(
             f"\n官方那次平移量: +{legacy} 天（微秒指纹把原版 claim 与导出消息对上得到，非写死）"
         )
-        print(f"claim 总平移 = {legacy} + {shift_days} = {legacy + shift_days} 天")
+        print(f"日期总平移 = {legacy} + {shift_days} = {legacy + shift_days} 天")
         changes, tool_renames, retired_removals = fix_claims(
             a.origin, a.csv, msgs, legacy, shift_days, apply=a.fix_claims
         )
@@ -447,21 +595,22 @@ def main() -> int:
             print(f"  {count:3} × 移除已下线 server: {server}")
         if changes:
             head = (
-                "已修正的 claim"
+                "已修正的题面/claim"
                 if a.fix_claims
-                else "将会修正的 claim（加 --fix-claims 才真正写入）"
+                else "将会修正的题面/claim（加 --fix-claims 才真正写入）"
             )
-            print(f"\n{head}: {len(changes)} 条任务")
-            for task, old, new in changes:
-                print(f"\n  [task {task[:24]}]")
+            changed_tasks = len({task for task, _, _, _ in changes})
+            print(f"\n{head}: {changed_tasks} 条任务，{len(changes)} 个字段")
+            for task, field, old, new in changes:
+                print(f"\n  [task {task[:24]} / {field}]")
                 for o, n in zip(old.split("', '"), new.split("', '")):
                     if o != n:
                         print(f"    - {o.strip(chr(39))[:96]}")
                         print(f"    + {n.strip(chr(39))[:96]}")
         else:
-            print("\n没有需要修正的 claim（原版里没有绑定 slack 消息日期的）")
+            print("\n没有需要修正的题面/claim（原版里没有绑定 Slack 消息日期的）")
     elif a.fix_claims:
-        print("\n⚠️ 无法推导偏移量，跳过 claim 修正（--fix-claims 未生效）")
+        print("\n⚠️ 无法推导偏移量，跳过题面/claim 修正（--fix-claims 未生效）")
 
     shifted = shift_export(files, secs)
     write_zip(shifted, a.out)

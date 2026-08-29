@@ -59,8 +59,9 @@ container and logical database `store`; no host `mongorestore` is required.
 ### Slack
 
 Follow §6.4 of the root [`README.md`](../README.md). Free Slack requires the
-repository's `prepare_slack_import.py` workflow so that message timestamps and
-the two date-bound claims stay aligned; do not edit the export by hand. The
+repository's `prepare_slack_import.py` workflow so that message timestamps,
+date-bound prompts, claims, and year-dependent arithmetic stay aligned; do not
+edit the export by hand. The
 detailed import and user-mapping guide is
 [`docs/slack_free_method.md`](../docs/slack_free_method.md).
 

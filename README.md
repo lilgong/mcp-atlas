@@ -584,10 +584,15 @@ data_exports/slack_mcp_eval_export.zip
 官方消息日期为 2025-12-01 至 2025-12-10。付费 Slack 能保留这段历史时，
 可以直接导入官方 zip，并把输入显式指向官方 `MCP-Atlas-origin.csv`。
 
-免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息和两条绑定消息日期的
-claims。脚本还会把旧版工具名迁移到当前 runtime，并移除 runtime 已经整服下线、
+免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息、绑定消息日期的题面
+与 claims，并重算依赖消息年份的简单算术。脚本还会把旧版工具名迁移到当前 runtime，并移除 runtime 已经整服下线、
 没有等价后继的工具名。脚本始终读取官方文件并生成派生文件，不会修改 Git 中的官方
-CSV，也不会改题面或官方轨迹：
+CSV 或官方轨迹；题面只在日期能由 Slack 导出消息安全验证时才会在派生 CSV 中改写：
+
+评测所用 Slack API token 的账号必须使用固定 **UTC+0** 时区；Slack 界面选择
+**Monrovia**，不要选择有夏令时的 London。Slack 的日期搜索按账号个人时区解释，
+而基准日期与精确时间 claim 按 UTC 对齐。具体设置和验收见
+[`docs/slack_free_method.md`](docs/slack_free_method.md)。
 
 ```bash
 cd services/mcp_eval

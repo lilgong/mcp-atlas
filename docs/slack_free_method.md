@@ -24,21 +24,43 @@
 
 ### 为什么平移时间戳是安全的
 
-- **33 条**含 slack 的任务，题面（PROMPT）里**没有任何一条**提到日期（已全量核查）
 - 平移量取**整天数** → 时分秒、微秒、相对间隔、消息顺序**全部原样保留**
   → "谁先发的"、"某人当天发了几条"这类相对/计数类 claim 不受影响
+- 绑定 Slack 日期的题面和 claims 会同步平移；完整日期必须精确命中导出消息，
+  “月份 + 年份”也只有在能唯一映射到目标月份时才修改
+- 日期变化导致的年份算术会同步重算，例如 `4 × 2025 = 8100` 会随消息年份
+  变为 `4 × 2026 = 8104`
 - **官方自己就这么干过**：GT claims 记的是 `2025-06-27 16:38:56.421649`，而发布的导出里同一条消息是 `2025-12-05 16:38:56.421649` —— 正好 **+161 天**，时分秒与微秒完全一致
+
+### 必须把评测 Slack 账号设为固定 UTC+0 时区
+
+Slack 的 `on:YYYY-MM-DD`、`after:`、`before:` 等搜索日期按 **API token 所属
+Slack 账号的个人时区**解释，而基准题面和精确时间 claim 按 UTC 对齐。如果账号使用
+UTC+8，UTC `2026-08-21 16:38` 的消息会被 Slack 归入 `2026-08-22`，导致题面要求
+8 月 21 日时精确日期查询返回空结果。
+
+在 Slack 中打开 **Preferences → Language & region → Time zone**，关闭自动设置，
+把提供 `SLACK_MCP_XOXC_TOKEN`/`SLACK_MCP_XOXD_TOKEN` 的账号设为
+**Monrovia**。它全年为 UTC+0；不要选择会进入 British Summer Time 的 London。
+修改时区后无需重新导入消息。重新导入的历史消息还存在 Slack 精确日期修饰符兼容问题；runtime
+内置的 `imported-date-filter.patch` 会在不改变 MCP 工具 schema 的前提下，把
+`on:`/`during:` 转换为等价的排他日期范围。更新该补丁后需要重建 runtime 镜像并
+重启服务。随后运行 `test_server_v2.py --server slack`；检查会同时验证 epoch、CSV
+和 UTC 日期过滤，任一不一致都会失败。也可通过 Slack API 确认账号返回
+`tz_offset=0`。
 
 ### 顺带修好官方的一个 bug
 
-官方平移了导出，却**忘了同步更新 GT claims**。所以有 2 条任务在**原始状态下就是不可能拿分的**：
+官方平移了导出，却**忘了同步更新题面和 GT claims**。其中既有完整日期，也有
+`June 2025` 这样的月份条件和依赖年份的算术：
 
 ```
 claim 说 : The user "mcpdumple" posted on 2025-06-27 ...
 数据实际 : 2025-12-05 ...          ← 模型如实回答 12-05，裁判拿 06-27 比对 → 判不通过
 ```
 
-`--fix-claims` 会把这类日期一起平移修正。它**只改能对上导出消息日期的日期**，同一条 claim 里的 git commit 日期、电影上映日期一律不碰。
+`--fix-claims` 会同步修正这类题面、claims 和年份算术。它**只改能由导出消息日期
+验证的日期**，同一任务里的 Git commit 日期、电影上映日期一律不碰。
 
 ---
 
@@ -56,14 +78,14 @@ uv run prepare_slack_import.py --fix-claims
 3. 平移所有 `ts` / `edited.ts` / `files[].created|timestamp`，并把按日期命名的 JSON 改名到新日期
 4. 产出 → **`data_exports/slack_mcp_eval_export_<MMDD>.zip`**
 5. `--fix-claims`：从官方 `MCP-Atlas-origin.csv` 派生 Git 忽略的
-   `MCP-Atlas.csv`，同步修正绑定 slack 日期的 claim
+   `MCP-Atlas.csv`，同步修正绑定 Slack 日期的题面、claims 和年份算术
 6. 打印**下次到期日**
 
 常用参数：
 
 | 参数 | 说明 |
 |---|---|
-| `--fix-claims` | 同步修正 GT claims。不加则只 dry-run 打印会改什么，不写入 |
+| `--fix-claims` | 同步修正题面、GT claims 和年份算术。不加则只 dry-run 打印会改什么，不写入 |
 | `--days-ago N` | 让最新消息落到 N 天前（默认 3） |
 | `--src` / `--out` / `--csv` | 覆盖默认路径 |
 
@@ -73,7 +95,7 @@ uv run prepare_slack_import.py --fix-claims
 
 ```
 data_exports/slack_mcp_eval_export.zip → ..._<MMDD>.zip             （平移时间戳）
-services/mcp_eval/MCP-Atlas-origin.csv → MCP-Atlas.csv（平移 claim 日期）
+services/mcp_eval/MCP-Atlas-origin.csv → MCP-Atlas.csv（平移题面/claim 日期并重算年份算术）
 ```
 
 **不在上一轮结果上叠加**，所以同一天用相同参数重复运行是幂等的，不会二次平移。
@@ -87,7 +109,8 @@ services/mcp_eval/MCP-Atlas-origin.csv → MCP-Atlas.csv（平移 claim 日期�
 
 - `MCP-Atlas-origin.csv`：Git 跟踪的官方原版，严格官方复测使用。
 - `MCP-Atlas.csv`：本机生成、Git 忽略的免费 Slack 对齐版。
-- 对齐版与官方原版相比只改 2 个 `GTFA_CLAIMS` 单元格；另外四列完全相同。
+- 对齐版与官方原版相比改 2 个 `PROMPT` 和 3 个 `GTFA_CLAIMS` 单元格；
+  `TASK`、`TRAJECTORY` 保持不变，`ENABLED_TOOLS` 仅做当前 runtime 兼容适配。
 - 免费 Slack 运行时在 `.env` 设置
   `MCP_COMPLETION_INPUT=MCP-Atlas.csv`。
 - 严格官方原版运行时设置 `MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv`。
