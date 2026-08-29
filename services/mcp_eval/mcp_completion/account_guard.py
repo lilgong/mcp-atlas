@@ -66,9 +66,19 @@ def is_fatal_mcp_account_error(server: str, result: Any) -> bool:
     no account that this runner could repair, so those strings must never stop
     a batch as an account failure.
     """
-    return bool(credential_envs_for_mcp_server(server)) and is_fatal_tool_result(
-        result
-    )
+    if not credential_envs_for_mcp_server(server):
+        return False
+
+    # E2B can wrap this account-level HTTP 403 in an otherwise successful MCP
+    # content envelope whose text starts with JSON rather than ``Error:``.
+    # Keep the exception server-specific so an unrelated credentialed MCP that
+    # merely mentions payment methods in ordinary content cannot stop a run.
+    if server == "e2b-server":
+        serialized = _serialize_tool_result(result).casefold()
+        if "team is blocked: missing payment method" in serialized:
+            return True
+
+    return is_fatal_tool_result(result)
 
 
 def describe_fatal_account_error(error: FatalAccountError) -> str:
@@ -132,6 +142,7 @@ _FATAL_ACCOUNT_MARKERS = (
     "monthly quota exceeded",
     "usage limit has been reached",
     "billing hard limit has been reached",
+    "team is blocked: missing payment method",
     "账户余额不足",
     "余额不足",
     "额度不足",
@@ -211,3 +222,14 @@ def is_fatal_tool_result(result: Any) -> bool:
         "web_search_exa error",
     )
     return any(text.lstrip().casefold().startswith(error_prefixes) for text in texts)
+
+
+def _serialize_tool_result(result: Any) -> str:
+    """Serialize an MCP result for exact, server-scoped account markers."""
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    elif isinstance(result, dict):
+        payload = result
+    else:
+        return str(result or "")
+    return json.dumps(payload, ensure_ascii=False)

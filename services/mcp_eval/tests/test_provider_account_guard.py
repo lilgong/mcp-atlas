@@ -99,6 +99,27 @@ def test_exa_credit_limit_text_is_fatal():
     assert is_fatal_mcp_account_error("exa", result)
 
 
+def test_e2b_missing_payment_method_inside_json_text_is_fatal():
+    result = {
+        "content": [{
+            "type": "text",
+            "text": (
+                '{"detail":"Failed to call tool '
+                "'e2b-server_run_code': 403: team is blocked: "
+                'missing payment method"}'
+            ),
+        }],
+        # e2b-server returns the upstream account failure inside a normal MCP
+        # content envelope, so this cannot depend on is_error being true.
+        "is_error": False,
+    }
+
+    assert is_fatal_account_error(result)
+    assert is_fatal_mcp_account_error("e2b-server", result)
+    assert not is_fatal_mcp_account_error("github", result)
+    assert credential_envs_for_mcp_server("e2b-server") == ("E2B_API_KEY",)
+
+
 @pytest.mark.parametrize(
     ("server", "text"),
     [
