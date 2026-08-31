@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def _tool_result_char_limit() -> int:
     """Per-tool-call character budget; 0 or less disables clamping."""
-    return int(os.getenv("MAX_TOOL_RESULT_CHARS", "120000"))
+    return int(os.getenv("MAX_TOOL_RESULT_CHARS", "0"))
 
 
 def _turn_result_char_limit() -> int:
@@ -41,7 +41,7 @@ def _turn_result_char_limit() -> int:
     calls each clipped to the per-call limit still add seven times that much
     to the context in a single turn.
     """
-    return int(os.getenv("MAX_TURN_TOOL_RESULT_CHARS", "150000"))
+    return int(os.getenv("MAX_TURN_TOOL_RESULT_CHARS", "0"))
 
 
 def _call_budget(turn_budget: int, calls_left: int, per_call: int) -> int:

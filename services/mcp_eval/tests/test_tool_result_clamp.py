@@ -1,10 +1,22 @@
+import os
 import unittest
+from unittest.mock import patch
 
-from mcp_completion.agent_eval import _call_budget, _clamp_tool_result
+from mcp_completion.agent_eval import (
+    _call_budget,
+    _clamp_tool_result,
+    _tool_result_char_limit,
+    _turn_result_char_limit,
+)
 from mcp_completion.schema import ImageContent, TextContent
 
 
 class ClampToolResultTests(unittest.TestCase):
+    def test_default_limits_disable_clamping(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_tool_result_char_limit(), 0)
+            self.assertEqual(_turn_result_char_limit(), 0)
+
     def test_small_result_passes_through_untouched(self):
         content = [TextContent(type="text", text="ok")]
         clamped, dropped, kept = _clamp_tool_result(content, 1000)
