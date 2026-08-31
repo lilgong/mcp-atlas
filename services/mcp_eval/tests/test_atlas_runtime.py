@@ -313,17 +313,25 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 dockerfile,
             )
 
-    def test_git_trust_is_scoped_to_task_repositories(self):
+    def test_git_trust_is_shared_by_git_and_code_execution_servers(self):
         template = json.loads(
             (
                 ROOT / "services/task-sandbox/local_mcp_server_template.json"
             ).read_text(encoding="utf-8")
         )
-        env = template["mcpServers"]["git"]["env"]
-        self.assertEqual(
-            {"GIT_CONFIG_GLOBAL": "/data/.atlas-gitconfig"},
-            env,
-        )
+        expected = "/data/.atlas-gitconfig"
+        for server in (
+            "git",
+            "mcp-code-executor",
+            "mcp-server-code-runner",
+        ):
+            with self.subTest(server=server):
+                self.assertEqual(
+                    expected,
+                    template["mcpServers"][server]["env"][
+                        "GIT_CONFIG_GLOBAL"
+                    ],
+                )
 
     def test_git_safe_config_lists_only_exact_task_repositories(self):
         with tempfile.TemporaryDirectory() as raw:
