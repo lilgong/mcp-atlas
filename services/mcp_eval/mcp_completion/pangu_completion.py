@@ -1,15 +1,15 @@
+import asyncio
+import json
 import os
 import time
-import json
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
+from typing import Optional
 
-from .runtime_log import write_runtime_event
-
-import requests
+import aiofiles
+import httpx
 
 from .account_guard import FatalAccountError, is_fatal_account_error
+from .runtime_log import write_runtime_event
+
 
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
@@ -18,15 +18,12 @@ os.environ["NO_PROXY"] = "*"
 PANGU_TIMEOUT = int(os.getenv("PANGU_TIMEOUT", "1800"))
 PANGU_MAX_RETRIES = int(os.getenv("PANGU_MAX_RETRIES", "5"))
 PANGU_RETRY_DELAY = int(os.getenv("PANGU_RETRY_DELAY", "3"))
-MCP_COMPLETION_CONCURRENCY = int(os.getenv("MCP_COMPLETION_CONCURRENCY", "30"))
 
-# Pangu uses a synchronous requests client, so give it a dedicated executor.
-# Matching the task concurrency avoids Python's smaller implicit thread-pool
-# limit and prevents long model requests from starving unrelated to_thread work.
-_PANGU_EXECUTOR = ThreadPoolExecutor(
-    max_workers=MCP_COMPLETION_CONCURRENCY,
-    thread_name_prefix="pangu-request",
-)
+# Model HTTP requests are asynchronous. Concurrency belongs to each caller of
+# the completion service (mcp_completion_script.py), rather than to one global
+# executor shared by every run and model handled by this process.
+_PANGU_CLIENT: Optional[httpx.AsyncClient] = None
+_PANGU_LOG_LOCK = asyncio.Lock()
 
 
 def require_env(name: str) -> str:
@@ -48,12 +45,51 @@ def get_pangu_log_path() -> str:
     log_path = os.getenv("PANGU_LOG_PATH")
     if not log_path:
         log_dir = os.getenv("PANGU_LOG_DIR", "completion_results")
-        log_path = os.path.join(log_dir, f"pangu_response_{time.strftime('%Y%m%d')}.jsonl")
+        log_path = os.path.join(
+            log_dir, f"pangu_response_{time.strftime('%Y%m%d')}.jsonl"
+        )
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     return log_path
 
 
-def generate_pangu(
+def _get_pangu_client() -> httpx.AsyncClient:
+    """Return the process-wide connection pool without a request limit."""
+
+    global _PANGU_CLIENT
+    if _PANGU_CLIENT is None or _PANGU_CLIENT.is_closed:
+        _PANGU_CLIENT = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=None,
+                max_keepalive_connections=100,
+            ),
+            timeout=httpx.Timeout(PANGU_TIMEOUT),
+            trust_env=False,
+        )
+    return _PANGU_CLIENT
+
+
+async def close_pangu_client() -> None:
+    """Close pooled gateway connections during service shutdown."""
+
+    global _PANGU_CLIENT
+    client = _PANGU_CLIENT
+    _PANGU_CLIENT = None
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
+
+async def _append_pangu_log(messages, result) -> None:
+    line = json.dumps(
+        {"messages": messages, "response": result}, ensure_ascii=False
+    ) + "\n"
+    async with _PANGU_LOG_LOCK:
+        async with aiofiles.open(
+            get_pangu_log_path(), "a", encoding="utf-8"
+        ) as out_file:
+            await out_file.write(line)
+
+
+async def generate_pangu_async(
     model,
     messages,
     tools,
@@ -63,13 +99,13 @@ def generate_pangu(
     call_id: str = "",
 ):
     assert model.startswith("pangu/"), "盘古模型命名错误"
-    model = model.replace("pangu/", "")
+    model = model.replace("pangu/", "", 1)
 
-    headers = {"Content-Type": "application/json",
-               "Authorization": f"Bearer {get_pangu_api_key()}"}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {get_pangu_api_key()}",
+    }
     api_url = get_pangu_api_url()
-
-
     payload = {
         "model": model,
         "messages": messages,
@@ -96,11 +132,15 @@ def generate_pangu(
             model=model,
         )
         try:
-            response = requests.post(api_url, headers=headers, json=payload, timeout=PANGU_TIMEOUT)
+            response = await _get_pangu_client().post(
+                api_url,
+                headers=headers,
+                json=payload,
+                timeout=PANGU_TIMEOUT,
+            )
             if response.status_code == 200:
                 result = response.json()
-                with open(get_pangu_log_path(), 'a+', encoding='utf-8') as out_file:
-                    out_file.write(json.dumps({"messages": messages, "response": result}, ensure_ascii=False) + '\n')
+                await _append_pangu_log(messages, result)
                 write_runtime_event(
                     "model_calls",
                     "model_provider_attempt_completed",
@@ -114,6 +154,7 @@ def generate_pangu(
                     status_code=200,
                 )
                 return result
+
             error_body = response.text.strip()[:500]
             last_exception = Exception(
                 f"Pangu HTTP {response.status_code}: {error_body or '<empty body>'}"
@@ -128,10 +169,12 @@ def generate_pangu(
                     source_name=f"pangu/{model}",
                     credential_envs=(credential_env,),
                 ) from last_exception
-        except requests.exceptions.Timeout:
-            last_exception = Exception(f"Pangu request timed out after {PANGU_TIMEOUT}s")
-        except requests.exceptions.RequestException as e:
-            last_exception = e
+        except httpx.TimeoutException:
+            last_exception = Exception(
+                f"Pangu request timed out after {PANGU_TIMEOUT}s"
+            )
+        except httpx.RequestError as error:
+            last_exception = error
 
         write_runtime_event(
             "model_calls",
@@ -147,41 +190,19 @@ def generate_pangu(
         )
 
         if attempt < PANGU_MAX_RETRIES:
-            time.sleep(PANGU_RETRY_DELAY)
+            await asyncio.sleep(PANGU_RETRY_DELAY)
 
-    raise Exception(f"Pangu request failed after {PANGU_MAX_RETRIES} attempts: {last_exception}")
-
-
-async def generate_pangu_async(
-    model,
-    messages,
-    tools,
-    *,
-    task_id: str = "unknown",
-    turn: int = 0,
-    call_id: str = "",
-):
-    # generate_pangu 内部用同步 requests + time.sleep + 文件写入，直接 await 会冻住
-    # uvicorn 的 asyncio 事件循环、卡掉整个 server。使用专用线程池，线程数与
-    # MCP_COMPLETION_CONCURRENCY 一致，也不会占满 asyncio 的默认线程池。
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _PANGU_EXECUTOR,
-        partial(
-            generate_pangu,
-            model,
-            messages,
-            tools,
-            task_id=task_id,
-            turn=turn,
-            call_id=call_id,
-        ),
+    raise Exception(
+        f"Pangu request failed after {PANGU_MAX_RETRIES} attempts: {last_exception}"
     )
 
 
 if __name__ == "__main__":
-    model_ = "pangu/92B-B005-stage2-9250-agent"  # 盘古模型开头是pangu/
-    messages_ = [{"role": "user", "content": "你好"}]
-    tools_ = []
-    response_ = generate_pangu(model_, messages_, tools_)
+    response_ = asyncio.run(
+        generate_pangu_async(
+            "pangu/92B-B005-stage2-9250-agent",
+            [{"role": "user", "content": "你好"}],
+            [],
+        )
+    )
     print(response_)

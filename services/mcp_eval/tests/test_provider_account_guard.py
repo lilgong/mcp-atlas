@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from mcp_completion.account_guard import (
@@ -292,12 +294,23 @@ def test_pangu_billing_response_identifies_the_active_key(monkeypatch):
         status_code = 402
         text = "insufficient balance"
 
+    class Client:
+        is_closed = False
+
+        async def post(self, *args, **kwargs):
+            return Response()
+
     monkeypatch.setenv("PANGU_API_KEY", "secret-test-value")
     monkeypatch.setenv("PANGU_API_URL", "https://example.invalid/v1")
-    monkeypatch.setattr(pangu_completion.requests, "post", lambda *a, **k: Response())
+    monkeypatch.setattr(pangu_completion, "_get_pangu_client", lambda: Client())
+    monkeypatch.setattr(
+        pangu_completion, "write_runtime_event", lambda *args, **kwargs: None
+    )
 
     with pytest.raises(FatalAccountError) as raised:
-        pangu_completion.generate_pangu("pangu/test-model", [], [])
+        asyncio.run(
+            pangu_completion.generate_pangu_async("pangu/test-model", [], [])
+        )
 
     assert raised.value.source_name == "pangu/test-model"
     assert raised.value.credential_envs == ("PANGU_API_KEY",)
