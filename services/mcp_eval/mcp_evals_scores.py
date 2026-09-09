@@ -65,7 +65,7 @@ os.environ["NO_PROXY"] = "*"
 
 # Per-request wall clock for a single claim judgement. litellm's default is
 # 6000s, which turns one upstream stall into an hour of held concurrency.
-EVAL_REQUEST_TIMEOUT = float(os.getenv("EVAL_REQUEST_TIMEOUT", "120"))
+EVAL_REQUEST_TIMEOUT = float(os.getenv("EVAL_REQUEST_TIMEOUT", "600"))
 
 # =========================================================================
 # 1. CONFIGURATION AND SETUP
