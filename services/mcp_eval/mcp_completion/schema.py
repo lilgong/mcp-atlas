@@ -124,6 +124,7 @@ class RunAgentAPIRequestBody(BaseModel):
         alias="retryThinkingContractViolations",
     )
     task_id: Optional[str] = Field(None, alias="taskId")
+    evaluation_id: Optional[str] = Field(None, alias="evaluationId")
 
     class Config:
         populate_by_name = True

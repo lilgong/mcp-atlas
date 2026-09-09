@@ -1,5 +1,8 @@
 import asyncio
 
+import httpx
+import pytest
+
 from mcp_completion import pangu_completion
 
 
@@ -95,6 +98,57 @@ def test_cancelling_model_call_cancels_async_gateway_wait(monkeypatch):
         else:
             raise AssertionError("cancelled model call unexpectedly completed")
         assert client.cancelled.is_set()
+
+    _disable_logs(monkeypatch)
+    asyncio.run(scenario())
+
+
+def test_provider_timeout_is_not_retried(monkeypatch):
+    class Client:
+        is_closed = False
+
+        def __init__(self):
+            self.calls = 0
+
+        async def post(self, *args, **kwargs):
+            self.calls += 1
+            raise httpx.ReadTimeout("slow upstream")
+
+    async def scenario():
+        client = Client()
+        monkeypatch.setattr(pangu_completion, "_get_pangu_client", lambda: client)
+        with pytest.raises(Exception, match="after 1 attempt"):
+            await pangu_completion.generate_pangu_async("pangu/model", [], [])
+        assert client.calls == 1
+
+    _disable_logs(monkeypatch)
+    asyncio.run(scenario())
+
+
+def test_provider_bad_request_is_not_retried_and_rid_is_forwarded(monkeypatch):
+    class Response:
+        status_code = 400
+        text = "longer than the model's context length"
+
+    class Client:
+        is_closed = False
+
+        def __init__(self):
+            self.payloads = []
+
+        async def post(self, *args, **kwargs):
+            self.payloads.append(kwargs["json"])
+            return Response()
+
+    async def scenario():
+        client = Client()
+        monkeypatch.setattr(pangu_completion, "_get_pangu_client", lambda: client)
+        with pytest.raises(Exception, match="after 1 attempt"):
+            await pangu_completion.generate_pangu_async(
+                "pangu/model", [], [], call_id="call-123"
+            )
+        assert len(client.payloads) == 1
+        assert client.payloads[0]["rid"] == "call-123"
 
     _disable_logs(monkeypatch)
     asyncio.run(scenario())

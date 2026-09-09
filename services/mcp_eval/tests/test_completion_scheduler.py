@@ -20,10 +20,30 @@ try:
         AsyncMCPTrajectoryGenerator,
         TerminalTaskError,
         extract_final_assistant_content,
+        resolve_system_prompt,
         validate_completion_output,
     )
 finally:
     os.chdir(original_cwd)
+
+
+def test_custom_system_prompt_file_overrides_built_in(tmp_path):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("custom system prompt\n", encoding="utf-8")
+
+    assert resolve_system_prompt(True, str(prompt_file)) == "custom system prompt"
+
+
+def test_disabled_system_prompt_does_not_read_configured_file():
+    assert resolve_system_prompt(False, "/missing/prompt.txt") is None
+
+
+def test_enabled_empty_system_prompt_file_is_rejected(tmp_path):
+    prompt_file = tmp_path / "empty.txt"
+    prompt_file.write_text(" \n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="system prompt file is empty"):
+        resolve_system_prompt(True, str(prompt_file))
 
 
 def test_final_response_matches_official_runner_when_tool_message_is_last():
@@ -186,6 +206,91 @@ def test_exhausted_live_request_is_terminal(monkeypatch):
     asyncio.run(run())
 
 
+def test_timeout_cancels_exact_attempt_before_retry(monkeypatch):
+    events = []
+
+    class RequestContext:
+        async def __aenter__(self):
+            raise asyncio.TimeoutError()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Session:
+        def post(self, *_args, **kwargs):
+            events.append(("post", kwargs["json"]["evaluationId"]))
+            return RequestContext()
+
+    async def fake_cancel(evaluation_id):
+        events.append(("cancel", evaluation_id))
+
+    async def no_sleep(_delay):
+        return None
+
+    async def run():
+        generator = AsyncMCPTrajectoryGenerator("test-model")
+        generator.session = Session()
+        monkeypatch.setattr("mcp_completion_script.MAX_RETRY_ATTEMPTS", 2)
+        monkeypatch.setattr("mcp_completion_script.MAX_TIMEOUT_ATTEMPTS", 2)
+        monkeypatch.setattr(
+            "mcp_completion_script.cancel_remote_evaluation", fake_cancel
+        )
+        monkeypatch.setattr("mcp_completion_script.asyncio.sleep", no_sleep)
+
+        with pytest.raises(TerminalTaskError) as caught:
+            await generator.run_live_task_async([], "prompt", "timeout-task")
+
+        assert caught.value.kind == "task_timeout"
+        first_id = events[0][1]
+        second_id = events[2][1]
+        assert first_id != second_id
+        assert events == [
+            ("post", first_id),
+            ("cancel", first_id),
+            ("post", second_id),
+            ("cancel", second_id),
+        ]
+
+    asyncio.run(run())
+
+
+def test_run_cancellation_cleans_remote_attempt(monkeypatch):
+    request_started = asyncio.Event()
+    cancelled_ids = []
+
+    class RequestContext:
+        async def __aenter__(self):
+            request_started.set()
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Session:
+        def post(self, *_args, **_kwargs):
+            return RequestContext()
+
+    async def fake_cancel(evaluation_id):
+        cancelled_ids.append(evaluation_id)
+
+    async def run():
+        generator = AsyncMCPTrajectoryGenerator("test-model")
+        generator.session = Session()
+        monkeypatch.setattr(
+            "mcp_completion_script.cancel_remote_evaluation", fake_cancel
+        )
+        task = asyncio.create_task(
+            generator.run_live_task_async([], "prompt", "cancelled-task")
+        )
+        await request_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(cancelled_ids) == 1
+
+    asyncio.run(run())
+
+
 def test_fatal_account_exception_still_cancels_siblings(tmp_path):
     async def run():
         generator = AsyncMCPTrajectoryGenerator("test-model")
@@ -212,6 +317,42 @@ def test_fatal_account_exception_still_cancels_siblings(tmp_path):
             )
 
         assert sibling_cancelled.is_set()
+
+    asyncio.run(run())
+
+
+def test_cancelling_dataset_waits_for_all_task_cleanup(tmp_path):
+    async def run():
+        generator = AsyncMCPTrajectoryGenerator("test-model")
+        started = 0
+        all_started = asyncio.Event()
+        cleaned = []
+
+        async def process(row, _output, _index, _total):
+            nonlocal started
+            started += 1
+            if started == 2:
+                all_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleaned.append(row["TASK"])
+
+        generator.process_single_task = process
+        frame = pd.DataFrame([{"TASK": "one"}, {"TASK": "two"}])
+        evaluation = asyncio.create_task(
+            generator.evaluate_dataset_async(
+                frame,
+                str(tmp_path / "results.csv"),
+                max_concurrent_requests=2,
+            )
+        )
+        await all_started.wait()
+        evaluation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await evaluation
+        assert sorted(cleaned) == ["one", "two"]
 
     asyncio.run(run())
 

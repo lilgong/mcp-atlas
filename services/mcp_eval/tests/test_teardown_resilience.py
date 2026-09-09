@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from mcp_completion import main as completion_main
 from mcp_completion import task_sandbox
@@ -153,11 +154,30 @@ class TeardownFailureIsolationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        completion_main._ACTIVE_EVALUATIONS.clear()
+
+    def tearDown(self):
+        completion_main._ACTIVE_EVALUATIONS.clear()
+
+    async def test_disconnect_watcher_reads_real_asgi_event(self):
+        messages = asyncio.Queue()
+        await messages.put({"type": "http.request", "body": b"", "more_body": False})
+        await messages.put({"type": "http.disconnect"})
+
+        async def receive():
+            return await messages.get()
+
+        request = Request({"type": "http", "method": "POST", "path": "/"}, receive)
+        await asyncio.wait_for(
+            completion_main._wait_for_disconnect(request), timeout=1
+        )
+
     async def test_completed_evaluation_cancels_disconnect_watcher(self):
         watcher_cancelled = asyncio.Event()
 
         class ConnectedRequest:
-            async def is_disconnected(self):
+            async def receive(self):
                 try:
                     await asyncio.Event().wait()
                 finally:
@@ -170,51 +190,21 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
             completion_main, "_collect_agent_outputs", side_effect=fake_outputs
         ):
             result = await completion_main._collect_until_disconnect(
-                SimpleNamespace(task_id="task-ok"), ConnectedRequest()
+                SimpleNamespace(task_id="task-ok", evaluation_id="eval-ok"),
+                ConnectedRequest(),
             )
 
         self.assertEqual(result[0]["data"]["content"], "done")
         self.assertTrue(watcher_cancelled.is_set())
-
-    async def test_completed_evaluation_does_not_wait_for_stubborn_watcher(self):
-        watcher_release = asyncio.Event()
-
-        class ConnectedRequest:
-            async def is_disconnected(self):
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    # Mirrors an ASGI receive callable which only finishes
-                    # after the response scope closes.
-                    await watcher_release.wait()
-                return True
-
-        async def fake_outputs(_body):
-            return [{"type": "message", "data": {"content": "done"}}]
-
-        try:
-            with patch.object(
-                completion_main, "_collect_agent_outputs", side_effect=fake_outputs
-            ):
-                result = await asyncio.wait_for(
-                    completion_main._collect_until_disconnect(
-                        SimpleNamespace(task_id="task-ok"), ConnectedRequest()
-                    ),
-                    timeout=1,
-                )
-            self.assertEqual(result[0]["data"]["content"], "done")
-        finally:
-            watcher_release.set()
-            await asyncio.sleep(0)
 
     async def test_disconnect_cancels_evaluation_and_waits_for_cleanup(self):
         evaluation_started = asyncio.Event()
         cleanup_finished = asyncio.Event()
 
         class DisconnectedRequest:
-            async def is_disconnected(self):
+            async def receive(self):
                 await evaluation_started.wait()
-                return True
+                return {"type": "http.disconnect"}
 
         async def fake_outputs(_body):
             evaluation_started.set()
@@ -229,7 +219,10 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(completion_main, "write_runtime_event") as runtime_event:
             with self.assertRaises(HTTPException) as raised:
                 await completion_main._collect_until_disconnect(
-                    SimpleNamespace(task_id="task-gone"), DisconnectedRequest()
+                    SimpleNamespace(
+                        task_id="task-gone", evaluation_id="eval-gone"
+                    ),
+                    DisconnectedRequest(),
                 )
 
         self.assertEqual(raised.exception.status_code, 499)
@@ -237,6 +230,7 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
         runtime_event.assert_called_once_with(
             "service",
             "evaluation_cancelled_after_client_disconnect",
+            evaluation_id="eval-gone",
             task_id="task-gone",
         )
 
@@ -245,7 +239,7 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
         cleanup_finished = asyncio.Event()
 
         class ConnectedRequest:
-            async def is_disconnected(self):
+            async def receive(self):
                 await asyncio.Event().wait()
 
         async def fake_outputs(_body):
@@ -260,7 +254,10 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
         ):
             request_task = asyncio.create_task(
                 completion_main._collect_until_disconnect(
-                    SimpleNamespace(task_id="task-cancelled"), ConnectedRequest()
+                    SimpleNamespace(
+                        task_id="task-cancelled", evaluation_id="eval-cancelled"
+                    ),
+                    ConnectedRequest(),
                 )
             )
             await evaluation_started.wait()
@@ -269,6 +266,38 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
                 await request_task
 
         self.assertTrue(cleanup_finished.is_set())
+
+    async def test_cancel_endpoint_targets_one_evaluation_and_waits_for_cleanup(self):
+        started = asyncio.Event()
+        cleanup_finished = asyncio.Event()
+
+        class ConnectedRequest:
+            async def receive(self):
+                await asyncio.Event().wait()
+
+        async def fake_outputs(_body):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleanup_finished.set()
+
+        body = SimpleNamespace(task_id="task-explicit", evaluation_id="eval-explicit")
+        with patch.object(
+            completion_main, "_collect_agent_outputs", side_effect=fake_outputs
+        ), patch.object(completion_main, "write_runtime_event"):
+            request_task = asyncio.create_task(
+                completion_main._collect_until_disconnect(body, ConnectedRequest())
+            )
+            await started.wait()
+            result = await completion_main.cancel_evaluation("eval-explicit")
+            await asyncio.gather(request_task, return_exceptions=True)
+
+        self.assertTrue(result["found"])
+        self.assertTrue(result["cleanupCompleted"])
+        self.assertTrue(cleanup_finished.is_set())
+        self.assertNotIn("eval-explicit", completion_main._ACTIVE_EVALUATIONS)
 
 
 class MalformedToolCallTests(unittest.TestCase):

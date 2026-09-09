@@ -76,6 +76,7 @@ MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 # A long-context task can legitimately run for most of an hour; the timeout is
 # only meant to catch a genuinely wedged request.
 REQUEST_TIMEOUT = float(os.getenv("TASK_REQUEST_TIMEOUT", "3600"))
+CANCEL_TIMEOUT = float(os.getenv("TASK_CANCEL_TIMEOUT", "180"))
 
 # Timeouts are deterministic, not flaky: an identical retry re-runs the same
 # turns and blows the same budget. Cap them well below MAX_RETRY_ATTEMPTS so a
@@ -118,9 +119,51 @@ def fatal_account_error_from_service(error_text: str) -> FatalAccountError:
         )
 
 
-# System prompt for the model (only used if USE_SYSTEM_PROMPT_IN_COMPLETION=true)
-SYSTEM_PROMPT = "Role: You are a factual, tool-aware assistant connected to a variety of tools. Use the available tools to answer the user query. Do not ask the user for clarification; fully complete the task using the information provided in the prompt."
+async def cancel_remote_evaluation(evaluation_id: str) -> None:
+    """Cancel one server-side attempt and wait until teardown is complete."""
+    url = f"{SERVER_URL}/v2/mcp_eval/cancel/{evaluation_id}"
+    timeout = aiohttp.ClientTimeout(total=CANCEL_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url) as response:
+            body = await response.text()
+            if response.status != 200:
+                raise RuntimeError(
+                    f"cancel endpoint returned HTTP {response.status}: {body[:500]}"
+                )
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("cancel endpoint returned invalid JSON") from exc
+            if not result.get("cleanupCompleted"):
+                raise RuntimeError("cancel endpoint did not confirm cleanup")
+
+
+# System prompt for the model (only used if USE_SYSTEM_PROMPT_IN_COMPLETION=true).
+DEFAULT_SYSTEM_PROMPT = "Role: You are a factual, tool-aware assistant connected to a variety of tools. Use the available tools to answer the user query. Do not ask the user for clarification; fully complete the task using the information provided in the prompt."
 USE_SYSTEM_PROMPT = os.getenv("USE_SYSTEM_PROMPT_IN_COMPLETION", "").lower() == "true"
+SYSTEM_PROMPT_FILE = os.getenv("MCP_COMPLETION_SYSTEM_PROMPT_FILE", "").strip()
+
+
+def resolve_system_prompt(enabled: bool, prompt_file: str) -> Optional[str]:
+    """Return the configured prompt without changing the default-off contract."""
+    if not enabled:
+        return None
+    if not prompt_file:
+        return DEFAULT_SYSTEM_PROMPT
+
+    path = Path(prompt_file).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[2] / path
+    try:
+        prompt = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"failed to read system prompt file {path}: {exc}") from exc
+    if not prompt:
+        raise RuntimeError(f"system prompt file is empty: {path}")
+    return prompt
+
+
+SYSTEM_PROMPT = resolve_system_prompt(USE_SYSTEM_PROMPT, SYSTEM_PROMPT_FILE)
 
 
 @dataclass
@@ -316,11 +359,11 @@ class AsyncMCPTrajectoryGenerator:
             return str(uuid.uuid4()).replace("-", "")[-14:]
 
         messages = []
-        if USE_SYSTEM_PROMPT:
+        if SYSTEM_PROMPT is not None:
             messages.append({"role": "system", "content": SYSTEM_PROMPT})
         messages.append({"role": "user", "content": user_prompt})
 
-        payload = {
+        base_payload = {
             "model": self.llm_model,
             "messages": messages,
             "enabledTools": enabled_tools,
@@ -339,6 +382,8 @@ class AsyncMCPTrajectoryGenerator:
         last_failure_kind = "no_usable_response"
         last_failure = "the agent did not return a usable response"
         for attempt in range(MAX_RETRY_ATTEMPTS):
+            evaluation_id = uuid.uuid4().hex
+            payload = {**base_payload, "evaluationId": evaluation_id}
             try:
                 async with self.session.post(
                     url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
@@ -375,6 +420,30 @@ class AsyncMCPTrajectoryGenerator:
                             f"HTTP {resp.status} error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for task {taskId}: {error_text}"
                         )
 
+            except asyncio.CancelledError:
+                # Ctrl-C/cancelling a run must not leave the corresponding
+                # evaluation and sandbox alive in the completion service.
+                cleanup = asyncio.create_task(
+                    cancel_remote_evaluation(evaluation_id)
+                )
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    try:
+                        await cleanup
+                    except Exception as cancel_error:
+                        logging.error(
+                            "Cancellation cleanup failed for evaluation %s: %s",
+                            evaluation_id,
+                            cancel_error,
+                        )
+                except Exception as cancel_error:
+                    logging.error(
+                        "Cancellation cleanup failed for evaluation %s: %s",
+                        evaluation_id,
+                        cancel_error,
+                    )
+                raise
             except FatalAccountError:
                 raise
             except Exception as e:
@@ -394,6 +463,16 @@ class AsyncMCPTrajectoryGenerator:
                     e or "<no detail>",
                 )
                 if isinstance(e, asyncio.TimeoutError):
+                    try:
+                        await cancel_remote_evaluation(evaluation_id)
+                    except Exception as cancel_error:
+                        raise TerminalTaskError(
+                            f"task {taskId} timed out, but evaluation "
+                            f"{evaluation_id} cleanup could not be confirmed: "
+                            f"{type(cancel_error).__name__}: {cancel_error}",
+                            kind="cancellation_failed",
+                            attempts=attempt + 1,
+                        ) from cancel_error
                     timeouts += 1
                     if timeouts >= MAX_TIMEOUT_ATTEMPTS:
                         raise TerminalTaskError(
@@ -649,10 +728,19 @@ class AsyncMCPTrajectoryGenerator:
         # keeps unexpected task-local failures resumable. Only run-wide account
         # failures escape and take this early-stop path.
         start_time = time.time()
-        done, pending = await asyncio.wait(
-            async_tasks,
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
+        try:
+            done, pending = await asyncio.wait(
+                async_tasks,
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+        except BaseException:
+            # Ensure Ctrl-C or cancellation of the run reaches every live HTTP
+            # attempt before __aexit__ closes the shared aiohttp session.
+            for task in async_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*async_tasks, return_exceptions=True)
+            raise
         escaped_errors = []
         for task in done:
             if task.cancelled():
@@ -1103,6 +1191,10 @@ async def main():
     logging.info(f"  completion_service = {SERVER_URL}")
     logging.info(f"  mcp_servers_url    = {os.getenv('MCP_SERVER_URL', 'http://localhost:1984')}")
     logging.info(f"  use_system_prompt  = {USE_SYSTEM_PROMPT}")
+    logging.info(
+        "  system_prompt_file = %s",
+        SYSTEM_PROMPT_FILE or "<built-in default>",
+    )
     logging.info(f"  max_retry_attempts = {MAX_RETRY_ATTEMPTS}")
     logging.info("======================================")
 

@@ -4,12 +4,12 @@ import asyncio
 import json
 import logging
 import os
-import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header, Request, Response
+from fastapi import FastAPI, HTTPException, Header, Request
 
 from .agent_eval import handle_run_mcp_eval
 from .schema import RunAgentAPIRequestBody
@@ -114,6 +114,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Every HTTP attempt has its own ID.  This lets the benchmark client cancel the
+# exact evaluation it timed out on and wait for its model call and sandbox to
+# finish tearing down before it retries.
+_ACTIVE_EVALUATIONS: Dict[str, asyncio.Task] = {}
+
 
 async def _collect_agent_outputs(
     body: RunAgentAPIRequestBody,
@@ -130,8 +135,13 @@ async def _collect_agent_outputs(
 
 
 async def _wait_for_disconnect(request: Request) -> None:
-    while not await request.is_disconnected():
-        await asyncio.sleep(0.25)
+    # Read the ASGI disconnect event directly. Starlette's is_disconnected()
+    # performs a non-blocking probe which can miss the event when receive has
+    # been wrapped by BaseHTTPMiddleware.
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
 
 
 async def _collect_until_disconnect(
@@ -139,7 +149,15 @@ async def _collect_until_disconnect(
     request: Request,
 ) -> List[Dict[str, Any]]:
     """Cancel this request's eval when its HTTP client stops waiting."""
+    evaluation_id = body.evaluation_id or uuid.uuid4().hex
     evaluation = asyncio.create_task(_collect_agent_outputs(body))
+    existing = _ACTIVE_EVALUATIONS.get(evaluation_id)
+    if existing is not None and not existing.done():
+        evaluation.cancel()
+        with suppress(asyncio.CancelledError):
+            await evaluation
+        raise HTTPException(status_code=409, detail="evaluationId is already active")
+    _ACTIVE_EVALUATIONS[evaluation_id] = evaluation
     disconnect = asyncio.create_task(_wait_for_disconnect(request))
     try:
         done, _ = await asyncio.wait(
@@ -149,12 +167,14 @@ async def _collect_until_disconnect(
             return await evaluation
 
         logger.warning(
-            "Client disconnected; cancelling evaluation for task_id=%s",
+            "Client disconnected; cancelling evaluation_id=%s task_id=%s",
+            evaluation_id,
             body.task_id or "generated",
         )
         write_runtime_event(
             "service",
             "evaluation_cancelled_after_client_disconnect",
+            evaluation_id=evaluation_id,
             task_id=body.task_id or "generated",
         )
         evaluation.cancel()
@@ -168,30 +188,10 @@ async def _collect_until_disconnect(
             await evaluation
         if not disconnect.done():
             disconnect.cancel()
-        # Starlette's request.is_disconnected() may be blocked in the ASGI
-        # receive callable and not acknowledge task cancellation until the
-        # response scope closes.  Waiting for that watcher here deadlocks the
-        # successful response path: the response cannot close until this
-        # handler returns.  Give ordinary asyncio waiters one scheduling turn
-        # to observe cancellation, but never make a completed evaluation wait
-        # for the request watcher.
-        await asyncio.sleep(0)
-
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log requests with their actual response status codes."""
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-
-    logger.info(
-        f"{request.client.host}:{request.client.port} - "
-        f'"{request.method} {request.url.path} HTTP/1.1" {response.status_code} '
-        f"- {process_time:.3f}s"
-    )
-
-    return response
+        with suppress(asyncio.CancelledError):
+            await disconnect
+        if _ACTIVE_EVALUATIONS.get(evaluation_id) is evaluation:
+            _ACTIVE_EVALUATIONS.pop(evaluation_id, None)
 
 
 @app.get("/")
@@ -264,6 +264,33 @@ async def run_agent(
         )
 
 
+@app.post("/v2/mcp_eval/cancel/{evaluation_id}")
+async def cancel_evaluation(evaluation_id: str):
+    """Cancel one attempt and return only after its cleanup has completed."""
+    evaluation = _ACTIVE_EVALUATIONS.get(evaluation_id)
+    if evaluation is None:
+        return {
+            "evaluationId": evaluation_id,
+            "found": False,
+            "cleanupCompleted": True,
+        }
+
+    evaluation.cancel()
+    await asyncio.gather(evaluation, return_exceptions=True)
+    if _ACTIVE_EVALUATIONS.get(evaluation_id) is evaluation:
+        _ACTIVE_EVALUATIONS.pop(evaluation_id, None)
+    write_runtime_event(
+        "service",
+        "evaluation_cancelled_by_client",
+        evaluation_id=evaluation_id,
+    )
+    return {
+        "evaluationId": evaluation_id,
+        "found": True,
+        "cleanupCompleted": True,
+    }
+
+
 def main():
     # Validate required configuration at startup
     config.validate_required_config()
@@ -276,7 +303,7 @@ def main():
         port=config.PORT,
         reload=False,  # Set to True for development
         log_level=config.LOG_LEVEL.lower(),
-        access_log=False,  # Disable default access logs (we have custom middleware)
+        access_log=True,
     )
 
 

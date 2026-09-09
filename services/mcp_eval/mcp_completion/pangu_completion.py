@@ -116,10 +116,14 @@ async def generate_pangu_async(
         # "top_k": -1,
         "top_p": 0.8,
         "seed": 1234,
+        # SGLang understands this field directly. Gateways which preserve it
+        # can use the same ID for precise downstream cancellation.
+        **({"rid": call_id} if call_id else {}),
     }
 
     last_exception = None
     for attempt in range(1, PANGU_MAX_RETRIES + 1):
+        retryable = True
         attempt_started = time.monotonic()
         write_runtime_event(
             "model_calls",
@@ -169,10 +173,19 @@ async def generate_pangu_async(
                     source_name=f"pangu/{model}",
                     credential_envs=(credential_env,),
                 ) from last_exception
+            retryable = (
+                response.status_code in {408, 429}
+                or response.status_code >= 500
+            )
         except httpx.TimeoutException:
             last_exception = Exception(
                 f"Pangu request timed out after {PANGU_TIMEOUT}s"
             )
+            # Retrying a timed-out generation can overlap the still-running
+            # upstream request when an intermediary does not propagate
+            # cancellation. Let the outer evaluation cancellation path clean
+            # it up instead of multiplying the load.
+            retryable = False
         except httpx.RequestError as error:
             last_exception = error
 
@@ -188,6 +201,11 @@ async def generate_pangu_async(
             duration_seconds=round(time.monotonic() - attempt_started, 3),
             error=str(last_exception),
         )
+
+        if not retryable:
+            raise Exception(
+                f"Pangu request failed after {attempt} attempt: {last_exception}"
+            )
 
         if attempt < PANGU_MAX_RETRIES:
             await asyncio.sleep(PANGU_RETRY_DELAY)
