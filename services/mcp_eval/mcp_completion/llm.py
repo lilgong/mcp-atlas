@@ -273,6 +273,7 @@ async def _create_openai_compatible_completion(
     task_id: str,
     turn: int,
     call_id: str,
+    prompt_cache_key: Optional[str] = None,
 ) -> Any:
     """Call the configured OpenAI-compatible endpoint with bounded retries.
 
@@ -292,6 +293,7 @@ async def _create_openai_compatible_completion(
                 api_base=config.LLM_BASE_URL,
                 timeout=config.DEFAULT_TIMEOUT,
                 max_retries=0,
+                **({"prompt_cache_key": prompt_cache_key} if prompt_cache_key else {}),
                 **({"extra_body": extra_body} if extra_body else {}),
             )
         except Exception as error:
@@ -351,6 +353,7 @@ async def create_completion(
     retry_thinking_contract_violations: bool = False,
     task_id: str = "unknown",
     turn: int = 0,
+    prompt_cache_key: Optional[str] = None,
 ) -> LLMResponse:
     """Create a completion using LiteLLM."""
 
@@ -420,6 +423,7 @@ async def create_completion(
                 task_id=task_id,
                 turn=turn,
                 call_id=call_id,
+                prompt_cache_key=prompt_cache_key,
             )
         except Exception as error:
             logger.error(f"LiteLLM completion failed: {error}")

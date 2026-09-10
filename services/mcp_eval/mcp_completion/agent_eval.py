@@ -123,6 +123,7 @@ async def run_mcp_eval(
     retry_thinking_contract_violations: bool = False,
     task_id: str = "unknown",
     include_telemetry: bool = False,
+    prompt_cache_key: Optional[str] = None,
 ) -> AsyncGenerator[AgentOutput, None]:
     """
     Simple MCP evaluation loop that keeps calling tools until the model decides there are no more tools to call.
@@ -157,6 +158,7 @@ async def run_mcp_eval(
                 retry_thinking_contract_violations=retry_thinking_contract_violations,
                 task_id=task_id,
                 turn=i + 1,
+                prompt_cache_key=prompt_cache_key,
             )
 
             assistant_message = result.message
@@ -374,5 +376,6 @@ async def handle_run_mcp_eval(
             retry_thinking_contract_violations=body.retry_thinking_contract_violations,
             task_id=task_id,
             include_telemetry=body.include_telemetry,
+            prompt_cache_key=body.prompt_cache_key,
         ):
             yield output

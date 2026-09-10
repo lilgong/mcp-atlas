@@ -37,6 +37,34 @@ class UsageNormalizationTests(unittest.TestCase):
 
 
 class AgentUsageAggregationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_forwards_one_cache_key_across_turns(self):
+        class FakeClient:
+            async def list_tools(self):
+                return []
+
+        observed = []
+
+        async def fake_completion(**kwargs):
+            observed.append(kwargs.get("prompt_cache_key"))
+            return LLMResponse(
+                message=AssistantMessage(
+                    role="assistant", content="done",
+                    original_message=LiteLLMMessage(role="assistant", content="done"),
+                    tool_calls=None,
+                ),
+                usage=None,
+            )
+
+        with (
+            patch.object(agent_eval, "create_completion", fake_completion),
+            patch.object(agent_eval, "_transform_tool_calls", lambda tools: []),
+        ):
+            _ = [item async for item in agent_eval.run_mcp_eval(
+                mcp_client=FakeClient(), model="model", messages=[],
+                max_turns=2, max_tool_calls=2, prompt_cache_key="case-prefix",
+            )]
+        self.assertEqual(observed, ["case-prefix"])
+
     async def test_opt_in_telemetry_is_returned_after_messages(self):
         class FakeClient:
             async def list_tools(self):

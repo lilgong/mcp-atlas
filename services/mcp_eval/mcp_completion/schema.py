@@ -126,6 +126,7 @@ class RunAgentAPIRequestBody(BaseModel):
     task_id: Optional[str] = Field(None, alias="taskId")
     evaluation_id: Optional[str] = Field(None, alias="evaluationId")
     include_telemetry: bool = Field(False, alias="includeTelemetry")
+    prompt_cache_key: Optional[str] = Field(None, alias="promptCacheKey", min_length=1)
 
     class Config:
         populate_by_name = True

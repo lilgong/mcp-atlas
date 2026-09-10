@@ -8,7 +8,7 @@ from mcp_completion.schema import UserMessage
 
 
 class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
-    async def _call(self, extra_body):
+    async def _call(self, extra_body, prompt_cache_key=None):
         provider_response = {
             "choices": [
                 {
@@ -30,6 +30,7 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
                 messages=[UserMessage(role="user", content="test")],
                 tools=[],
                 extra_body=extra_body,
+                prompt_cache_key=prompt_cache_key,
                 task_id="extra-body-test",
             )
         return completion.await_args.kwargs
@@ -64,6 +65,11 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["custom_llm_provider"], "openai")
         self.assertEqual(kwargs["max_retries"], 0)
         self.assertEqual(kwargs["extra_body"], {"vendor_option": "kept"})
+
+    async def test_prompt_cache_key_is_forwarded_to_litellm(self):
+        kwargs = await self._call({}, prompt_cache_key="synthesis-case-1")
+
+        self.assertEqual(kwargs["prompt_cache_key"], "synthesis-case-1")
 
 
 class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
