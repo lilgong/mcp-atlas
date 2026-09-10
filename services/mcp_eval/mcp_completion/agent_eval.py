@@ -25,6 +25,7 @@ from .schema import (
 from .errors import MCPClientToolExecutionError
 from .config import config
 from .runtime_log import write_runtime_event
+from .failure_protocol import classify_model_exception, failure_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +175,13 @@ async def run_mcp_eval(
             # earlier turns and terminate this run with an error event instead
             # of turning the whole request into an HTTP 500.
             reached_max_turns = False
-            yield AgentOutput(
-                "error",
-                {"message": str(error), "serverResponse": None},
-            )
+            yield AgentOutput("error", {
+                **classify_model_exception(error, model=model),
+                # Kept for existing MCP-Atlas clients. New orchestration must
+                # branch on reason_code/failure_class, never parse this text.
+                "message": str(error),
+                "serverResponse": None,
+            })
             break
 
         if assistant_message is None:
@@ -300,9 +304,15 @@ async def run_mcp_eval(
 
     if reached_max_tool_calls:
         data = {
-            "reason": "max_tool_calls_reached",
+            **failure_receipt(
+                failure_class="quality",
+                reason_code="max_tool_calls_reached",
+                retryable=False,
+                source_kind="agent",
+            ),
             "maxToolCalls": max_tool_calls,
             "totalToolCalls": total_tool_calls,
+            "reason": "max_tool_calls_reached",
         }
         logger.warning("Agent loop reached max tool calls: %s", data)
         write_runtime_event(
@@ -313,7 +323,16 @@ async def run_mcp_eval(
         )
         yield AgentOutput("error", data)
     elif reached_max_turns:
-        data = {"reason": "max_turns_reached", "maxTurns": max_turns}
+        data = {
+            **failure_receipt(
+                failure_class="quality",
+                reason_code="max_turns_reached",
+                retryable=False,
+                source_kind="agent",
+            ),
+            "maxTurns": max_turns,
+            "reason": "max_turns_reached",
+        }
         logger.warning("Agent loop reached max turns: %s", data)
         write_runtime_event(
             "model_calls", "max_turns_reached", task_id=task_id, **data

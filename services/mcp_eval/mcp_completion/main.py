@@ -23,6 +23,7 @@ from .task_sandbox import (
     reap_owned_task_sandboxes,
     run_orphan_sweeper,
 )
+from .failure_protocol import failure_receipt
 
 # Configure logging
 logging.basicConfig(
@@ -245,6 +246,13 @@ async def run_agent(
             status_code=402,
             detail={
                 "code": "fatal_account_error",
+                **failure_receipt(
+                    failure_class="account_fatal",
+                    reason_code="fatal_account_error",
+                    retryable=False,
+                    source_kind=error.source_kind,
+                    source_name=error.source_name,
+                ),
                 "error": str(error),
                 "source_kind": error.source_kind,
                 "source_name": error.source_name,
@@ -254,14 +262,33 @@ async def run_agent(
 
     except MCPClientToolExecutionError as error:
         logger.error(f"MCP client tool execution error: {error}")
-        raise HTTPException(status_code=500, detail={"error": str(error)})
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "mcp_tool_execution_error",
+                **failure_receipt(
+                    failure_class="infrastructure",
+                    reason_code="mcp_tool_execution_error",
+                    retryable=False,
+                    source_kind="mcp",
+                    detail_code=type(error).__name__,
+                ),
+            },
+        )
 
     except Exception as error:
         logger.error(f"Error during MCP eval execution: {error}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Unknown error during mcp_eval: {str(error)}",
+                "code": "runtime_internal_error",
+                **failure_receipt(
+                    failure_class="infrastructure",
+                    reason_code="runtime_internal_error",
+                    retryable=False,
+                    source_kind="runtime",
+                    detail_code=type(error).__name__,
+                ),
             },
         )
 
