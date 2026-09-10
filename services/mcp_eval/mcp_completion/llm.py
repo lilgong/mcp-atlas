@@ -145,6 +145,32 @@ class LLMResponse(BaseModel):
     original_content: Optional[str] = None
     dropped_tool_calls: int = 0
     repaired_tool_calls: int = 0
+    usage: Optional[Dict[str, Any]] = None
+
+
+def _normalized_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """Normalize provider usage without turning absent cache telemetry into zero."""
+    value = jsonable(usage)
+    if not isinstance(value, dict):
+        return None
+    details = value.get("prompt_tokens_details") or value.get("input_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    cache_reported = (
+        "cached_tokens" in details
+        or "cache_read_input_tokens" in value
+        or "cached_tokens" in value
+    )
+    return {
+        "input_tokens": int(value.get("prompt_tokens") or value.get("input_tokens") or 0),
+        "output_tokens": int(value.get("completion_tokens") or value.get("output_tokens") or 0),
+        "cached_tokens": int(
+            details.get("cached_tokens")
+            or value.get("cache_read_input_tokens")
+            or value.get("cached_tokens")
+            or 0
+        ),
+        "cache_reported": cache_reported,
+    }
 
 
 # Only braces are ever restored, shortest first. The observed defect drops
@@ -361,6 +387,9 @@ async def create_completion(
     reasoning_content = None
     content = ""
     call_id = ""
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    usage_seen = False
+    cache_reported = True
 
     for attempt in range(1, max_attempts + 1):
         call_id = uuid.uuid4().hex
@@ -420,6 +449,12 @@ async def create_completion(
             usage = jsonable(getattr(response, "usage", None))
         elif isinstance(response.get("usage"), dict):
             usage = response.get("usage")
+        normalized_usage = _normalized_usage(usage)
+        if normalized_usage is not None:
+            usage_seen = True
+            for key in total_usage:
+                total_usage[key] += int(normalized_usage[key])
+            cache_reported = cache_reported and bool(normalized_usage["cache_reported"])
         write_runtime_event(
             "model_calls",
             "model_call_completed",
@@ -547,6 +582,10 @@ async def create_completion(
             message=assistant_message,
             dropped_tool_calls=dropped_tool_calls,
             repaired_tool_calls=repaired_tool_calls,
+            usage=(
+                {**total_usage, "cache_reported": cache_reported}
+                if usage_seen else None
+            ),
         )
 
     except Exception as error:

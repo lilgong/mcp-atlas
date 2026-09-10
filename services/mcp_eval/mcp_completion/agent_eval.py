@@ -121,6 +121,7 @@ async def run_mcp_eval(
     extra_body: Optional[Dict[str, Any]] = None,
     retry_thinking_contract_violations: bool = False,
     task_id: str = "unknown",
+    include_telemetry: bool = False,
 ) -> AsyncGenerator[AgentOutput, None]:
     """
     Simple MCP evaluation loop that keeps calling tools until the model decides there are no more tools to call.
@@ -133,6 +134,9 @@ async def run_mcp_eval(
     total_tool_calls = 0
     reached_max_turns = True
     reached_max_tool_calls = False
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    usage_seen = False
+    cache_reported = True
 
     for i in range(max_turns):
         if total_tool_calls >= max_tool_calls:
@@ -156,6 +160,11 @@ async def run_mcp_eval(
 
             assistant_message = result.message
             original_content = result.original_content
+            if isinstance(result.usage, dict):
+                usage_seen = True
+                for key in total_usage:
+                    total_usage[key] += int(result.usage.get(key) or 0)
+                cache_reported = cache_reported and bool(result.usage.get("cache_reported"))
 
         except FatalAccountError:
             raise
@@ -310,6 +319,10 @@ async def run_mcp_eval(
             "model_calls", "max_turns_reached", task_id=task_id, **data
         )
         yield AgentOutput("error", data)
+    if include_telemetry:
+        yield AgentOutput("telemetry", {
+            "usage": ({**total_usage, "cache_reported": cache_reported} if usage_seen else None),
+        })
 
 
 async def handle_run_mcp_eval(
@@ -341,5 +354,6 @@ async def handle_run_mcp_eval(
             extra_body=body.extra_body,
             retry_thinking_contract_violations=body.retry_thinking_contract_violations,
             task_id=task_id,
+            include_telemetry=body.include_telemetry,
         ):
             yield output
