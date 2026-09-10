@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from run_shared_mcp import (  # noqa: E402
+    configured_env_file,
     configured_shared_port,
     validate_shared_bind_host,
 )
@@ -67,6 +68,10 @@ class RuntimeLaunchConfigTests(unittest.TestCase):
             clear=False,
         ):
             self.assertEqual(3984, configured_shared_port())
+
+    def test_orchestrator_can_select_ephemeral_env_file(self):
+        with patch.dict(os.environ, {"MCP_ATLAS_RUNTIME_ENV_FILE": "/tmp/atlas-runtime.env"}):
+            self.assertEqual(Path("/tmp/atlas-runtime.env"), configured_env_file())
 
 
 if __name__ == "__main__":

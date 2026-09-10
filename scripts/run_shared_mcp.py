@@ -13,8 +13,13 @@ from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_FILE = ROOT / ".env"
 DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
+
+
+def configured_env_file() -> Path:
+    """Allow an orchestrator-owned ephemeral env file without CLI flags."""
+    configured = os.getenv("MCP_ATLAS_RUNTIME_ENV_FILE")
+    return Path(configured).expanduser().resolve() if configured else ROOT / ".env"
 
 
 def validate_shared_bind_host(host: str) -> None:
@@ -40,9 +45,10 @@ def configured_shared_port() -> int:
 
 
 def main() -> int:
-    if not ENV_FILE.is_file():
-        raise RuntimeError(f"missing environment file: {ENV_FILE}")
-    load_dotenv(ENV_FILE, override=False)
+    env_file = configured_env_file()
+    if not env_file.is_file():
+        raise RuntimeError(f"missing environment file: {env_file}")
+    load_dotenv(env_file, override=False)
     port = configured_shared_port()
     host = os.getenv("MCP_SHARED_HOST", "127.0.0.1")
     isolation_enabled = (
@@ -80,7 +86,7 @@ def main() -> int:
     command = [
         "docker", "run", "--rm", "--network", "host",
         "--add-host=host.docker.internal:host-gateway",
-        "--env-file", str(ENV_FILE),
+        "--env-file", str(env_file),
         "--env", "MCP_ATLAS_SHARED_RUNTIME=true",
         "--env", "MCP_USAGE_LOG_DIR=/mcp-usage-log",
         "--volume", f"{usage_log_dir}:/mcp-usage-log:rw",

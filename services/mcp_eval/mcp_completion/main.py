@@ -24,6 +24,7 @@ from .task_sandbox import (
     run_orphan_sweeper,
 )
 from .failure_protocol import failure_receipt
+from .runtime_identity import runtime_identity
 
 # Configure logging
 logging.basicConfig(
@@ -213,6 +214,7 @@ async def health():
             not in {"0", "false", "no"}
         ),
         "shared_mcp_url": config.MCP_SERVER_URL,
+        "runtime_identity": runtime_identity(),
     }
 
 
