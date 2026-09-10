@@ -25,6 +25,7 @@ from .task_sandbox import (
 )
 from .failure_protocol import failure_receipt
 from .runtime_identity import runtime_identity
+from .tool_policy import route_for_tool, server_for_tool, ToolRoute
 
 # Configure logging
 logging.basicConfig(
@@ -216,6 +217,31 @@ async def health():
         "shared_mcp_url": config.MCP_SERVER_URL,
         "runtime_identity": runtime_identity(),
     }
+
+
+@app.post("/v2/mcp_eval/classify-tools")
+async def classify_tools(body: Dict[str, List[str]]):
+    """Expose the runtime's authoritative safety/routing decision."""
+    names = body.get("tools")
+    if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+        raise HTTPException(status_code=422, detail={"code": "invalid_tool_names"})
+    records = []
+    for name in names:
+        route = route_for_tool(name)
+        records.append({
+            "name": name,
+            "server": server_for_tool(name),
+            "route": route.value,
+            "read_only": route not in {
+                ToolRoute.BLOCKED_CLOUD_WRITE,
+                ToolRoute.BLOCKED_UNSUPPORTED,
+            },
+            "blocked": route in {
+                ToolRoute.BLOCKED_CLOUD_WRITE,
+                ToolRoute.BLOCKED_UNSUPPORTED,
+            },
+        })
+    return {"policy_version": 1, "tools": records}
 
 
 @app.post("/v2/mcp_eval/run_agent")
