@@ -47,6 +47,7 @@ from mcp_completion.account_guard import (
     describe_fatal_account_error,
     is_fatal_account_error,
 )
+from mcp_completion.config import normalize_openai_base_url
 
 # Load environment variables from .env file
 load_dotenv()
@@ -102,7 +103,7 @@ def get_litellm_config():
     if not api_key:
         raise ValueError("Evaluator API key not found. Set EVAL_LLM_API_KEY.")
 
-    api_base = os.getenv("EVAL_LLM_BASE_URL")
+    api_base = normalize_openai_base_url(os.getenv("EVAL_LLM_BASE_URL", ""))
     if not api_base:
         raise ValueError("Evaluator API base URL not found. Set EVAL_LLM_BASE_URL.")
     return api_key, api_base

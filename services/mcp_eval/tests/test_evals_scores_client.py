@@ -104,6 +104,19 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "EVAL_LLM_BASE_URL"):
                 get_litellm_config()
 
+    def test_evaluator_gateway_root_gets_v1_suffix(self):
+        with patch.dict(
+            mcp_evals_scores.os.environ,
+            {
+                "EVAL_LLM_API_KEY": "judge-key",
+                "EVAL_LLM_BASE_URL": "https://judge.example",
+            },
+        ):
+            self.assertEqual(
+                get_litellm_config(),
+                ("judge-key", "https://judge.example/v1"),
+            )
+
 
 class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_rate_limit_sleep_does_not_hold_a_concurrency_slot(self):

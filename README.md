@@ -253,7 +253,8 @@ MCP_COMPLETION_MODEL=<model-name>
 ```
 
 模型名原样发送给网关，不加 `openai/` 或 `pangu/` 前缀。切换
-网关时直接更换 `LLM_API_KEY` 和 `LLM_BASE_URL`。
+网关时直接更换 `LLM_API_KEY` 和 `LLM_BASE_URL`。Base URL 填网关根地址
+即可，代码会自动补 `/v1`；原有已经带 `/v1` 的配置也继续兼容。
 
 ### 5.2 裁判模型
 
@@ -265,6 +266,7 @@ EVAL_LLM_BASE_URL=<evaluator-base-url>
 
 三项均为评分端独立配置。`EVAL_LLM_MODEL` 填写网关接受的裸模型名；
 Key 和 Base URL 不会回退到 completion 的 `LLM_*` 配置。
+`EVAL_LLM_BASE_URL` 同样可以只填网关根地址，代码会自动补 `/v1`。
 
 ### 5.3 端口
 

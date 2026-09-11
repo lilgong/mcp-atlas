@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import litellm
 
 from mcp_completion.account_guard import FatalAccountError
-from mcp_completion.config import config
+from mcp_completion.config import config, normalize_openai_base_url
 from mcp_completion.llm import create_completion
 from mcp_completion.schema import UserMessage
 
@@ -178,3 +178,23 @@ class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.source_name, "bare-model-name")
         self.assertEqual(raised.exception.credential_envs, ("LLM_API_KEY",))
+
+
+class OpenAIBaseURLTests(unittest.TestCase):
+    def test_gateway_root_gets_v1_suffix(self):
+        self.assertEqual(
+            normalize_openai_base_url("http://gateway.example:3000"),
+            "http://gateway.example:3000/v1",
+        )
+
+    def test_existing_v1_suffix_is_not_duplicated(self):
+        self.assertEqual(
+            normalize_openai_base_url("http://gateway.example:3000/v1/"),
+            "http://gateway.example:3000/v1",
+        )
+
+    def test_prefixed_gateway_path_is_preserved(self):
+        self.assertEqual(
+            normalize_openai_base_url("https://gateway.example/openai"),
+            "https://gateway.example/openai/v1",
+        )

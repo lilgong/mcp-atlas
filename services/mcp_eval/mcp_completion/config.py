@@ -2,11 +2,29 @@
 
 import os
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 
 # Load environment variables from .env file if it exists
 load_dotenv()
+
+
+def normalize_openai_base_url(value: str) -> str:
+    """Accept a gateway root or an existing OpenAI ``/v1`` API base."""
+
+    value = (value or "").strip()
+    if not value:
+        return ""
+
+    parts = urlsplit(value)
+    path = parts.path.rstrip("/")
+    if path.casefold().endswith("/v1"):
+        normalized_path = path
+    else:
+        normalized_path = f"{path}/v1"
+    return urlunsplit(
+        (parts.scheme, parts.netloc, normalized_path, parts.query, parts.fragment)
+    )
 
 
 class Config:
@@ -17,7 +35,7 @@ class Config:
     PORT: int = int(os.getenv("PORT", "3000"))
 
     # LLM configuration
-    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
+    LLM_BASE_URL: str = normalize_openai_base_url(os.getenv("LLM_BASE_URL", ""))
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
 
     # MCP Server configuration
