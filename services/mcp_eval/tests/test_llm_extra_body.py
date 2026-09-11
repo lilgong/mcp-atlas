@@ -26,7 +26,7 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
             patch("mcp_completion.llm.write_runtime_event"),
         ):
             await create_completion(
-                model="openai/test-model",
+                model="test-model",
                 messages=[UserMessage(role="user", content="test")],
                 tools=[],
                 extra_body=extra_body,
@@ -56,6 +56,14 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
         kwargs = await self._call({})
 
         self.assertNotIn("extra_body", kwargs)
+
+    async def test_bare_model_uses_one_openai_compatible_transport(self):
+        kwargs = await self._call({"vendor_option": "kept"})
+
+        self.assertEqual(kwargs["model"], "test-model")
+        self.assertEqual(kwargs["custom_llm_provider"], "openai")
+        self.assertEqual(kwargs["max_retries"], 0)
+        self.assertEqual(kwargs["extra_body"], {"vendor_option": "kept"})
 
 
 class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
@@ -87,7 +95,7 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
             patch("mcp_completion.llm._write_token_usage") as token_usage,
         ):
             result = await create_completion(
-                model="openai/test-model",
+                model="test-model",
                 messages=[UserMessage(role="user", content="test")],
                 tools=[],
                 extra_body=extra_body or {"thinking": {"type": "disabled"}},
@@ -184,7 +192,7 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(ThinkingContractViolation):
                 await create_completion(
-                    model="openai/test-model",
+                    model="test-model",
                     messages=[UserMessage(role="user", content="test")],
                     tools=[],
                     extra_body={"thinking": {"type": "disabled"}},
@@ -236,7 +244,7 @@ class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):
             patch("mcp_completion.llm._write_token_usage"),
         ):
             await create_completion(
-                model="openai/test-model",
+                model="test-model",
                 messages=[
                     UserMessage(role="user", content="test"),
                     first.message,

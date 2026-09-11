@@ -2,14 +2,14 @@
 #
 # Description:
 # This script processes, evaluates, and analyzes model performance based on ground truth data.
-# Uses LiteLLM for all providers (Gemini, OpenAI, Claude, etc.) - unified interface.
+# Uses LiteLLM with an OpenAI-compatible evaluator endpoint.
 #
 # Example Usage from command line:
 #
 # uv run mcp_evals_scores.py \
 #   --input-file="completion_results/sample_4o_results.csv" \
 #   --model-label="gpt4o" \
-#   --evaluator-model="gemini/gemini-2.5-pro" \  # optional
+#   --evaluator-model="gpt-5.4" \  # optional
 #   --num-tasks=10  # optional
 
 import pandas as pd
@@ -98,13 +98,13 @@ def setup_logging(verbose: bool = True):
 
 def get_litellm_config():
     """Get LiteLLM configuration from environment variables."""
-    api_key = os.getenv("EVAL_LLM_API_KEY") or os.getenv("LLM_API_KEY")
+    api_key = os.getenv("EVAL_LLM_API_KEY")
     if not api_key:
-        raise ValueError(
-            "LiteLLM API key not found. Set EVAL_LLM_API_KEY or LLM_API_KEY env var."
-        )
+        raise ValueError("Evaluator API key not found. Set EVAL_LLM_API_KEY.")
 
-    api_base = os.getenv("EVAL_LLM_BASE_URL", "")
+    api_base = os.getenv("EVAL_LLM_BASE_URL")
+    if not api_base:
+        raise ValueError("Evaluator API base URL not found. Set EVAL_LLM_BASE_URL.")
     return api_key, api_base
 
 def month_log_root(base_root_path: str) -> str:
@@ -496,7 +496,7 @@ class AsyncLLMClient(ABC):
 
 
 class AsyncLiteLLMClient(AsyncLLMClient):
-    """Manages async LiteLLM requests with rate limiting - supports all providers via LiteLLM"""
+    """Manage requests to the configured OpenAI-compatible evaluator."""
 
     def __init__(self, config: EvaluatorConfig):
         self.config = config
@@ -508,8 +508,7 @@ class AsyncLiteLLMClient(AsyncLLMClient):
         # Initialize LiteLLM configuration from environment
         api_key, api_base = get_litellm_config()
         litellm.api_key = api_key
-        if api_base:
-            litellm.api_base = api_base
+        litellm.api_base = api_base
 
     @retry(
         retry=retry_if_not_exception_type(FatalAccountError),
@@ -542,6 +541,7 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 # the schema unenforced on OpenAI-compatible gateways.
                 response = await litellm.acompletion(
                     model=self.config.evaluator_model,
+                    custom_llm_provider="openai",
                     messages=[{"role": "user", "content": prompt}],
                     response_format={
                         "type": "json_schema",
@@ -619,16 +619,11 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 f"error_type={type(e).__name__} error={e}"
             )
             if is_fatal_account_error(e):
-                credential_env = (
-                    "EVAL_LLM_API_KEY"
-                    if os.getenv("EVAL_LLM_API_KEY")
-                    else "LLM_API_KEY"
-                )
                 raise FatalAccountError(
                     "evaluator credential is invalid or out of funds",
                     source_kind="evaluator_model",
                     source_name=self.config.evaluator_model,
-                    credential_envs=(credential_env,),
+                    credential_envs=("EVAL_LLM_API_KEY",),
                 ) from e
             raise
 
@@ -1204,8 +1199,8 @@ def get_parser(input_path=None, model_label=None):
     parser.add_argument(
         "--evaluator-model",
         type=str,
-        default=os.getenv("EVAL_LLM_MODEL", "gemini/gemini-2.5-pro"),
-        help="Model name in LiteLLM format. Default: EVAL_LLM_MODEL env var or 'gemini/gemini-2.5-pro'",
+        default=os.getenv("EVAL_LLM_MODEL", "gpt-5.4"),
+        help="Bare model name accepted by the evaluator gateway. Default: EVAL_LLM_MODEL or 'gpt-5.4'",
     )
     parser.add_argument(
         "--output-dir",

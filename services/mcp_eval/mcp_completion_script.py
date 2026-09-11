@@ -1,6 +1,6 @@
 # USAGE:
-# From file:       uv run mcp_completion_script.py --model "openai/gpt-4o" --input "sample_tasks.csv" --output "sample_4o_results.csv"
-# From HuggingFace: uv run mcp_completion_script.py --model "openai/gpt-4o" --input_huggingface "ScaleAI/mcp-eval" --output "results.csv"
+# From file:       uv run mcp_completion_script.py --model "gpt-4o" --input "sample_tasks.csv" --output "sample_4o_results.csv"
+# From HuggingFace: uv run mcp_completion_script.py --model "gpt-4o" --input_huggingface "ScaleAI/mcp-eval" --output "results.csv"
 #
 # By default, tasks are filtered to servers available through either the shared
 # cloud runtime or the configured task-isolated runtime.
@@ -1086,7 +1086,7 @@ def parse_arguments(model, input_path, output_path, num_task, concurrency):
     parser.add_argument(
         "--model",
         default=model,
-        help='LLM model to use for evaluation (e.g., "openai/gpt-4o")',
+        help='LLM model to use for evaluation (e.g., "gpt-4o")',
     )
 
     # Input source: exactly one of --input or --input_huggingface required
@@ -1161,9 +1161,9 @@ def parse_arguments(model, input_path, output_path, num_task, concurrency):
 
 async def main():
     args = parse_arguments(
-        model=os.getenv("MCP_COMPLETION_MODEL", "pangu/92B-B005-stage2-9250-agent"),
+        model=os.getenv("MCP_COMPLETION_MODEL", "gpt-4o"),
         input_path=os.getenv("MCP_COMPLETION_INPUT", "MCP-Atlas.csv"),
-        output_path=os.getenv("MCP_COMPLETION_OUTPUT", "MCP-Atlas-92B-B005-stage2-9250-new.csv"),
+        output_path=os.getenv("MCP_COMPLETION_OUTPUT", "MCP-Atlas-results.csv"),
         num_task=parse_optional_int(os.getenv("MCP_COMPLETION_NUM_TASKS"), None),
         concurrency=parse_int(os.getenv("MCP_COMPLETION_CONCURRENCY"), 30),
     )

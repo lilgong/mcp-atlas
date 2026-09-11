@@ -24,7 +24,9 @@ class Config:
     MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://localhost:1984")
 
     # Timeout configuration
-    DEFAULT_TIMEOUT: float = float(os.getenv("DEFAULT_TIMEOUT", "300.0"))
+    DEFAULT_TIMEOUT: float = float(os.getenv("DEFAULT_TIMEOUT", "1800.0"))
+    LLM_MAX_ATTEMPTS: int = max(1, int(os.getenv("LLM_MAX_ATTEMPTS", "3")))
+    LLM_RETRY_DELAY: float = max(0.0, float(os.getenv("LLM_RETRY_DELAY", "3")))
     TOOL_CALL_TIMEOUT: float = float(os.getenv("TOOL_CALL_TIMEOUT", "180.0"))
     LIST_TOOLS_TIMEOUT: float = float(os.getenv("LIST_TOOLS_TIMEOUT", "180.0"))
 

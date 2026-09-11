@@ -1,5 +1,6 @@
 """LLM completion functionality using LiteLLM."""
 
+import asyncio
 import json
 import logging
 import re
@@ -9,13 +10,11 @@ import datetime
 import time
 import uuid
 
-import httpx
 import litellm
 from pydantic import BaseModel
 
 from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
-from .pangu_completion import generate_pangu_async
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error
 
@@ -50,6 +49,7 @@ def build_token_log_path(api_key: str, env_name: str = "TOKEN_LOG_DIR") -> str:
 TOKEN_LOG_PATH = build_token_log_path(config.LLM_API_KEY)
 
 THINKING_CONTRACT_MAX_ATTEMPTS = 3
+RETRYABLE_MODEL_STATUS_CODES = frozenset({429, 500, 502, 503})
 _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 
 
@@ -226,6 +226,80 @@ def configure_litellm():
 configure_litellm()
 
 
+def _model_error_status_code(error: Exception) -> Optional[int]:
+    """Extract an HTTP status without depending on one LiteLLM exception type."""
+
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        return int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _create_openai_compatible_completion(
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    extra_body: Dict[str, Any],
+    task_id: str,
+    turn: int,
+    call_id: str,
+) -> Any:
+    """Call the configured OpenAI-compatible endpoint with bounded retries.
+
+    SDK retries are disabled so retry count is controlled in exactly one
+    place. A 504, a client timeout, and connection errors are deliberately not
+    retried because the upstream generation may still be running.
+    """
+
+    for provider_attempt in range(1, config.LLM_MAX_ATTEMPTS + 1):
+        try:
+            return await litellm.acompletion(
+                model=model,
+                custom_llm_provider="openai",
+                messages=messages,
+                tools=tools,
+                api_key=config.LLM_API_KEY,
+                api_base=config.LLM_BASE_URL,
+                timeout=config.DEFAULT_TIMEOUT,
+                max_retries=0,
+                **({"extra_body": extra_body} if extra_body else {}),
+            )
+        except Exception as error:
+            if isinstance(
+                error,
+                (litellm.APIConnectionError, litellm.Timeout, asyncio.TimeoutError),
+            ):
+                raise
+
+            status_code = _model_error_status_code(error)
+            should_retry = (
+                status_code in RETRYABLE_MODEL_STATUS_CODES
+                and provider_attempt < config.LLM_MAX_ATTEMPTS
+            )
+            if not should_retry:
+                raise
+
+            delay = config.LLM_RETRY_DELAY * (2 ** (provider_attempt - 1))
+            write_runtime_event(
+                "model_calls",
+                "model_request_retry_scheduled",
+                task_id=task_id,
+                turn=turn,
+                call_id=call_id,
+                model=model,
+                provider_attempt=provider_attempt,
+                max_provider_attempts=config.LLM_MAX_ATTEMPTS,
+                status_code=status_code,
+                delay_seconds=delay,
+            )
+            if delay:
+                await asyncio.sleep(delay)
+
+
 def strip_all_additional_properties(schema: any) -> any:
     """Recursively remove all `additionalProperties` keys from the schema."""
     if isinstance(schema, dict):
@@ -274,16 +348,6 @@ async def create_completion(
         litellm_messages = [_message_for_provider(msg) for msg in messages]
         litellm_tools = [tool.model_dump() for tool in tools]
 
-    # These specific models route through an internal proxy that expects the
-    # "openai/" prefix in the model name. LiteLLM strips one "openai/" prefix
-    # when a custom api_base is set, so we double-prepend it here so the proxy
-    # receives the correct name (e.g. "openai/macaroni-alpha").
-    _PROXY_PREFIX_MODELS = ("openai/macaroni-alpha", "openai/galapagos-alpha")
-    if config.LLM_BASE_URL and model in _PROXY_PREFIX_MODELS:
-        proxy_model = "openai/" + model
-    else:
-        proxy_model = model
-
     # Copy the caller-owned mapping, but preserve its provider-specific fields
     # exactly.  In particular, callers must be able to switch between
     # ``thinking.type=enabled`` and ``thinking.type=disabled`` without the
@@ -307,7 +371,7 @@ async def create_completion(
             task_id=task_id,
             turn=turn,
             call_id=call_id,
-            model=proxy_model,
+            model=model,
             attempt=attempt,
             max_attempts=max_attempts,
             base_url=config.LLM_BASE_URL,
@@ -319,25 +383,15 @@ async def create_completion(
         )
 
         try:
-            if "pangu" in proxy_model:
-                response = await generate_pangu_async(
-                    model=proxy_model,
-                    messages=litellm_messages,
-                    tools=litellm_tools,
-                    task_id=task_id,
-                    turn=turn,
-                    call_id=call_id,
-                )
-            else:
-                response = await litellm.acompletion(
-                    model=proxy_model,
-                    messages=litellm_messages,
-                    tools=litellm_tools,
-                    api_key=config.LLM_API_KEY,
-                    api_base=config.LLM_BASE_URL,
-                    timeout=config.DEFAULT_TIMEOUT,
-                    **({"extra_body": extra_body} if extra_body else {}),
-                )
+            response = await _create_openai_compatible_completion(
+                model=model,
+                messages=litellm_messages,
+                tools=litellm_tools,
+                extra_body=extra_body,
+                task_id=task_id,
+                turn=turn,
+                call_id=call_id,
+            )
         except Exception as error:
             logger.error(f"LiteLLM completion failed: {error}")
             write_runtime_event(
@@ -346,23 +400,18 @@ async def create_completion(
                 task_id=task_id,
                 turn=turn,
                 call_id=call_id,
-                model=proxy_model,
+                model=model,
                 attempt=attempt,
                 duration_seconds=round(time.monotonic() - started, 3),
                 error_type=type(error).__name__,
                 error=str(error),
             )
             if is_fatal_account_error(error):
-                credential_env = (
-                    "PANGU_API_KEY"
-                    if "pangu" in proxy_model and os.getenv("PANGU_API_KEY")
-                    else "LLM_API_KEY"
-                )
                 raise FatalAccountError(
                     "model credential is invalid or out of funds",
                     source_kind="model",
-                    source_name=proxy_model,
-                    credential_envs=(credential_env,),
+                    source_name=model,
+                    credential_envs=("LLM_API_KEY",),
                 ) from error
             raise
 
@@ -377,7 +426,7 @@ async def create_completion(
             task_id=task_id,
             turn=turn,
             call_id=call_id,
-            model=proxy_model,
+            model=model,
             attempt=attempt,
             duration_seconds=round(time.monotonic() - started, 3),
             usage=usage,
@@ -390,7 +439,7 @@ async def create_completion(
             task_id=task_id,
             turn=turn,
             call_id=call_id,
-            model=proxy_model,
+            model=model,
             messages=messages,
             answer=content,
         )
@@ -407,7 +456,7 @@ async def create_completion(
             task_id=task_id,
             turn=turn,
             call_id=call_id,
-            model=proxy_model,
+            model=model,
             attempt=attempt,
             max_attempts=max_attempts,
             leaked_reasoning_content=leaked_reasoning,
@@ -431,9 +480,7 @@ async def create_completion(
         tool_calls = None
         dropped_tool_calls = 0
         repaired_tool_calls = 0
-        if isinstance(response, dict):  # 盘古接口返回的是dict格式
-            # 对于盘古思考过程调用工具提前终止的行为做预处理
-
+        if isinstance(response, dict):
             if response["choices"][0]["message"].get("tool_calls"):
                 tool_calls = []
                 for tool_call in response["choices"][0]["message"]["tool_calls"]:
@@ -447,7 +494,7 @@ async def create_completion(
                             },
                         }
                     )
-        else:  # 开源接口返回的是ModelResponse格式
+        else:
             if response.choices[0].message.tool_calls:
                 tool_calls = []
                 for tool_call in response.choices[0].message.tool_calls:
@@ -475,7 +522,7 @@ async def create_completion(
                     task_id=task_id,
                     turn=turn,
                     call_id=call_id,
-                    model=proxy_model,
+                    model=model,
                     dropped=dropped_tool_calls,
                     repaired=repaired_tool_calls,
                     kept=len(tool_calls or []),
@@ -510,7 +557,7 @@ async def create_completion(
             task_id=task_id,
             turn=turn,
             call_id=call_id,
-            model=proxy_model,
+            model=model,
             error_type=type(error).__name__,
             error=str(error),
         )

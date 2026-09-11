@@ -44,7 +44,7 @@ Using the calculator tool (assuming that the MCP server has this tool):
 curl -X POST http://localhost:3000/v2/mcp_eval/run_agent \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "openai/gpt-4o",
+    "model": "gpt-4o",
     "messages": [{"role": "user", "content": "What is the square root if 95?"}],
     "enabledTools": ["calculator_calculate"],
     "maxTurns": 256,

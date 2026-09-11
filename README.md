@@ -244,43 +244,27 @@ chmod 600 .env
 
 completion 服务启动时要求 `LLM_API_KEY` 非空。
 
-OpenAI-compatible/LiteLLM 模型配置：
+completion 模型统一使用 OpenAI-compatible 端点：
 
 ```dotenv
 LLM_API_KEY=<completion-api-key>
 LLM_BASE_URL=<openai-compatible-base-url>
-MCP_COMPLETION_MODEL=openai/<model-name>
+MCP_COMPLETION_MODEL=<model-name>
 ```
 
-Pangu 模型配置：
-
-```dotenv
-LLM_API_KEY=<non-empty-value>
-LLM_BASE_URL=<fallback-openai-compatible-url>
-
-PANGU_API_KEY=<pangu-api-key>
-PANGU_API_URL=<pangu-chat-completions-url>
-PANGU_TIMEOUT=1800
-PANGU_MAX_RETRIES=5
-PANGU_RETRY_DELAY=3
-
-MCP_COMPLETION_MODEL=pangu/<checkpoint-name>
-```
-
-如果 `PANGU_API_KEY` 或 `PANGU_API_URL` 留空，代码分别回退到 `LLM_API_KEY`
-和 `LLM_BASE_URL`。
+模型名原样发送给网关，不加 `openai/` 或 `pangu/` 前缀。切换
+网关时直接更换 `LLM_API_KEY` 和 `LLM_BASE_URL`。
 
 ### 5.2 裁判模型
 
 ```dotenv
-EVAL_LLM_MODEL=<litellm-model-name>
+EVAL_LLM_MODEL=<model-name>
 EVAL_LLM_API_KEY=<evaluator-api-key>
 EVAL_LLM_BASE_URL=<evaluator-base-url>
 ```
 
-`EVAL_LLM_API_KEY` 留空时，评分脚本会回退到 `LLM_API_KEY`。
-`EVAL_LLM_BASE_URL` 留空时，LiteLLM 使用对应 provider 的默认地址；它不会读取
-`LLM_BASE_URL`。
+三项均为评分端独立配置。`EVAL_LLM_MODEL` 填写网关接受的裸模型名；
+Key 和 Base URL 不会回退到 completion 的 `LLM_*` 配置。
 
 ### 5.3 端口
 
@@ -402,8 +386,6 @@ MCP_COMPLETION_SYSTEM_PROMPT_FILE=
 ```dotenv
 TOKEN_LOG_DIR=token_usage_log
 EVAL_TOKEN_LOG_DIR=token_usage_log
-PANGU_LOG_DIR=completion_results
-PANGU_LOG_PATH=
 MCP_RUNTIME_LOG_DIR=completion_results/runtime_logs
 LOG_LEVEL=INFO
 ```
@@ -1142,7 +1124,7 @@ curl -sS -X POST \
   http://localhost:3000/v2/mcp_eval/run_agent \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "pangu/your-checkpoint",
+    "model": "your-checkpoint",
     "taskId": "deployment-filesystem-smoke",
     "messages": [
       {
@@ -1264,7 +1246,7 @@ uv run python mcp_completion_script.py
 确保 `.env` 已配置裁判：
 
 ```dotenv
-EVAL_LLM_MODEL=<litellm-model-name>
+EVAL_LLM_MODEL=<model-name>
 EVAL_LLM_API_KEY=<evaluator-api-key>
 EVAL_LLM_BASE_URL=<evaluator-base-url>
 ```
@@ -1349,12 +1331,6 @@ completion_results/runtime_logs/<YYYY-MM>/
 ├── sandbox_<YYYYMMDD>.jsonl
 ├── service_<YYYYMMDD>.jsonl
 └── containers/<task-id>/*.log
-```
-
-Pangu provider 原始响应：
-
-```text
-completion_results/pangu_response_<YYYYMMDD>.jsonl
 ```
 
 评分：

@@ -270,7 +270,7 @@ INFRA_LOG_RULES: list[tuple[str, str]] = [
     ("docker_timeout", "Command timed out after"),
     ("docker_start_failed", "failed to create task for container"),
     ("sandbox_no_tools", "list-tools returned no tools"),
-    ("model_gateway", "Pangu Response status code"),
+    ("model_gateway", "LiteLLM completion failed"),
 ]
 
 

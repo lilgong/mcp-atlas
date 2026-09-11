@@ -18,7 +18,6 @@ from .config import config
 from .config import validate_isolated_control_plane
 from .runtime_log import write_runtime_event
 from .account_guard import FatalAccountError, describe_fatal_account_error
-from .pangu_completion import close_pangu_client
 from .task_sandbox import (
     DEFAULT_RUNTIME_IMAGE,
     reap_owned_task_sandboxes,
@@ -69,7 +68,6 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        await close_pangu_client()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):

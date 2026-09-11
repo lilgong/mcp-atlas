@@ -10,6 +10,7 @@ from mcp_evals_scores import (
     AsyncLiteLLMClient,
     CoverageEvaluator,
     EvaluatorConfig,
+    get_litellm_config,
     get_single_claim_evaluation_schema,
 )
 from mcp_completion.account_guard import FatalAccountError
@@ -23,9 +24,7 @@ def _fake_response(content='{"coverage": "fulfilled"}'):
                 finish_reason="stop",
             )
         ],
-        usage=SimpleNamespace(
-            prompt_tokens=10, completion_tokens=5, total_tokens=15
-        ),
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
 
 
@@ -38,7 +37,7 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
             return _fake_response()
 
         client = AsyncLiteLLMClient(
-            EvaluatorConfig(evaluator_model="openai/gpt-5.4", semaphore_limit=2)
+            EvaluatorConfig(evaluator_model="gpt-5.4", semaphore_limit=2)
         )
         with patch.object(
             mcp_evals_scores.litellm, "acompletion", fake_acompletion
@@ -50,6 +49,8 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["timeout"], mcp_evals_scores.EVAL_REQUEST_TIMEOUT)
         # The SDK's own retries would multiply with the tenacity decorator.
         self.assertEqual(captured["max_retries"], 0)
+        self.assertEqual(captured["model"], "gpt-5.4")
+        self.assertEqual(captured["custom_llm_provider"], "openai")
         self.assertEqual(captured["response_format"]["type"], "json_schema")
         structured = captured["response_format"]["json_schema"]
         self.assertEqual(structured["name"], "single_claim_evaluation")
@@ -71,20 +72,37 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("Invalid API key")
 
         client = AsyncLiteLLMClient(
-            EvaluatorConfig(evaluator_model="openai/gpt-5.4", semaphore_limit=2)
+            EvaluatorConfig(evaluator_model="gpt-5.4", semaphore_limit=2)
         )
-        with patch.object(
-            mcp_evals_scores.litellm, "acompletion", fake_acompletion
-        ), patch.dict(
-            mcp_evals_scores.os.environ, {"EVAL_LLM_API_KEY": ""}
-        ):
+        with patch.object(mcp_evals_scores.litellm, "acompletion", fake_acompletion):
             with self.assertRaises(FatalAccountError) as raised:
                 await client.generate_structured_content("prompt", {})
 
         self.assertEqual(calls, 1)
         self.assertEqual(raised.exception.source_kind, "evaluator_model")
-        self.assertEqual(raised.exception.source_name, "openai/gpt-5.4")
-        self.assertEqual(raised.exception.credential_envs, ("LLM_API_KEY",))
+        self.assertEqual(raised.exception.source_name, "gpt-5.4")
+        self.assertEqual(raised.exception.credential_envs, ("EVAL_LLM_API_KEY",))
+
+    def test_evaluator_credentials_do_not_fallback_to_completion_config(self):
+        with patch.dict(
+            mcp_evals_scores.os.environ,
+            {
+                "EVAL_LLM_API_KEY": "",
+                "EVAL_LLM_BASE_URL": "",
+                "LLM_API_KEY": "completion-key",
+                "LLM_BASE_URL": "https://completion.invalid/v1",
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "EVAL_LLM_API_KEY"):
+                get_litellm_config()
+
+    def test_evaluator_base_url_is_required(self):
+        with patch.dict(
+            mcp_evals_scores.os.environ,
+            {"EVAL_LLM_API_KEY": "judge-key", "EVAL_LLM_BASE_URL": ""},
+        ):
+            with self.assertRaisesRegex(ValueError, "EVAL_LLM_BASE_URL"):
+                get_litellm_config()
 
 
 class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
@@ -99,7 +117,7 @@ class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
 
         delay = 0.3
         config = EvaluatorConfig(
-            evaluator_model="openai/gpt-5.4",
+            evaluator_model="gpt-5.4",
             semaphore_limit=1,
             request_delay=delay,
         )
@@ -114,10 +132,7 @@ class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
             mcp_evals_scores.litellm, "acompletion", fake_acompletion
         ), patch.object(mcp_evals_scores, "TOKEN_LOG_PATH", log_path):
             await asyncio.gather(
-                *(
-                    client.generate_structured_content("prompt", {})
-                    for _ in range(3)
-                )
+                *(client.generate_structured_content("prompt", {}) for _ in range(3))
             )
         elapsed = time.monotonic() - started
 
@@ -129,7 +144,7 @@ class SemaphoreScopeTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
 
         config = EvaluatorConfig(
-            evaluator_model="openai/gpt-5.4",
+            evaluator_model="gpt-5.4",
             semaphore_limit=1,
             request_delay=0.0,
         )
@@ -155,9 +170,7 @@ class CoverageEvaluatorOutputTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_example_is_valid_json(self):
         evaluator = CoverageEvaluator(
             client=None,
-            config=EvaluatorConfig(
-                evaluator_model="openai/gpt-5.4", semaphore_limit=1
-            ),
+            config=EvaluatorConfig(evaluator_model="gpt-5.4", semaphore_limit=1),
         )
         prompt = evaluator._get_single_claim_evaluation_prompt(
             "The claim", "The response"
@@ -175,9 +188,7 @@ class CoverageEvaluatorOutputTests(unittest.IsolatedAsyncioTestCase):
 
         evaluator = CoverageEvaluator(
             client=FailingClient(),
-            config=EvaluatorConfig(
-                evaluator_model="openai/gpt-5.4", semaphore_limit=1
-            ),
+            config=EvaluatorConfig(evaluator_model="gpt-5.4", semaphore_limit=1),
         )
 
         with self.assertRaisesRegex(RuntimeError, "judge unavailable"):
@@ -190,9 +201,7 @@ class CoverageEvaluatorOutputTests(unittest.IsolatedAsyncioTestCase):
 
         evaluator = CoverageEvaluator(
             client=UnexpectedClient(),
-            config=EvaluatorConfig(
-                evaluator_model="openai/gpt-5.4", semaphore_limit=1
-            ),
+            config=EvaluatorConfig(evaluator_model="gpt-5.4", semaphore_limit=1),
         )
 
         result = await evaluator.evaluate(
