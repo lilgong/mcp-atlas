@@ -86,6 +86,19 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             ],
             "isError": False,
         }
+        arxiv_error_without_status = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        '{"detail":"Tool execution failed: Error: arXiv is '
+                        'rate limiting this IP. Please wait 60 seconds before '
+                        'retrying."}'
+                    ),
+                }
+            ],
+            "isError": True,
+        }
         self.assertTrue(
             isolated_client._is_rate_limited_tool_result(rate_limited)
         )
@@ -94,6 +107,11 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(
             isolated_client._is_rate_limited_tool_result(normal_data)
+        )
+        self.assertTrue(
+            isolated_client._is_rate_limited_tool_result(
+                arxiv_error_without_status
+            )
         )
 
     async def test_relay_bypasses_whole_arxiv_osm_pubmed_and_wikipedia_gates(self):

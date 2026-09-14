@@ -157,6 +157,7 @@ _RATE_LIMIT_MARKERS = (
     "status code: 429",
     "status_code=429",
     "rate limit exceeded",
+    "rate limiting this ip",
     "too many requests",
     "blocked this public egress ip",
 )
