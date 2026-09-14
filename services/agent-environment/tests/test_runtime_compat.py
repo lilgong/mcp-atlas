@@ -80,6 +80,15 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert shared["ddg-search"]["args"][-1] == "duckduckgo-mcp-server"
     assert "duckduckgo-mcp-server[browser]==0.6.1" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
+    assert shared["osm-mcp-server"]["env"] == {
+        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+    }
+    assert shared["arxiv"]["args"][-1].endswith("arxiv_mcp_compat.py")
+    assert shared["arxiv"]["env"] == {
+        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+    }
     assert shared["met-museum"]["args"] == [
         "/agent-environment/src/agent_environment/run_node_mcp.cjs",
         "metmuseum-mcp@1.0.0",
@@ -420,8 +429,14 @@ def test_python_mcp_servers_pin_their_sdk():
 
     arxiv = servers["arxiv"]
     assert arxiv == {
-        "command": "/usr/local/bin/arxiv-mcp-server",
-        "args": [],
+        "command": "/root/.local/share/uv/tools/arxiv-mcp-server/bin/python",
+        "args": [
+            "/agent-environment/src/agent_environment/arxiv_mcp_compat.py",
+        ],
+        "env": {
+            "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+            "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+        },
     }
     installer = (
         AGENT_ROOT / "dev_scripts/install_mcp_packages.sh"

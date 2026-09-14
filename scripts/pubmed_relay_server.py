@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, allow-listed NCBI/Wikipedia residential egress relay."""
+"""Authenticated, allow-listed MCP residential egress relay."""
 
 from __future__ import annotations
 
@@ -24,6 +24,17 @@ ALLOWED_TARGETS = {
     "eutils.ncbi.nlm.nih.gov": ("ncbi", "/entrez/eutils/"),
     "www.ncbi.nlm.nih.gov": ("ncbi", "/pmc/articles/"),
     "en.wikipedia.org": ("wikipedia", "/w/api.php"),
+    "export.arxiv.org": ("arxiv", "/api/query", "/pdf/"),
+    "arxiv.org": ("arxiv", "/abs/", "/pdf/", "/html/", "/e-print/"),
+    "www.arxiv.org": ("arxiv", "/abs/", "/pdf/", "/html/", "/e-print/"),
+    "nominatim.openstreetmap.org": ("osm-nominatim", "/search", "/reverse"),
+    "overpass-api.de": ("osm-overpass", "/api/interpreter"),
+    "maps.mail.ru": ("osm-overpass", "/osm/tools/overpass/api/interpreter"),
+    "router.project-osrm.org": ("osm-routing", "/route/v1/"),
+    "routing.openstreetmap.de": (
+        "osm-routing", "/routed-car/route/v1/", "/routed-bike/route/v1/",
+        "/routed-foot/route/v1/",
+    ),
 }
 TOKEN = (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
 IPWO_PROXY_HOST = (os.getenv("IPWO_PROXY_HOST") or "").strip()
@@ -100,14 +111,21 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        _validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class Controller:
-    def __init__(self) -> None:
+    def __init__(self, min_interval: float | None = None) -> None:
         self.lock = threading.Lock()
         self.last_started = 0.0
         self.blocked_until = 0.0
         self.account_error: str | None = None
         self.session_id = _new_ipwo_session_id()
         self.rotation_count = 0
+        self.min_interval = MIN_INTERVAL if min_interval is None else min_interval
 
     def current_account_error(self) -> str | None:
         with self.lock:
@@ -121,7 +139,7 @@ class Controller:
                     raise RelayAccountError(self.account_error)
                 now = time.monotonic()
                 delay = max(
-                    self.last_started + MIN_INTERVAL - now,
+                    self.last_started + self.min_interval - now,
                     self.blocked_until - now,
                     0.0,
                 )
@@ -157,7 +175,10 @@ class Controller:
         with self.lock:
             return self.rotation_count
 
-    def fetch(self, url: str, allow_redirects: bool) -> tuple[int, dict[str, str], bytes, str, int, float]:
+    def fetch(
+        self, url: str, allow_redirects: bool, *, method: str = "GET",
+        body: bytes | None = None, headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes, str, int, float]:
         started = time.monotonic()
         queued_ms: float | None = None
         final: tuple[int, dict[str, str], bytes, str] | None = None
@@ -166,11 +187,12 @@ class Controller:
             if queued_ms is None:
                 queued_ms = (time.monotonic() - started) * 1000
             try:
-                final = _fetch_once(
-                    url,
-                    allow_redirects,
-                    session_id=self._current_session_id(),
-                )
+                request_options: dict[str, Any] = {
+                    "session_id": self._current_session_id(),
+                }
+                if method != "GET" or body is not None or headers:
+                    request_options.update(method=method, body=body, headers=headers)
+                final = _fetch_once(url, allow_redirects, **request_options)
             except RelayAccountError as exc:
                 self._latch_account_error(str(exc))
             except RelayUpstreamError:
@@ -234,7 +256,8 @@ class ControllerPool:
         )
 
     def fetch(
-        self, url: str, allow_redirects: bool,
+        self, url: str, allow_redirects: bool, *, method: str = "GET",
+        body: bytes | None = None, headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], bytes, str, int, float]:
         with self.lock:
             if self.account_error:
@@ -242,7 +265,9 @@ class ControllerPool:
             controller = self.controllers[self.next_index]
             self.next_index = (self.next_index + 1) % len(self.controllers)
         try:
-            return controller.fetch(url, allow_redirects)
+            return controller.fetch(
+                url, allow_redirects, method=method, body=body, headers=headers,
+            )
         except RelayAccountError as exc:
             with self.lock:
                 if not self.account_error:
@@ -258,6 +283,10 @@ CONTROLLERS = {
     # queue behind one residential IP. NCBI remains single-exit because one
     # PubMed workflow benefits from a stable identity.
     "wikipedia": ControllerPool(WIKIPEDIA_LANES),
+    "arxiv": Controller(3.0),
+    "osm-nominatim": Controller(1.0),
+    "osm-overpass": Controller(1.0),
+    "osm-routing": Controller(1.0),
 }
 
 
@@ -286,9 +315,9 @@ def _validate_url(url: str) -> str:
         parsed.scheme != "https"
         or parsed.port not in (None, 443)
         or not target
-        or not parsed.path.startswith(target[1])
+        or not any(parsed.path.startswith(prefix) for prefix in target[1:])
     ):
-        raise ValueError("target is not an allowed NCBI/Wikipedia API endpoint")
+        raise ValueError("target is not an allowed MCP egress endpoint")
     if parsed.username or parsed.password or parsed.fragment:
         raise ValueError("target URL contains forbidden components")
     return target[0]
@@ -305,6 +334,9 @@ def _fetch_once(
     allow_redirects: bool,
     *,
     session_id: str | None = None,
+    method: str = "GET",
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes, str]:
     # Proxy credentials stay in this relay and are never passed into task
     # containers. IPWO tunnels the target TLS connection normally.
@@ -317,10 +349,16 @@ def _fetch_once(
     handlers: list[Any] = [
         urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
     ]
-    if not allow_redirects:
-        handlers.append(NoRedirect())
+    handlers.append(SafeRedirect() if allow_redirects else NoRedirect())
     opener = urllib.request.build_opener(*handlers)
-    request = urllib.request.Request(url, headers={"User-Agent": "mcp_atlas_egress_relay/1.0"})
+    forwarded = {
+        key: value for key, value in (headers or {}).items()
+        if key.lower() in {"accept", "content-type", "range", "user-agent"}
+    }
+    forwarded.setdefault("User-Agent", "mcp_atlas_egress_relay/1.0")
+    request = urllib.request.Request(
+        url, data=body or None, headers=forwarded, method=method,
+    )
     try:
         response = opener.open(request, timeout=UPSTREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
@@ -401,6 +439,10 @@ class Handler(BaseHTTPRequestHandler):
                     "lane_counts": {
                         "ncbi": 1,
                         "wikipedia": WIKIPEDIA_LANES,
+                        "arxiv": 1,
+                        "osm-nominatim": 1,
+                        "osm-overpass": 1,
+                        "osm-routing": 1,
                     },
                     "rotation_counts": {
                         name: controller.current_rotation_count()
@@ -426,9 +468,22 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("invalid request size")
             payload = json.loads(self.rfile.read(length))
             url = str(payload["url"])
+            method = str(payload.get("method") or "GET").upper()
+            if method not in {"GET", "POST"}:
+                raise ValueError("method must be GET or POST")
             params = payload.get("params") or {}
             if not isinstance(params, dict):
                 raise ValueError("params must be an object")
+            request_headers = payload.get("headers") or {}
+            if not isinstance(request_headers, dict):
+                raise ValueError("headers must be an object")
+            encoded_body = str(payload.get("body_base64") or "")
+            try:
+                request_body = base64.b64decode(encoded_body, validate=True)
+            except ValueError as exc:
+                raise ValueError("body_base64 is invalid") from exc
+            if len(request_body) > 65536:
+                raise ValueError("upstream request body exceeds relay size limit")
             target_group = _validate_url(url)
             query = urllib.parse.urlencode(params, doseq=True)
             if query:
@@ -437,8 +492,12 @@ class Handler(BaseHTTPRequestHandler):
             status, headers, body, final_url, attempts, queued_ms = CONTROLLERS[
                 target_group
             ].fetch(
-                url, bool(payload.get("allow_redirects", False))
+                url, bool(payload.get("allow_redirects", False)),
+                method=method,
+                body=request_body,
+                headers={str(key): str(value) for key, value in request_headers.items()},
             )
+            _validate_url(final_url)
             delivered = self._json(200, {
                 "status_code": status,
                 "headers": headers,
@@ -498,7 +557,7 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     print(
-        f"NCBI/Wikipedia relay (ipwo) listening on http://{BIND}:{PORT}",
+        f"MCP egress relay (ipwo) listening on http://{BIND}:{PORT}",
         flush=True,
     )
     try:

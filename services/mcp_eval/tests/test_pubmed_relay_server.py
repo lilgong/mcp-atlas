@@ -268,3 +268,54 @@ def test_json_response_treats_broken_pipe_as_client_disconnect():
     handler.end_headers = lambda: None
 
     assert handler._json(200, {"status": "ok"}) is False
+
+
+@pytest.mark.parametrize(
+    ("url", "group"),
+    [
+        ("https://export.arxiv.org/api/query", "arxiv"),
+        ("https://arxiv.org/pdf/2501.00001", "arxiv"),
+        ("https://nominatim.openstreetmap.org/search", "osm-nominatim"),
+        ("https://overpass-api.de/api/interpreter", "osm-overpass"),
+        ("https://router.project-osrm.org/route/v1/car/1,2;3,4", "osm-routing"),
+    ],
+)
+def test_relay_allows_only_named_arxiv_and_osm_paths(url, group):
+    assert relay._validate_url(url) == group
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://export.arxiv.org/unknown",
+        "https://nominatim.openstreetmap.org/status.php",
+        "https://overpass-api.de/",
+        "https://example.com/api/query",
+    ],
+)
+def test_relay_rejects_unapproved_arxiv_and_osm_paths(url):
+    with pytest.raises(ValueError, match="allowed MCP egress"):
+        relay._validate_url(url)
+
+
+def test_controller_forwards_post_body_and_headers(monkeypatch):
+    captured = {}
+
+    def fake_fetch(url, allow_redirects, **kwargs):
+        captured.update(url=url, allow_redirects=allow_redirects, **kwargs)
+        return 200, {}, b"{}", url
+
+    monkeypatch.setattr(relay, "_fetch_once", fake_fetch)
+    controller = relay.Controller(0)
+    response = controller.fetch(
+        "https://overpass-api.de/api/interpreter",
+        True,
+        method="POST",
+        body=b"data=query",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response[0] == 200
+    assert captured["method"] == "POST"
+    assert captured["body"] == b"data=query"
+    assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"

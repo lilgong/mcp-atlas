@@ -6,12 +6,17 @@ import asyncio
 import inspect
 import math
 import os
+import urllib.parse
 from datetime import datetime
 from importlib.metadata import version
 from typing import Any
 
 import aiohttp
 from osm_mcp_server import server
+try:
+    from .egress_relay_client import enabled as relay_enabled, fetch as relay_fetch
+except ImportError:  # Executed as the template's standalone script.
+    from egress_relay_client import enabled as relay_enabled, fetch as relay_fetch
 
 
 EXPECTED_VERSION = "0.1.1"
@@ -33,6 +38,64 @@ OVERPASS_HEADERS = {
     "User-Agent": "mcp-atlas/1.0 (MCP evaluation; Overpass read-only client)",
     "Accept": "application/json",
 }
+
+OSM_RELAY_HOSTS = frozenset({
+    "nominatim.openstreetmap.org", "overpass-api.de", "maps.mail.ru",
+    "router.project-osrm.org", "routing.openstreetmap.de",
+})
+
+
+class _RelayResponse:
+    def __init__(self, response):
+        self.status = response.status_code
+        self.headers = response.headers
+        self.url = response.url
+        self._body = response.body
+
+    async def read(self):
+        return self._body
+
+    async def text(self):
+        return self._body.decode("utf-8", errors="replace")
+
+    async def json(self):
+        import json
+
+        return json.loads(self._body)
+
+
+class _RelayRequestContext:
+    def __init__(self, method, url, kwargs):
+        self.method = method
+        self.url = url
+        self.kwargs = kwargs
+
+    async def __aenter__(self):
+        body = self.kwargs.get("data")
+        headers = dict(self.kwargs.get("headers") or {})
+        if isinstance(body, dict):
+            body = urllib.parse.urlencode(body, doseq=True).encode()
+            headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        response = await asyncio.to_thread(
+            relay_fetch,
+            self.method,
+            self.url,
+            params=self.kwargs.get("params"),
+            body=body,
+            headers=headers,
+            allow_redirects=True,
+        )
+        return _RelayResponse(response)
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+def _relay_request(method: str, url: str, kwargs: dict[str, Any]):
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if relay_enabled() and host in OSM_RELAY_HOSTS:
+        return _RelayRequestContext(method, url, kwargs)
+    return None
 
 NEIGHBORHOOD_CATEGORIES = {
     "groceries": ("shop=supermarket", "shop=convenience", "shop=grocery"),
@@ -128,13 +191,23 @@ def install_overpass_redirect() -> None:
         return targets[0] if url == UPSTREAM_OVERPASS_URL else url
 
     def redirected_get(self: aiohttp.ClientSession, url: str, *args: Any, **kwargs: Any):
-        return original_get(self, redirect(url), *args, **kwargs)
+        target = redirect(url)
+        return _relay_request("GET", target, kwargs) or original_get(
+            self, target, *args, **kwargs,
+        )
 
     def redirected_post(self: aiohttp.ClientSession, url: str, *args: Any, **kwargs: Any):
         if url != UPSTREAM_OVERPASS_URL:
-            return original_post(self, url, *args, **kwargs)
+            return _relay_request("POST", url, kwargs) or original_post(
+                self, url, *args, **kwargs,
+            )
         return _FallbackRequestContext(
-            self, original_post, targets, args, kwargs,
+            self,
+            lambda session, target, *call_args, **call_kwargs: (
+                _relay_request("POST", target, call_kwargs)
+                or original_post(session, target, *call_args, **call_kwargs)
+            ),
+            targets, args, kwargs,
         )
 
     aiohttp.ClientSession.get = redirected_get

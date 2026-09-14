@@ -206,8 +206,8 @@ def _is_rate_limited_tool_result(result: Any) -> bool:
 @contextlib.asynccontextmanager
 async def _server_call_slot(tool_name: str):
     server = server_for_tool(tool_name) or ""
-    if server == "wikipedia" and _wikipedia_relay_enabled():
-        # The relay schedules individual Action API requests.  Serializing the
+    if _relay_handles_server(server):
+        # The relay schedules individual upstream HTTP requests. Serializing the
         # entire multi-request MCP call here causes head-of-line blocking across
         # evaluation and synthesis processes without adding upstream safety.
         yield ServerCallSlot(0)
@@ -230,16 +230,13 @@ async def _server_call_slot(tool_name: str):
 
 
 def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
-    if (
-        server_for_tool(tool_name) == "wikipedia"
-        and _wikipedia_relay_enabled()
-    ):
+    if _relay_handles_server(server_for_tool(tool_name) or ""):
         return None
     return _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
 
 
-def _wikipedia_relay_enabled() -> bool:
-    return bool(
+def _relay_handles_server(server: str) -> bool:
+    return server in {"arxiv", "osm-mcp-server", "pubmed", "wikipedia"} and bool(
         (os.getenv("PUBMED_RELAY_URL") or "").strip()
         and (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
     )

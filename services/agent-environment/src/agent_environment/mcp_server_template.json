@@ -20,8 +20,14 @@
       }
     },
     "arxiv": {
-      "command": "/usr/local/bin/arxiv-mcp-server",
-      "args": []
+      "command": "/root/.local/share/uv/tools/arxiv-mcp-server/bin/python",
+      "args": [
+        "/agent-environment/src/agent_environment/arxiv_mcp_compat.py"
+      ],
+      "env": {
+        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
+      }
     },
     "brave-search": {
       "command": "node",
@@ -273,7 +279,11 @@
         "osm-mcp-server==0.1.1",
         "python",
         "/agent-environment/src/agent_environment/osm_mcp_compat.py"
-      ]
+      ],
+      "env": {
+        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
+      }
     },
     "oxylabs": {
       "command": "/agent-environment/.venv/bin/python",

@@ -278,6 +278,14 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 paths,
             )
             self.assertIn(
+                "src/agent_environment/arxiv_mcp_compat.py",
+                paths,
+            )
+            self.assertIn(
+                "src/agent_environment/egress_relay_client.py",
+                paths,
+            )
+            self.assertIn(
                 "src/agent_environment/pubmed_mcp_compat.py",
                 paths,
             )
@@ -289,8 +297,14 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             template_config = json.loads(template)
             self.assertEqual(
                 {
-                    "command": "/usr/local/bin/arxiv-mcp-server",
-                    "args": [],
+                    "command": "/root/.local/share/uv/tools/arxiv-mcp-server/bin/python",
+                    "args": [
+                        "/agent-environment/src/agent_environment/arxiv_mcp_compat.py",
+                    ],
+                    "env": {
+                        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
+                        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+                    },
                 },
                 template_config["mcpServers"]["arxiv"],
             )
@@ -308,6 +322,8 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
             self.assertIn("nodesource.com/setup_22.x", dockerfile)
             self.assertIn("src/agent_environment/pubmed_mcp_compat.py", dockerfile)
+            self.assertIn("src/agent_environment/arxiv_mcp_compat.py", dockerfile)
+            self.assertIn("src/agent_environment/egress_relay_client.py", dockerfile)
             self.assertIn(
                 "src/agent_environment/wikipedia_preload/sitecustomize.py",
                 dockerfile,

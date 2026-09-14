@@ -160,7 +160,7 @@ uv sync --project services/mcp_eval --frozen
 make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
 ```
 
-Wikipedia 的逐请求 relay 适配位于 runtime 镜像内，因此拉取本分支后必须重建或加载
+Wikipedia、arXiv 和 OSM 的逐请求 relay 适配位于 runtime 镜像内，因此拉取本分支后必须重建或加载
 由同一提交构建的 `mcp-atlas-runtime:latest`。仅重启 Python 服务不会更新已有镜像。
 随后按 §10 重启共享 runtime 和 completion；旧进程不会自动加载新代码或 `.env`。
 
@@ -346,16 +346,16 @@ MCP_TASK_ISOLATION_ENABLED=true
 Docker 繁忙或残留较多时阻塞 `/health`；运行中的 age-gated sweeper 会回收已失去
 进程跟踪且超过 `MCP_SANDBOX_ORPHAN_MAX_AGE` 的资源。
 
-同一宿主机、同一 Unix 用户并行运行 MCP-Atlas 和 data-syn 时，arXiv、Brave、OSM、
-TwelveData 与未配置集中 relay 的 Wikipedia 调用会自动通过
+同一宿主机、同一 Unix 用户并行运行 MCP-Atlas 和 data-syn 时，Brave、
+TwelveData 与未配置集中 relay 的 arXiv、OSM、PubMed、Wikipedia 调用会自动通过
 `/tmp/mcp-atlas-rate-gates-<uid>/` 的文件锁统一串行和间隔调度；可识别的 429 退避也在
 进程间共享。
 `MCP_SHARED_RATE_LIMIT_DIR` 通常留空，
 只有迁移本地锁目录时才填写；不要指向 NFS。该机制只协调调用时序，不代理请求、
 不改变工具 schema，也不适用于不同宿主机或不同 Unix 用户。
-Wikipedia 的一个工具调用会在内部读取多个页面属性；配置集中 relay 时不锁住整个工具
-调用，而是将 search/summary/article 的每个 HTTP 子请求统一交给 relay 调度并经
-IPWO 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
+Wikipedia、arXiv 和 OSM 的一个工具调用可能包含多个 HTTP 子请求；配置集中
+relay 时不锁住整个工具调用，而是将每个受支持的 HTTP 请求统一交给 relay
+调度并经 IPWO 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
 `Retry-After`。
 两种路径都不改变工具 schema 或返回结构。
 
@@ -449,10 +449,11 @@ MONGODB_CONNECTION_STRING=
 修改 `.env` 后，需要重启共享 MCP runtime 和 completion 服务。运行中的进程不会
 自动重新读取文件。
 
-### 5.8 PubMed/Wikipedia 集中出口（推荐多机共用一个）
+### 5.8 MCP 集中出口（推荐多机共用一个）
 
 如果部署机器的公网 IP 被 NCBI abuse 系统限制，可以在一台受信任的内网机器上运行
-集中 relay，并通过 IPWO 动态住宅代理访问 NCBI 和 Wikipedia Action API。relay 统一执行限速，任务
+集中 relay，并通过 IPWO 粘性住宅代理访问 NCBI、Wikipedia、arXiv 和 OSM。relay 按服务
+统一执行限速，任务
 容器只收到 relay URL 和随机 token，不会收到代理凭证。
 
 relay 主机的 `.env` 配置：
@@ -491,17 +492,18 @@ curl http://<relay内网IP>:3985/health
 ```
 
 relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议使用
-`IPWO_PROXY_COUNTRY=US`；relay 为 NCBI 复用一条粘性出口，为无状态的 Wikipedia Action API 使用四条独立粘性出口 lane。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
+`IPWO_PROXY_COUNTRY=US`；relay 为 NCBI、arXiv、Nominatim、Overpass 和 OSRM 分别复用一条
+粘性出口，为无状态的 Wikipedia Action API 使用四条独立粘性出口 lane。arXiv 全局
+每 3 秒最多启动一次请求，OSM 各类上游全局每秒最多启动一次。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
 住宅代理的 `sid`。请求记录
 写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
-集中 relay 会跨机器统一 PubMed/Wikipedia 的请求节奏。arXiv、OSM、Brave 和
-TwelveData 的共享文件门控只协调同一宿主机、同一 Unix 用户的进程；不同机器不会共享
-该锁。如果多台机器共用同一公网出口，应分别降低并发或错峰运行这些服务。
+集中 relay 会跨机器统一 PubMed、Wikipedia、arXiv 和 OSM 的每次真实 HTTP 请求节奏。
+所有评测进程应指向同一个 relay 实例；不要在同一公网出口下启动多个独立 relay。
 
 IPWO 代理返回 407 时，relay 会
-锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed/Wikipedia MCP：
+锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed、Wikipedia、arXiv 和 OSM MCP：
 MCP-Atlas completion 停止整批评测，data-syn P2 取消其他并发任务并退出；已经成功的
 结果保持落盘，充值或换 key 并重启 relay 后可续跑。普通 429 仍按瞬时限流处理。
 
@@ -1620,7 +1622,7 @@ docker run --rm hello-world
 | `scripts/prepare_task_data_fixture.py` | 生成内容寻址文件 fixture |
 | `scripts/build_task_mongo_fixture.py` | 从 mongodump 构建 task-Mongo fixture 镜像 |
 | `scripts/run_shared_mcp.py` | 启动共享 MCP runtime |
-| `scripts/pubmed_relay_server.py` | PubMed/Wikipedia 的鉴权、限速住宅代理出口 |
+| `scripts/pubmed_relay_server.py` | PubMed、Wikipedia、arXiv 和 OSM 的鉴权、限速住宅代理出口 |
 | `services/mcp_eval/mcp_completion_script.py` | 生成模型轨迹 |
 | `services/mcp_eval/mcp_evals_scores.py` | claim coverage 评分 |
 | `services/mcp_eval/atlas_verify_v2.py` | 结合 scored CSV、runtime log 和 usage log 审核 MCP 侧影响 |

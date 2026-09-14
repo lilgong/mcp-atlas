@@ -96,7 +96,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             isolated_client._is_rate_limited_tool_result(normal_data)
         )
 
-    async def test_wikipedia_relay_bypasses_whole_tool_call_gate(self):
+    async def test_relay_bypasses_whole_arxiv_osm_pubmed_and_wikipedia_gates(self):
         with patch.dict(
             "os.environ",
             {
@@ -105,15 +105,13 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             },
             clear=False,
         ):
-            self.assertIsNone(
-                isolated_client._server_call_gate(
-                    "wikipedia_search_wikipedia"
-                )
-            )
-            async with isolated_client._server_call_slot(
-                "wikipedia_search_wikipedia"
-            ) as slot:
-                self.assertEqual(0, slot.queued_ms)
+            for tool in (
+                "arxiv_search_papers", "osm-mcp-server_geocode_address",
+                "pubmed_search_pubmed_key_words", "wikipedia_search_wikipedia",
+            ):
+                self.assertIsNone(isolated_client._server_call_gate(tool))
+                async with isolated_client._server_call_slot(tool) as slot:
+                    self.assertEqual(0, slot.queued_ms)
 
     def test_rate_limit_backoff_grows_and_success_recovers_gradually(self):
         gate = isolated_client.ServerCallGate(1, 3.0, 15.0, 60.0)
