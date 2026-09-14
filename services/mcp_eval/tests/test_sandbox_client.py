@@ -53,7 +53,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {
                 "arxiv", "brave-search", "e2b-server", "osm-mcp-server",
-                "twelvedata", "wikipedia",
+                "pubmed", "twelvedata", "wikipedia",
             },
             set(isolated_client._SHARED_SERVER_CALL_GATES),
         )

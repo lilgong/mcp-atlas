@@ -20,7 +20,7 @@ from ..account_guard import (
     is_fatal_mcp_account_error,
 )
 from ..schema import CallToolResponse, ToolDefinition
-from ..shared_rate_gate import SharedRateGate, SharedRateLease
+from ..shared_rate_gate import RateLease, SharedRateGate
 from ..task_sandbox import TaskSandbox
 from ..tool_policy import (
     TASK_MONGODB_DATABASE,
@@ -133,6 +133,7 @@ _SHARED_SERVER_CALL_GATES = {
     "brave-search": SharedRateGate("brave-search", 1.5, 2.0, 10.0),
     "e2b-server": SharedRateGate("e2b-server", 15.0, 60.0, 240.0),
     "osm-mcp-server": SharedRateGate("osm-mcp-server", 1.0),
+    "pubmed": SharedRateGate("pubmed", 1.2, 15.0, 60.0),
     "twelvedata": SharedRateGate("twelvedata", 8.0, 15.0, 60.0),
     "wikipedia": SharedRateGate(
         "wikipedia", 6.0, 60.0, 60.0, completion_spacing=6.0,
@@ -143,7 +144,7 @@ _SHARED_SERVER_CALL_GATES = {
 @dataclass
 class ServerCallSlot:
     queued_ms: int
-    shared_lease: SharedRateLease | None = None
+    shared_lease: RateLease | None = None
 
     def observe_rate_limit(self, rate_limited: bool) -> float:
         if self.shared_lease is None:
@@ -237,6 +238,8 @@ def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
 
 
 def _relay_handles_server(server: str) -> bool:
+    # The relay schedules each upstream HTTP request centrally. Without it,
+    # Redis (or the local file backend) coordinates the whole MCP tool call.
     return server in {"arxiv", "osm-mcp-server", "pubmed", "wikipedia"} and bool(
         (os.getenv("PUBMED_RELAY_URL") or "").strip()
         and (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()

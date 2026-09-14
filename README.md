@@ -346,18 +346,20 @@ MCP_TASK_ISOLATION_ENABLED=true
 Docker 繁忙或残留较多时阻塞 `/health`；运行中的 age-gated sweeper 会回收已失去
 进程跟踪且超过 `MCP_SANDBOX_ORPHAN_MAX_AGE` 的资源。
 
-同一宿主机、同一 Unix 用户并行运行 MCP-Atlas 和 data-syn 时，Brave、
-TwelveData 与未配置集中 relay 的 arXiv、OSM、PubMed、Wikipedia 调用会自动通过
-`/tmp/mcp-atlas-rate-gates-<uid>/` 的文件锁统一串行和间隔调度；可识别的 429 退避也在
-进程间共享。
-`MCP_SHARED_RATE_LIMIT_DIR` 通常留空，
-只有迁移本地锁目录时才填写；不要指向 NFS。该机制只协调调用时序，不代理请求、
-不改变工具 schema，也不适用于不同宿主机或不同 Unix 用户。
-Wikipedia、arXiv 和 OSM 的一个工具调用可能包含多个 HTTP 子请求；配置集中
-relay 时不锁住整个工具调用，而是将每个受支持的 HTTP 请求统一交给 relay
-调度并经 IPWO 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
-`Retry-After`。
-两种路径都不改变工具 schema 或返回结构。
+多 Worker 部署时，给每个 completion 配置同一个 `REDIS_URL`。Brave、E2B、
+TwelveData 与未配置集中 relay 的 arXiv、OSM、PubMed、Wikipedia 整个 MCP 工具调用
+会先通过 Redis 获取许可；可识别的 429 退避也会写入相同状态。配置集中 relay 时，
+这些服务改由 relay 逐请求调度，不再额外锁住整个工具调用。
+
+Redis 只保存 `mcp-atlas:rate-limit:v1:*` 命名空间下的调用租约、开始时间和 429 冷却
+状态，不代理 MCP 请求，不接触模型凭据或任务数据。Redis 地址只提供给 completion，
+不要注入任务 MCP 容器。Redis 暂时不可用时，受限工具调用会直接失败，防止跨 Worker
+限速静默失效；其他工具不受影响。
+
+单机直接运行且未配置 `REDIS_URL` 时，继续使用
+`/tmp/mcp-atlas-rate-gates-<uid>/` 的文件锁。`MCP_SHARED_RATE_LIMIT_DIR` 通常留空，
+只有迁移本地锁目录时才填写，且不能指向 NFS。两种后端都只协调调用时序，不改变
+任务容器、工具 schema 或返回结构。arXiv、PubMed 等仍按任务运行在独立容器中。
 
 ### 5.5 轨迹参数
 
