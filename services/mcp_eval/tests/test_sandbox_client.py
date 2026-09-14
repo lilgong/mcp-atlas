@@ -205,6 +205,11 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         test_gate = isolated_client.ServerCallGate(1, 0.02)
         with (
             patch.dict(
+                "os.environ",
+                {"PUBMED_RELAY_URL": "", "PUBMED_RELAY_TOKEN": ""},
+                clear=False,
+            ),
+            patch.dict(
                 isolated_client._SERVER_CALL_GATES,
                 {"arxiv": test_gate},
                 clear=False,
