@@ -118,7 +118,15 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Controller:
-    def __init__(self, min_interval: float | None = None) -> None:
+    def __init__(
+        self,
+        min_interval: float | None = None,
+        *,
+        max_in_flight: int | None = None,
+        adaptive_rate_limit: bool = False,
+    ) -> None:
+        if max_in_flight is not None and max_in_flight < 1:
+            raise ValueError("max_in_flight must be positive")
         self.lock = threading.Lock()
         self.last_started = 0.0
         self.blocked_until = 0.0
@@ -126,27 +134,76 @@ class Controller:
         self.session_id = _new_ipwo_session_id()
         self.rotation_count = 0
         self.min_interval = MIN_INTERVAL if min_interval is None else min_interval
+        self.max_in_flight = max_in_flight
+        self.in_flight = 0
+        self.adaptive_rate_limit = adaptive_rate_limit
+        self.current_in_flight_limit = max_in_flight
+        self.successes_since_rate_limit = 0
 
     def current_account_error(self) -> str | None:
         with self.lock:
             return self.account_error
 
     def _wait_for_slot(self) -> None:
-        """Pace request starts without serializing their network wait time."""
+        """Pace starts and, when configured, cap concurrent upstream requests."""
         while True:
             with self.lock:
                 if self.account_error:
                     raise RelayAccountError(self.account_error)
                 now = time.monotonic()
+                has_capacity = (
+                    self.current_in_flight_limit is None
+                    or self.in_flight < self.current_in_flight_limit
+                )
                 delay = max(
                     self.last_started + self.min_interval - now,
                     self.blocked_until - now,
                     0.0,
                 )
-                if delay <= 0:
+                if has_capacity and delay <= 0:
                     self.last_started = now
+                    self.in_flight += 1
                     return
-            time.sleep(delay)
+            time.sleep(delay if has_capacity else 0.05)
+
+    def _finish_attempt(
+        self,
+        *,
+        status: int | None = None,
+        abuse: bool = False,
+        cooldown: float = 0.0,
+        rotate: bool = False,
+        account_error: str | None = None,
+    ) -> None:
+        """Publish an attempt outcome before another waiting request can start."""
+        with self.lock:
+            if account_error and not self.account_error:
+                self.account_error = account_error
+            if rotate:
+                previous = self.session_id
+                while self.session_id == previous:
+                    self.session_id = _new_ipwo_session_id()
+                self.rotation_count += 1
+            if cooldown > 0:
+                self.blocked_until = max(
+                    self.blocked_until, time.monotonic() + cooldown,
+                )
+            if self.adaptive_rate_limit:
+                if status == 429:
+                    self.current_in_flight_limit = 1
+                    self.successes_since_rate_limit = 0
+                elif status is not None and status < 500 and not abuse:
+                    self.successes_since_rate_limit += 1
+                    if self.successes_since_rate_limit >= 3:
+                        self.current_in_flight_limit = self.max_in_flight
+                        self.successes_since_rate_limit = 0
+                else:
+                    self.successes_since_rate_limit = 0
+            self.in_flight = max(0, self.in_flight - 1)
+
+    def current_limit(self) -> int | None:
+        with self.lock:
+            return self.current_in_flight_limit
 
     def _set_cooldown(self, seconds: float) -> None:
         with self.lock:
@@ -194,34 +251,52 @@ class Controller:
                     request_options.update(method=method, body=body, headers=headers)
                 final = _fetch_once(url, allow_redirects, **request_options)
             except RelayAccountError as exc:
-                self._latch_account_error(str(exc))
+                self._finish_attempt(account_error=str(exc))
+                raise
             except RelayUpstreamError:
+                retry = attempt < 2
+                self._finish_attempt(
+                    cooldown=5.0 * (2**attempt) if retry else 0.0,
+                    rotate=retry,
+                )
                 if attempt == 2:
                     raise
-                self._rotate_session()
-                self._set_cooldown(5.0 * (2**attempt))
                 continue
+            except BaseException:
+                self._finish_attempt()
+                raise
             status, headers, _, _ = final
             if status == 407:
-                self._latch_account_error(
-                    "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
+                message = "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
+                self._finish_attempt(account_error=message)
+                raise RelayAccountError(message)
+            abuse = _is_abuse_response(final)
+            if abuse:
+                retry = attempt < 2
+                self._finish_attempt(
+                    status=status,
+                    abuse=True,
+                    cooldown=5.0 * (2**attempt) if retry else 0.0,
+                    rotate=retry,
                 )
-            if _is_abuse_response(final):
-                if attempt < 2:
-                    self._rotate_session()
-                    self._set_cooldown(5.0 * (2**attempt))
+                if retry:
                     continue
                 return (*final, attempt + 1, queued_ms)
             if status != 429 and status < 500:
+                self._finish_attempt(status=status)
                 return (*final, attempt + 1, queued_ms)
-            if attempt < 2:
-                self._rotate_session()
-                retry_after = _retry_after(headers)
-                self._set_cooldown(max(retry_after, 5.0 * (2**attempt)))
+            retry = attempt < 2
+            retry_after = _retry_after(headers)
+            cooldown = (
+                max(retry_after, 5.0 * (2**attempt))
+                if retry else max(retry_after, 60.0) if status == 429 else 0.0
+            )
+            self._finish_attempt(
+                status=status,
+                cooldown=cooldown,
+                rotate=retry,
+            )
         assert final is not None
-        if final[0] == 429:
-            cooldown = max(_retry_after(final[1]), 60.0)
-            self._set_cooldown(cooldown)
         return (*final, 3, queued_ms or 0.0)
 
 
@@ -283,7 +358,9 @@ CONTROLLERS = {
     # queue behind one residential IP. NCBI remains single-exit because one
     # PubMed workflow benefits from a stable identity.
     "wikipedia": ControllerPool(WIKIPEDIA_LANES),
-    "arxiv": Controller(3.0),
+    "arxiv": Controller(
+        3.0, max_in_flight=2, adaptive_rate_limit=True,
+    ),
     "osm-nominatim": Controller(1.0),
     "osm-overpass": Controller(1.0),
     "osm-routing": Controller(1.0),

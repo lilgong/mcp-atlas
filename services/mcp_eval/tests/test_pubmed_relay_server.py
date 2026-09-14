@@ -215,6 +215,62 @@ def test_slow_upstream_request_does_not_block_another_request(monkeypatch):
     assert calls == ["https://test/first", "https://test/second"]
 
 
+def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
+    release = threading.Event()
+    two_started = threading.Event()
+    third_started = threading.Event()
+    lock = threading.Lock()
+    started = 0
+
+    def fake_fetch(url, _allow_redirects, *, session_id=None):
+        nonlocal started
+        with lock:
+            started += 1
+            if started == 2:
+                two_started.set()
+            elif started == 3:
+                third_started.set()
+        assert release.wait(2)
+        return 200, {}, b"ok", url
+
+    monkeypatch.setattr(relay, "_fetch_once", fake_fetch)
+    controller = relay.Controller(
+        0, max_in_flight=2, adaptive_rate_limit=True,
+    )
+    threads = [
+        threading.Thread(
+            target=controller.fetch,
+            args=(f"https://test/{index}", True),
+        )
+        for index in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        assert two_started.wait(1)
+        assert not third_started.wait(0.2)
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(2)
+    assert third_started.is_set()
+
+
+def test_arxiv_controller_reduces_on_429_then_recovers():
+    controller = relay.Controller(
+        0, max_in_flight=2, adaptive_rate_limit=True,
+    )
+
+    controller._wait_for_slot()
+    controller._finish_attempt(status=429)
+    assert controller.current_limit() == 1
+    for expected in (1, 1, 2):
+        controller._wait_for_slot()
+        controller._finish_attempt(status=200)
+        assert controller.current_limit() == expected
+    assert controller.current_limit() == 2
+
+
 def test_wikipedia_controller_pool_uses_independent_sticky_lanes(monkeypatch):
     url = "https://en.wikipedia.org/w/api.php"
     session_ids = []
