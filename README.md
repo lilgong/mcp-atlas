@@ -123,7 +123,7 @@ docker run --rm hello-world
 
 ```bash
 git clone \
-  --branch feat/remote-pubmed-relay \
+  --branch main \
   https://github.com/lilgong/mcp-atlas.git
 
 cd mcp-atlas
@@ -139,7 +139,7 @@ git log -1 --oneline
 预期分支：
 
 ```text
-feat/remote-pubmed-relay
+main
 ```
 
 不需要执行 `git submodule update`。任务使用的 Git 仓库由文件 fixture 中的
@@ -153,8 +153,8 @@ feat/remote-pubmed-relay
 ```bash
 cd /path/to/mcp-atlas
 git fetch origin
-git switch feat/remote-pubmed-relay
-git pull --ff-only origin feat/remote-pubmed-relay
+git switch main
+git pull --ff-only origin main
 cp env.template .env  # 仅首次部署；已有 .env 时不要覆盖
 uv sync --project services/mcp_eval --frozen
 make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
@@ -1579,7 +1579,7 @@ docker run --rm hello-world
 
 ```text
 [ ] 安装并验证 Git、Docker、Make、Python、uv、curl、jq、unzip
-[ ] clone feat/remote-pubmed-relay
+[ ] clone main
 [ ] 验证仓库内 services/mcp_eval/MCP-Atlas-origin.csv 的 SHA256
 [ ] 创建并填写 .env
 [ ] 若使用集中出口：在 relay 主机启动 make run-egress-relay，并从评测机检查 /health
