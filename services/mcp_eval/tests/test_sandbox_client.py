@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import unittest
 from types import SimpleNamespace
@@ -19,6 +20,10 @@ from mcp_completion.tool_policy import ToolRoute
 
 
 class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
+    def test_sandbox_concurrency_follows_completion_concurrency(self):
+        with patch.dict(os.environ, {"MCP_COMPLETION_CONCURRENCY": "17"}):
+            self.assertEqual(isolated_client._completion_concurrency(), 17)
+
     def test_public_server_policies_match_upstream_limits(self):
         self.assertEqual(
             (1, 1.5, 2.0, 10.0),

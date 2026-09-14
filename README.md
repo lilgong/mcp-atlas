@@ -321,7 +321,6 @@ MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:latest
 MCP_TASK_DATA_DIR=/home/lny/mcp-atlas/.runtime/fixtures/official-data-v2
 MCP_TASK_MONGO_IMAGE=mcp-task-mongo:official-video-game-store-v1
 
-MCP_TASK_SANDBOX_CONCURRENCY=20
 MCP_TASK_SANDBOX_STARTUP_TIMEOUT=180
 MCP_TASK_SANDBOX_MEMORY=3g
 MCP_TASK_SANDBOX_CPUS=2.0
@@ -366,7 +365,7 @@ IPWO 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会
 MCP_COMPLETION_INPUT=MCP-Atlas.csv
 MCP_COMPLETION_OUTPUT=MCP-Atlas-<model-label>.csv
 MCP_COMPLETION_NUM_TASKS=
-MCP_COMPLETION_CONCURRENCY=20
+MCP_COMPLETION_CONCURRENCY=30
 USE_SYSTEM_PROMPT_IN_COMPLETION=
 MCP_COMPLETION_SYSTEM_PROMPT_FILE=
 ```
@@ -376,7 +375,7 @@ MCP_COMPLETION_SYSTEM_PROMPT_FILE=
 - `MCP_COMPLETION_INPUT` 相对于 `services/mcp_eval/`。
 - `MCP_COMPLETION_OUTPUT` 只写文件名；结果自动进入 `completion_results/`。
 - `MCP_COMPLETION_NUM_TASKS` 留空表示运行全部任务。
-- `MCP_COMPLETION_CONCURRENCY` 是同时请求 completion 服务的任务数。
+- `MCP_COMPLETION_CONCURRENCY` 是同时请求 completion 服务和运行任务沙箱的任务数。
 - `USE_SYSTEM_PROMPT_IN_COMPLETION` 留空表示不添加项目内置 system prompt。
 - `MCP_COMPLETION_SYSTEM_PROMPT_FILE` 仅在上一项为 `true` 时生效；留空使用
   项目内置 prompt，填写时读取 UTF-8 文本。相对路径按仓库根目录解析。

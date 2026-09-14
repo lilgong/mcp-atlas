@@ -35,9 +35,11 @@ class ToolPolicyError(RuntimeError):
     pass
 
 
-_SANDBOX_SEMAPHORE = asyncio.Semaphore(
-    int(os.getenv("MCP_TASK_SANDBOX_CONCURRENCY", "20"))
-)
+def _completion_concurrency() -> int:
+    return max(1, int(os.getenv("MCP_COMPLETION_CONCURRENCY", "30")))
+
+
+_SANDBOX_SEMAPHORE = asyncio.Semaphore(_completion_concurrency())
 
 
 # Public services publish aggregate client limits.  All concurrent evaluations
