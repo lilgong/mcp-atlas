@@ -14,6 +14,7 @@ from pathlib import Path
 logger = create_logger(__name__)
 
 CLIENT_INIT_TIMEOUT_SECONDS = 45.0
+AUTO_DETECT_OPTIONAL_VARS = frozenset({"MCP_TOOL_BASE_URL"})
 
 
 def configured_client_init_timeout_seconds() -> float:
@@ -26,6 +27,21 @@ def configured_client_init_timeout_seconds() -> float:
     if value <= 0:
         raise ValueError("MCP_CLIENT_INIT_TIMEOUT_SECONDS must be positive")
     return value
+
+
+def required_template_vars(server_template: dict[str, Any]) -> set[str]:
+    """Return credentials required to auto-enable a templated MCP server."""
+    required_vars: set[str] = set()
+    env_config = server_template.get("env") or {}
+    if isinstance(env_config, list):
+        env_config = env_config[0] if env_config else {}
+    for env_value in env_config.values():
+        if isinstance(env_value, str):
+            required_vars.update(re.findall(r"\$\{([^}]+)\}", env_value))
+    for argument in server_template.get("args") or []:
+        if isinstance(argument, str):
+            required_vars.update(re.findall(r"\$\{([^}]+)\}", argument))
+    return required_vars - AUTO_DETECT_OPTIONAL_VARS
 
 
 class DirectMCPClient(Client):
@@ -92,28 +108,7 @@ if "mcpServers" in config:
                 continue  # Already in default list
 
             server_template = template_config["mcpServers"][name]
-            required_vars = set()
-
-            # Check env section for ${VAR} patterns
-            if "env" in server_template and server_template["env"]:
-                env_config = server_template["env"]
-                if isinstance(env_config, list):
-                    env_config = env_config[0] if env_config else {}
-
-                for env_key, env_value in env_config.items():
-                    if isinstance(env_value, str) and "${" in env_value:
-                        # Extract all ${VAR} patterns from the string
-                        var_names = re.findall(r"\$\{([^}]+)\}", env_value)
-                        required_vars.update(var_names)
-
-            # Check args array for ${VAR} patterns
-            if "args" in server_template:
-                args_list = server_template["args"]
-                for arg in args_list:
-                    if isinstance(arg, str) and "${" in arg:
-                        # Extract all ${VAR} patterns from the arg
-                        var_names = re.findall(r"\$\{([^}]+)\}", arg)
-                        required_vars.update(var_names)
+            required_vars = required_template_vars(server_template)
 
             if name == "lara-translate":
                 yibu_key = os.getenv("LARA_YIBU_API_KEY", "").strip()

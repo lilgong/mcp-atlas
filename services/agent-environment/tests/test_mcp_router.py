@@ -16,6 +16,7 @@ from agent_environment.mcp_client import (
     CLIENT_INIT_TIMEOUT_SECONDS,
     configured_client_init_timeout_seconds,
     create_server_client,
+    required_template_vars,
 )
 from agent_environment.mcp_router import (
     DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
@@ -24,6 +25,16 @@ from agent_environment.mcp_router import (
     UnknownToolError,
     configured_discovery_timeout_seconds,
 )
+
+
+def test_tool_base_url_is_not_an_auto_enable_credential():
+    template = {
+        "env": {
+            "BRAVE_API_KEY": "${BRAVE_API_KEY}",
+            "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}",
+        }
+    }
+    assert required_template_vars(template) == {"BRAVE_API_KEY"}
 
 
 def make_tool(name: str) -> mcp.types.Tool:
