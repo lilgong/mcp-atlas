@@ -38,7 +38,11 @@ async def lifespan(_app: FastAPI):
     )
     sweeper: Optional[asyncio.Task] = None
     if isolation_enabled:
-        validate_isolated_control_plane(config.HOST, config.MCP_SERVER_URL)
+        validate_isolated_control_plane(
+            config.HOST,
+            config.MCP_SERVER_URL,
+            os.getenv("MCP_ATLAS_RUN_RUNTIME_HOST"),
+        )
         # Do not synchronously delete old Docker resources during startup. A
         # large backlog on a busy shared daemon can otherwise keep /health
         # unavailable for N serial teardown timeouts. The age-gated sweeper
