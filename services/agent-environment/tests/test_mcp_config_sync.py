@@ -20,6 +20,23 @@ def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_rollout_env_template_covers_every_server_placeholder():
+    placeholders: set[str] = set()
+    for server in load_json(SHARED_TEMPLATE)["mcpServers"].values():
+        values = list((server.get("env") or {}).values()) + list(
+            server.get("args") or []
+        )
+        for value in values:
+            if isinstance(value, str):
+                placeholders.update(re.findall(r"\$\{([^}]+)\}", value))
+    configured = set(re.findall(
+        r"^([A-Z][A-Z0-9_]*)=", (REPO_ROOT / "env.template").read_text(
+            encoding="utf-8"
+        ), flags=re.MULTILINE,
+    ))
+    assert placeholders <= configured
+
+
 def package_from_path(path: str) -> str | None:
     if not path.startswith(NODE_ROOT):
         return None
@@ -165,15 +182,13 @@ console.log(JSON.stringify({{
     )
 
 
-def test_oxylabs_always_uses_the_shared_tool_base_url():
+def test_oxylabs_explicit_endpoint_overrides_shared_tool_base_url():
     vendor_root = ROOT / "vendor" / "yibu-patched"
     environment = {
         **os.environ,
         "PYTHONPATH": str(vendor_root),
         "MCP_TOOL_BASE_URL": "http://gateway.example:3000/proxy/",
-        # A value persisted by the old platform must no longer override the
-        # shared MCP tool gateway.
-        "OXYLABS_SCRAPER_URL": "https://yibuapi.com/oxylabs/v1/queries",
+        "OXYLABS_SCRAPER_URL": "http://oxylabs.example/custom/query/",
     }
     result = subprocess.run(
         [
@@ -186,6 +201,46 @@ def test_oxylabs_always_uses_the_shared_tool_base_url():
         capture_output=True,
         text=True,
         env=environment,
+    )
+    assert result.stdout.strip() == "http://oxylabs.example/custom/query"
+
+
+def test_oxylabs_derives_endpoint_from_shared_tool_base_url():
+    vendor_root = ROOT / "vendor" / "yibu-patched"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(vendor_root),
+        "MCP_TOOL_BASE_URL": "http://gateway.example:3000/proxy/",
+    }
+    environment.pop("OXYLABS_SCRAPER_URL", None)
+    result = subprocess.run(
+        [
+            "python", "-c",
+            "from oxylabs_mcp.config import settings; "
+            "print(settings.OXYLABS_SCRAPER_URL)",
+        ],
+        check=True, capture_output=True, text=True, env=environment,
+    )
+    assert result.stdout.strip() == (
+        "http://gateway.example:3000/proxy/oxylabs/v1/queries"
+    )
+
+
+def test_oxylabs_expands_env_file_base_url_reference():
+    vendor_root = ROOT / "vendor" / "yibu-patched"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(vendor_root),
+        "MCP_TOOL_BASE_URL": "http://gateway.example:3000/proxy/",
+        "OXYLABS_SCRAPER_URL": "${MCP_TOOL_BASE_URL}/oxylabs/v1/queries",
+    }
+    result = subprocess.run(
+        [
+            "python", "-c",
+            "from oxylabs_mcp.config import settings; "
+            "print(settings.OXYLABS_SCRAPER_URL)",
+        ],
+        check=True, capture_output=True, text=True, env=environment,
     )
     assert result.stdout.strip() == (
         "http://gateway.example:3000/proxy/oxylabs/v1/queries"

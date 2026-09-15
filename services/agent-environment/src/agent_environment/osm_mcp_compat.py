@@ -169,7 +169,10 @@ def install_overpass_redirect() -> None:
             "implementation; inspect osm_mcp_server.server before upgrading"
         )
     configured = (
-        os.getenv("SYN_OSM_OVERPASS_URLS")
+        os.getenv("OSM_OVERPASS_URLS")
+        # Compatibility for old data-syn deployments. New runtime configs use
+        # the unscoped name above.
+        or os.getenv("SYN_OSM_OVERPASS_URLS")
         or os.getenv("SYN_OSM_OVERPASS_URL")
         or (
             f"{UPSTREAM_OVERPASS_URL},{SECONDARY_OVERPASS_URL},"
@@ -181,7 +184,7 @@ def install_overpass_redirect() -> None:
         not target.startswith(("https://", "http://")) for target in targets
     ):
         raise RuntimeError(
-            "SYN_OSM_OVERPASS_URLS must contain comma-separated HTTP(S) URLs"
+            "OSM_OVERPASS_URLS must contain comma-separated HTTP(S) URLs"
         )
 
     original_get = aiohttp.ClientSession.get

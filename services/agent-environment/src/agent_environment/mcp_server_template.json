@@ -284,6 +284,7 @@
         "/agent-environment/src/agent_environment/osm_mcp_compat.py"
       ],
       "env": {
+        "OSM_OVERPASS_URLS": "${OSM_OVERPASS_URLS}",
         "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
         "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
       }
@@ -297,6 +298,7 @@
       "env": {
         "OXYLABS_USERNAME": "${OXYLABS_USERNAME}",
         "OXYLABS_PASSWORD": "${OXYLABS_PASSWORD}",
+        "OXYLABS_SCRAPER_URL": "${OXYLABS_SCRAPER_URL}",
         "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
         "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}"
       }

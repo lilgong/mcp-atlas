@@ -20,6 +20,25 @@ ROOT = Path(__file__).resolve().parents[3]
 AGENT_ROOT = ROOT / "services" / "agent-environment"
 
 
+def test_osm_uses_unscoped_runtime_setting_with_legacy_fallback():
+    template = (ROOT / "env.template").read_text(encoding="utf-8")
+    assert "\nOSM_OVERPASS_URLS=" in template
+    assert "\nSYN_OSM_OVERPASS_URLS=" not in template
+    source = (
+        AGENT_ROOT / "src" / "agent_environment" / "osm_mcp_compat.py"
+    ).read_text(encoding="utf-8")
+    assert source.index('os.getenv("OSM_OVERPASS_URLS")') < source.index(
+        'os.getenv("SYN_OSM_OVERPASS_URLS")'
+    )
+    servers = json.loads(
+        (AGENT_ROOT / "src" / "agent_environment" / "mcp_server_template.json")
+        .read_text(encoding="utf-8")
+    )["mcpServers"]
+    assert servers["osm-mcp-server"]["env"]["OSM_OVERPASS_URLS"] == (
+        "${OSM_OVERPASS_URLS}"
+    )
+
+
 def test_oxylabs_universal_payload_gets_required_source():
     original = {"url": "https://example.com"}
     assert normalize_scraper_payload(original) == {
@@ -81,6 +100,7 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert "duckduckgo-mcp-server[browser]==0.6.1" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
     assert shared["osm-mcp-server"]["env"] == {
+        "OSM_OVERPASS_URLS": "${OSM_OVERPASS_URLS}",
         "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
         "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
     }
