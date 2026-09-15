@@ -8,40 +8,57 @@ const {
   mkdirSync,
 } = require("node:fs");
 
+const DEFAULT_MCP_TOOL_BASE_URL = "https://yibuapi.com";
+
 const SERVICE_RULES = {
   brave: {
     upstreamOrigin: "https://api.search.brave.com",
-    gatewayOrigin: "https://yibuapi.com",
     gatewayPrefix: "/brave",
     stripPathPrefix: "/res",
     credentialHeader: "x-subscription-token",
   },
   exa: {
     upstreamOrigin: "https://api.exa.ai",
-    gatewayOrigin: "https://yibuapi.com",
     gatewayPrefix: "/exa",
     credentialHeader: "x-api-key",
   },
   lara: {
     upstreamOrigin: "https://api.laratranslate.com",
-    gatewayOrigin: "https://yibuapi.com",
     gatewayPrefix: "/lara",
   },
 };
+
+function yibuBaseUrl() {
+  const configured = String(
+    process.env.MCP_TOOL_BASE_URL || DEFAULT_MCP_TOOL_BASE_URL,
+  ).trim().replace(/\/+$/, "");
+  const url = new URL(configured);
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error(`MCP_TOOL_BASE_URL must use http or https: ${configured}`);
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("MCP_TOOL_BASE_URL must not contain credentials, query, or fragment");
+  }
+  return url;
+}
+
+function gatewayPath(prefix, pathname) {
+  const basePath = yibuBaseUrl().pathname.replace(/\/+$/, "");
+  return `${basePath}${prefix}${pathname}`.replace(/\/{2,}/g, "/");
+}
 
 function rewriteUrl(rawUrl, service) {
   const rule = SERVICE_RULES[service];
   if (!rule) return String(rawUrl);
   const url = new URL(String(rawUrl));
   if (url.origin !== rule.upstreamOrigin) return url.toString();
-  const gateway = new URL(rule.gatewayOrigin);
-  url.protocol = gateway.protocol;
-  url.host = gateway.host;
+  const gateway = yibuBaseUrl();
   const pathname = rule.stripPathPrefix && url.pathname.startsWith(rule.stripPathPrefix)
     ? url.pathname.slice(rule.stripPathPrefix.length)
     : url.pathname;
-  url.pathname = rule.gatewayPrefix + pathname;
-  return url.toString();
+  gateway.pathname = gatewayPath(rule.gatewayPrefix, pathname);
+  gateway.search = url.search;
+  return gateway.toString();
 }
 
 function rewriteHeaders(source, service, explicitKey) {
@@ -120,15 +137,20 @@ function installLaraNodeTransport(key) {
     method, path, headers, body, streamResponse,
   ) {
     const originalBaseUrl = this.baseUrl;
-    const gatewayPath = `/lara${path}`;
+    const gateway = yibuBaseUrl();
+    const requestPath = gatewayPath("/lara", path);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
-    this.baseUrl = { secure: true, hostname: "yibuapi.com", port: 443 };
+    this.baseUrl = {
+      secure: gateway.protocol === "https:",
+      hostname: gateway.hostname,
+      port: Number(gateway.port || (gateway.protocol === "https:" ? 443 : 80)),
+    };
     headers.Authorization = `Bearer ${key}`;
     try {
       const response = await originalSend.call(
-        this, method, gatewayPath, headers, body, streamResponse,
+        this, method, requestPath, headers, body, streamResponse,
       );
       status = response.statusCode;
       return response;
@@ -138,7 +160,7 @@ function installLaraNodeTransport(key) {
     } finally {
       this.baseUrl = originalBaseUrl;
       logUsage(
-        "lara", key, `https://yibuapi.com${gatewayPath}`, status,
+        "lara", key, new URL(requestPath, gateway.origin).toString(), status,
         Date.now() - startedAt, errorName,
       );
     }
@@ -148,15 +170,20 @@ function installLaraNodeTransport(key) {
     method, path, headers, body,
   ) {
     const originalBaseUrl = this.baseUrl;
-    const gatewayPath = `/lara${path}`;
+    const gateway = yibuBaseUrl();
+    const requestPath = gatewayPath("/lara", path);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
-    this.baseUrl = { secure: true, hostname: "yibuapi.com", port: 443 };
+    this.baseUrl = {
+      secure: gateway.protocol === "https:",
+      hostname: gateway.hostname,
+      port: Number(gateway.port || (gateway.protocol === "https:" ? 443 : 80)),
+    };
     headers.Authorization = `Bearer ${key}`;
     try {
       for await (const chunk of originalStream.call(
-        this, method, gatewayPath, headers, body,
+        this, method, requestPath, headers, body,
       )) {
         status = chunk.statusCode;
         yield chunk;
@@ -167,7 +194,7 @@ function installLaraNodeTransport(key) {
     } finally {
       this.baseUrl = originalBaseUrl;
       logUsage(
-        "lara", key, `https://yibuapi.com${gatewayPath}`, status,
+        "lara", key, new URL(requestPath, gateway.origin).toString(), status,
         Date.now() - startedAt, errorName,
       );
     }
@@ -232,6 +259,7 @@ module.exports = {
   laraSessionToken,
   rewriteHeaders,
   rewriteUrl,
+  yibuBaseUrl,
 };
 
 if (require.main !== module && process.env.MCP_YIBU_SERVICE) {
