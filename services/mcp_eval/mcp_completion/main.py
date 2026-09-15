@@ -125,6 +125,32 @@ app = FastAPI(
 _ACTIVE_EVALUATIONS: Dict[str, asyncio.Task] = {}
 
 
+SYNTHESIS_PROTOCOL_CAPABILITIES = {
+    "schema_version": 1,
+    "service": "mcp-atlas-rollout",
+    "run_agent": {
+        "endpoint": "/v2/mcp_eval/run_agent",
+        "request_schema_version": 1,
+        "response_event_schema_version": 1,
+        "features": [
+            "cancellable_evaluation",
+            "enabled_tools",
+            "execution_limits",
+            "extra_body",
+            "prompt_cache_key",
+            "structured_failure",
+            "usage_telemetry",
+        ],
+    },
+    "runtime": {
+        "features": [
+            "fixture_identity",
+            "tool_policy",
+        ],
+    },
+}
+
+
 async def _collect_agent_outputs(
     body: RunAgentAPIRequestBody,
 ) -> List[Dict[str, Any]]:
@@ -217,6 +243,12 @@ async def health():
         "shared_mcp_url": config.MCP_SERVER_URL,
         "runtime_identity": runtime_identity(),
     }
+
+
+@app.get("/v2/mcp_eval/capabilities")
+async def capabilities():
+    """Return the stable, non-secret protocol contract implemented here."""
+    return SYNTHESIS_PROTOCOL_CAPABILITIES
 
 
 @app.post("/v2/mcp_eval/classify-tools")
