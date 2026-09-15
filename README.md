@@ -26,7 +26,7 @@
 | completion 服务 | 调用模型、执行多轮工具调用、管理任务容器 | `http://localhost:3000` |
 | 轨迹与评分脚本 | 读取任务 CSV，调用 completion，保存轨迹并评分 | 不监听端口 |
 | task-local 容器 | 承载 filesystem、Git、Memory、CLI、Desktop Commander、代码执行等工具 | 不发布固定宿主端口 |
-| task-network 容器 | 承载 Arxiv、PubMed 等需要联网且会写本地缓存的工具 | Docker 临时分配回环端口 |
+| task-network 容器 | 承载 Arxiv、PubMed 等需要联网且会写本地缓存的工具 | 不发布宿主端口，通过 Docker exec 访问容器回环地址 |
 | task-Mongo 容器 | 为包含 MongoDB 工具的任务恢复一份独立数据库 | 不发布宿主端口 |
 
 调用路径如下：

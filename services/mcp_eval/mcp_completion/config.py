@@ -71,14 +71,22 @@ class Config:
             not in {"0", "false", "no"}
         )
         if isolation_enabled:
-            validate_isolated_control_plane(self.HOST, self.MCP_SERVER_URL)
+            validate_isolated_control_plane(
+                self.HOST,
+                self.MCP_SERVER_URL,
+                os.getenv("MCP_ATLAS_RUN_RUNTIME_HOST"),
+            )
 
 
 def _is_loopback_host(host: Optional[str]) -> bool:
     return (host or "").strip().lower() in {"127.0.0.1", "::1", "localhost"}
 
 
-def validate_isolated_control_plane(host: str, shared_mcp_url: str) -> None:
+def validate_isolated_control_plane(
+    host: str,
+    shared_mcp_url: str,
+    isolated_runtime_host: Optional[str] = None,
+) -> None:
     """Keep host control APIs unreachable from networked task containers."""
     if not _is_loopback_host(host):
         raise ValueError(
@@ -86,10 +94,14 @@ def validate_isolated_control_plane(host: str, shared_mcp_url: str) -> None:
             "use 127.0.0.1 and an SSH tunnel for remote access"
         )
     shared_host = urlsplit(shared_mcp_url).hostname
-    if not _is_loopback_host(shared_host):
+    allowed_runtime_host = (isolated_runtime_host or "").strip().lower()
+    if not _is_loopback_host(shared_host) and (
+        not allowed_runtime_host or (shared_host or "").lower() != allowed_runtime_host
+    ):
         raise ValueError(
             "MCP_SERVER_URL must use a loopback host when MCP task isolation is "
-            "enabled; networked task containers must not reach the shared runtime"
+            "enabled, unless it names the Runtime on this Run's isolated network; "
+            "networked task containers must not reach the shared runtime"
         )
 
 

@@ -245,6 +245,41 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         _release_sandbox_names(sandbox.owned_names)
 
+    async def test_network_agent_is_loopback_only_without_published_port(self):
+        sandbox = TaskSandbox(
+            task_id="network-exec",
+            local_servers=set(),
+            network_servers={"arxiv"},
+            agent_image="image",
+            mongo_image="",
+            startup_timeout=1.0,
+            memory_limit="1g",
+            cpu_limit="1.0",
+            task_data_source="/tmp/data",
+        )
+        sandbox.task_data_dir = Path("/tmp/data")
+        with patch(
+            "mcp_completion.task_sandbox._run",
+            new=AsyncMock(return_value=("", "", 0)),
+        ) as run, patch.object(
+            sandbox,
+            "_wait_for_agent",
+            new=AsyncMock(),
+        ):
+            await sandbox._start_agent_container(
+                kind="network",
+                enabled_servers=sandbox.network_servers,
+                network="private-task-network",
+                extra_env={},
+            )
+        command = run.await_args.args
+        self.assertNotIn("--publish", command)
+        host_index = command.index("--host")
+        self.assertEqual("127.0.0.1", command[host_index + 1])
+        self.assertEqual("http://127.0.0.1:1984", sandbox.network_url)
+        self.assertIsNotNone(sandbox.network_container_name)
+        _release_sandbox_names(sandbox.owned_names)
+
     def test_build_context_contains_runtime_but_no_fixture_data(self):
         with tempfile.TemporaryDirectory() as raw:
             context = Path(raw)

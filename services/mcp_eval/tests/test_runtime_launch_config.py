@@ -33,6 +33,19 @@ class RuntimeLaunchConfigTests(unittest.TestCase):
                 "127.0.0.1", "http://192.168.0.10:2984"
             )
 
+    def test_isolated_run_runtime_host_must_match_exactly(self):
+        validate_isolated_control_plane(
+            "127.0.0.1",
+            "http://mcp-atlas-runtime-run-1:2984",
+            "mcp-atlas-runtime-run-1",
+        )
+        with self.assertRaisesRegex(ValueError, "MCP_SERVER_URL"):
+            validate_isolated_control_plane(
+                "127.0.0.1",
+                "http://other-runtime:2984",
+                "mcp-atlas-runtime-run-1",
+            )
+
     def test_shared_port_prefers_explicit_env(self):
         with patch.dict(
             os.environ,

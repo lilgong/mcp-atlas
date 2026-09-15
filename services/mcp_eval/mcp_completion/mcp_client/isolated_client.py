@@ -373,6 +373,7 @@ class IsolatedMCPClient(MCPClient):
                 self._clients[ToolRoute.TASK_NETWORK] = SandboxMCPClient(
                     self._sandbox.network_url,
                     enabled_tools=network_tools,
+                    container_name=self._sandbox.network_container_name,
                 )
 
         if cloud_tools:
