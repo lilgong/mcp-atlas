@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -140,3 +141,23 @@ console.log(JSON.stringify({{
     assert output["interceptUnrelated"] is False
     assert output["authorization"] == "Bearer secret"
     assert output["oldHeader"] is None
+
+    custom_env = {
+        **os.environ,
+        "MCP_TOOL_BASE_URL": "http://gateway.example:3000/proxy/",
+    }
+    custom = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=custom_env,
+    )
+    custom_output = json.loads(custom.stdout)
+    assert custom_output["url"] == "http://gateway.example:3000/proxy/exa/search"
+    assert custom_output["brave"] == (
+        "http://gateway.example:3000/proxy/brave/v1/web/search"
+    )
+    assert custom_output["lara"] == (
+        "http://gateway.example:3000/proxy/lara/v2/languages"
+    )

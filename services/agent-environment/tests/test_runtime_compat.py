@@ -485,6 +485,7 @@ def test_weather_data_keeps_official_tools_and_uses_optional_yibu_transport():
     # every tool call fails with "Weather API key not set."
     assert weather["env"]["WEATHER_YIBU_API_KEY"] == "${WEATHER_YIBU_API_KEY}"
     assert weather["env"]["MCP_USAGE_LOG_DIR"] == "${MCP_USAGE_LOG_DIR}"
+    assert weather["env"]["MCP_TOOL_BASE_URL"] == "${MCP_TOOL_BASE_URL}"
     preload = (
         AGENT_ROOT
         / "src"

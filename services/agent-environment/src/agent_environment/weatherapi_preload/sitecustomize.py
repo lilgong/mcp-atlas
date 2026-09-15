@@ -18,7 +18,11 @@ from urllib.parse import urlsplit
 
 
 OFFICIAL_ORIGIN = "https://api.weatherapi.com"
-YIBU_BASE_URL = "https://yibuapi.com/weatherapi/v1"
+DEFAULT_MCP_TOOL_BASE_URL = "https://yibuapi.com"
+
+
+def _yibu_base_url() -> str:
+    return (os.getenv("MCP_TOOL_BASE_URL") or DEFAULT_MCP_TOOL_BASE_URL).rstrip("/")
 
 
 def _yibu_key() -> str:
@@ -76,7 +80,7 @@ def _rewrite_request(url: object, kwargs: dict) -> tuple[str, dict]:
     rewritten["params"] = params
     rewritten["headers"] = headers
     endpoint = parsed.path.removeprefix("/v1/")
-    return f"{YIBU_BASE_URL}/{endpoint}", rewritten
+    return f"{_yibu_base_url()}/weatherapi/v1/{endpoint}", rewritten
 
 
 def _install() -> None:

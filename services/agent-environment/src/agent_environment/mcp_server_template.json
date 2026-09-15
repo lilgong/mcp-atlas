@@ -39,7 +39,8 @@
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}",
         "MCP_YIBU_SERVICE": "brave",
-        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
+        "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}"
       }
     },
     "calculator": {
@@ -124,7 +125,8 @@
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}",
         "MCP_YIBU_SERVICE": "exa",
-        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
+        "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}"
       }
     },
     "fetch": {
@@ -195,7 +197,8 @@
         "LARA_ACCESS_KEY_SECRET": "${LARA_ACCESS_KEY_SECRET}",
         "LARA_YIBU_API_KEY": "${LARA_YIBU_API_KEY}",
         "MCP_YIBU_SERVICE": "lara",
-        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
+        "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}"
       }
     },
     "mcp-code-executor": {
@@ -295,7 +298,8 @@
         "OXYLABS_USERNAME": "${OXYLABS_USERNAME}",
         "OXYLABS_PASSWORD": "${OXYLABS_PASSWORD}",
         "OXYLABS_SCRAPER_URL": "${OXYLABS_SCRAPER_URL}",
-        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}"
+        "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
+        "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}"
       }
     },
     "pubmed": {
@@ -360,7 +364,8 @@
         "WEATHER_API_KEY": "${WEATHER_API_KEY}",
         "WEATHER_YIBU_API_KEY": "${WEATHER_YIBU_API_KEY}",
         "MCP_USAGE_LOG_DIR": "${MCP_USAGE_LOG_DIR}",
-        "PYTHONPATH": "/agent-environment/src/agent_environment/weatherapi_preload"
+        "PYTHONPATH": "/agent-environment/src/agent_environment/weatherapi_preload",
+        "MCP_TOOL_BASE_URL": "${MCP_TOOL_BASE_URL}"
       }
     },
     "whois": {
