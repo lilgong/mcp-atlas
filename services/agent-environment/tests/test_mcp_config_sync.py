@@ -118,6 +118,7 @@ console.log(JSON.stringify({{
   lara: adapter.rewriteUrl('https://api.laratranslate.com/v2/languages', 'lara'),
   laraTokenParts: adapter.laraSessionToken().split('.').length,
   laraAuthorization: adapter.rewriteHeaders({{'authorization': 'Lara signature'}}, 'lara', 'lara-secret').get('authorization'),
+  laraDirect: adapter.originalLaraUrl({{secure: true, hostname: 'api.laratranslate.com', port: 443}}, '/v2/languages'),
   unrelated: adapter.rewriteUrl('https://example.com/x', 'exa'),
   interceptUnrelated: adapter.isUpstreamRequest('https://example.com/x', 'exa'),
   authorization: headers.get('authorization'),
@@ -137,6 +138,7 @@ console.log(JSON.stringify({{
     assert output["lara"] == "https://yibuapi.com/lara/v2/languages"
     assert output["laraTokenParts"] == 3
     assert output["laraAuthorization"] == "Bearer lara-secret"
+    assert output["laraDirect"] == "https://api.laratranslate.com/v2/languages"
     assert output["unrelated"] == "https://example.com/x"
     assert output["interceptUnrelated"] is False
     assert output["authorization"] == "Bearer secret"

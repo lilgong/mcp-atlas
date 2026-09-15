@@ -119,7 +119,13 @@ function logUsage(service, key, url, status, durationMs, errorName) {
   }
 }
 
-function installLaraNodeTransport(key) {
+function originalLaraUrl(baseUrl, path) {
+  const protocol = baseUrl.secure ? "https:" : "http:";
+  const port = baseUrl.port ? `:${baseUrl.port}` : "";
+  return new URL(path, `${protocol}//${baseUrl.hostname}${port}`).toString();
+}
+
+function installLaraNodeTransport(key, useGateway) {
   const metadata = require("@translated/lara/package.json");
   if (metadata.version !== "1.13.0") {
     throw new Error(`unsupported @translated/lara version: ${metadata.version}`);
@@ -129,25 +135,32 @@ function installLaraNodeTransport(key) {
   const originalSend = NodeLaraClient.prototype.send;
   const originalStream = NodeLaraClient.prototype.sendAndGetStream;
 
-  LaraClient.prototype.ensureAuthenticated = async function ensureYibuAuthenticated() {
-    this.token = laraSessionToken();
-  };
+  if (useGateway) {
+    LaraClient.prototype.ensureAuthenticated = async function ensureYibuAuthenticated() {
+      this.token = laraSessionToken();
+    };
+  }
 
   NodeLaraClient.prototype.send = async function yibuSend(
     method, path, headers, body, streamResponse,
   ) {
     const originalBaseUrl = this.baseUrl;
-    const gateway = yibuBaseUrl();
-    const requestPath = gatewayPath("/lara", path);
+    const gateway = useGateway ? yibuBaseUrl() : null;
+    const requestPath = useGateway ? gatewayPath("/lara", path) : path;
+    const requestUrl = useGateway
+      ? new URL(requestPath, gateway.origin).toString()
+      : originalLaraUrl(originalBaseUrl, path);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
-    this.baseUrl = {
-      secure: gateway.protocol === "https:",
-      hostname: gateway.hostname,
-      port: Number(gateway.port || (gateway.protocol === "https:" ? 443 : 80)),
-    };
-    headers.Authorization = `Bearer ${key}`;
+    if (useGateway) {
+      this.baseUrl = {
+        secure: gateway.protocol === "https:",
+        hostname: gateway.hostname,
+        port: Number(gateway.port || (gateway.protocol === "https:" ? 443 : 80)),
+      };
+      headers.Authorization = `Bearer ${key}`;
+    }
     try {
       const response = await originalSend.call(
         this, method, requestPath, headers, body, streamResponse,
@@ -160,7 +173,7 @@ function installLaraNodeTransport(key) {
     } finally {
       this.baseUrl = originalBaseUrl;
       logUsage(
-        "lara", key, new URL(requestPath, gateway.origin).toString(), status,
+        "lara", key, requestUrl, status,
         Date.now() - startedAt, errorName,
       );
     }
@@ -170,17 +183,22 @@ function installLaraNodeTransport(key) {
     method, path, headers, body,
   ) {
     const originalBaseUrl = this.baseUrl;
-    const gateway = yibuBaseUrl();
-    const requestPath = gatewayPath("/lara", path);
+    const gateway = useGateway ? yibuBaseUrl() : null;
+    const requestPath = useGateway ? gatewayPath("/lara", path) : path;
+    const requestUrl = useGateway
+      ? new URL(requestPath, gateway.origin).toString()
+      : originalLaraUrl(originalBaseUrl, path);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
-    this.baseUrl = {
-      secure: gateway.protocol === "https:",
-      hostname: gateway.hostname,
-      port: Number(gateway.port || (gateway.protocol === "https:" ? 443 : 80)),
-    };
-    headers.Authorization = `Bearer ${key}`;
+    if (useGateway) {
+      this.baseUrl = {
+        secure: gateway.protocol === "https:",
+        hostname: gateway.hostname,
+        port: Number(gateway.port || (gateway.protocol === "https:" ? 443 : 80)),
+      };
+      headers.Authorization = `Bearer ${key}`;
+    }
     try {
       for await (const chunk of originalStream.call(
         this, method, requestPath, headers, body,
@@ -194,7 +212,7 @@ function installLaraNodeTransport(key) {
     } finally {
       this.baseUrl = originalBaseUrl;
       logUsage(
-        "lara", key, new URL(requestPath, gateway.origin).toString(), status,
+        "lara", key, requestUrl, status,
         Date.now() - startedAt, errorName,
       );
     }
@@ -210,11 +228,14 @@ function install(service) {
     throw new Error("Yibu preload requires Node.js global fetch");
   }
   const laraKey = service === "lara" ? process.env.LARA_YIBU_API_KEY : "";
-  if (service === "lara" && !laraKey) return;
   if (service === "lara") {
-    process.env.LARA_ACCESS_KEY_ID ||= "yibu-transport";
-    process.env.LARA_ACCESS_KEY_SECRET ||= "yibu-transport";
-    installLaraNodeTransport(laraKey);
+    const directKey = process.env.LARA_ACCESS_KEY_ID || "";
+    if (!laraKey && !directKey) return;
+    if (laraKey) {
+      process.env.LARA_ACCESS_KEY_ID ||= "yibu-transport";
+      process.env.LARA_ACCESS_KEY_SECRET ||= "yibu-transport";
+    }
+    installLaraNodeTransport(laraKey || directKey, Boolean(laraKey));
     return;
   }
   globalThis.fetch = async function yibuFetch(input, init = {}) {
@@ -257,6 +278,7 @@ module.exports = {
   install,
   isUpstreamRequest,
   laraSessionToken,
+  originalLaraUrl,
   rewriteHeaders,
   rewriteUrl,
   yibuBaseUrl,

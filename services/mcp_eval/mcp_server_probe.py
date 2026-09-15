@@ -655,7 +655,7 @@ async def run_legacy(
     data_only: bool,
     smoke_only: bool,
     retries: int = 0,
-) -> None:
+) -> list[Result]:
     """Validate the legacy runtime by sending every call to shared /call-tool."""
 
     async with httpx.AsyncClient() as client:
@@ -680,6 +680,7 @@ async def run_legacy(
             timeout=timeout,
         )
     _render_results(results)
+    return results
 
 
 async def run_isolated(
@@ -691,7 +692,7 @@ async def run_isolated(
     smoke_only: bool,
     retries: int = 0,
     input_path: Path | None = None,
-) -> None:
+) -> list[Result]:
     """Validate tools and data through the production task-isolated routes."""
 
     async with httpx.AsyncClient() as client:
@@ -752,6 +753,12 @@ async def run_isolated(
                     slack_result.status = FAIL
                     slack_result.detail = str(exc)
     _render_results(results)
+    return results
+
+
+def _exit_if_unhealthy(results: list[Result]) -> None:
+    if any(result.status != OK for result in results):
+        raise SystemExit(2)
 
 
 def _parse_cli(description: str, *, default_concurrency: int):
@@ -812,7 +819,7 @@ def cli_legacy() -> None:
     print("测试模式: V1 旧共享 runtime（所有工具直接调用共享端点）")
     if args.input:
         parser.error("--input 仅用于 test_server_v2.py")
-    asyncio.run(
+    results = asyncio.run(
         run_legacy(
             mcp_url,
             args.timeout,
@@ -823,6 +830,7 @@ def cli_legacy() -> None:
             args.retries,
         )
     )
+    _exit_if_unhealthy(results)
 
 
 def cli_isolated() -> None:
@@ -834,14 +842,17 @@ def cli_isolated() -> None:
         mcp_url, mcp_port = resolve_mcp_server_url(args.base_url, ENV_PATH)
     except ValueError as exc:
         parser.error(str(exc))
-    try:
-        input_path = resolve_completion_input(args.input)
-    except ValueError as exc:
-        parser.error(str(exc))
+    input_path = None
+    if not args.smoke_only or args.input:
+        try:
+            input_path = resolve_completion_input(args.input)
+        except ValueError as exc:
+            parser.error(str(exc))
     print(f"共享 MCP 服务: {mcp_url}  (端口 {mcp_port})")
     print("测试模式: V2 正式路由（云端共享，本地/下载/Mongo 使用任务容器）")
-    print(f"评测输入: {input_path}")
-    asyncio.run(
+    if input_path is not None:
+        print(f"评测输入: {input_path}")
+    results = asyncio.run(
         run_isolated(
             mcp_url,
             args.timeout,
@@ -853,3 +864,4 @@ def cli_isolated() -> None:
             input_path,
         )
     )
+    _exit_if_unhealthy(results)

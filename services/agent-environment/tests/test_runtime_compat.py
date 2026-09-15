@@ -497,6 +497,8 @@ def test_weather_data_keeps_official_tools_and_uses_optional_yibu_transport():
     text = preload.read_text(encoding="utf-8")
     assert "httpx.AsyncClient.get" in text
     assert 'params.pop("key", None)' in text
+    assert "_usage_key()" in text
+    assert "is_weather_request" in text
 
 
 def test_special_cased_servers_receive_every_env_var_their_gating_reads():
