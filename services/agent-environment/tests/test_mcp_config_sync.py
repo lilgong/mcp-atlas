@@ -161,3 +161,30 @@ console.log(JSON.stringify({{
     assert custom_output["lara"] == (
         "http://gateway.example:3000/proxy/lara/v2/languages"
     )
+
+
+def test_oxylabs_always_uses_the_shared_tool_base_url():
+    vendor_root = ROOT / "vendor" / "yibu-patched"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(vendor_root),
+        "MCP_TOOL_BASE_URL": "http://gateway.example:3000/proxy/",
+        # A value persisted by the old platform must no longer override the
+        # shared MCP tool gateway.
+        "OXYLABS_SCRAPER_URL": "https://yibuapi.com/oxylabs/v1/queries",
+    }
+    result = subprocess.run(
+        [
+            "python",
+            "-c",
+            "from oxylabs_mcp.config import settings; "
+            "print(settings.OXYLABS_SCRAPER_URL)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.stdout.strip() == (
+        "http://gateway.example:3000/proxy/oxylabs/v1/queries"
+    )

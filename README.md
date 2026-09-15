@@ -433,13 +433,12 @@ MCP 工具 API 的转发根地址由 `MCP_TOOL_BASE_URL` 配置，默认是
 | Lara Translate | Yibu：`LARA_YIBU_API_KEY`；官方：`LARA_ACCESS_KEY_ID`、`LARA_ACCESS_KEY_SECRET` |
 | National Parks | `NPS_API_KEY` |
 | Notion | `NOTION_TOKEN` |
-| Oxylabs | `OXYLABS_USERNAME`、`OXYLABS_PASSWORD`；可用 `OXYLABS_SCRAPER_URL` 覆盖完整地址 |
+| Oxylabs | `OXYLABS_USERNAME`、`OXYLABS_PASSWORD` |
 | Slack | `SLACK_MCP_XOXC_TOKEN`、`SLACK_MCP_XOXD_TOKEN` |
 | Twelve Data | `TWELVE_DATA_API_KEY` |
 | Weather Data | 官方直连：`WEATHER_API_KEY`；Yibu 传输：`WEATHER_YIBU_API_KEY` |
 
-`OXYLABS_SCRAPER_URL` 留空时自动使用
-`${MCP_TOOL_BASE_URL}/oxylabs/v1/queries`。
+Oxylabs 固定使用 `${MCP_TOOL_BASE_URL}/oxylabs/v1/queries`。
 
 配置 `E2B_API_KEY` 后，`e2b-server_run_code` 通过共享 runtime 提供。E2B 代码在
 远程沙箱中执行，不会进入本机 task-local 容器。
@@ -1529,7 +1528,6 @@ repos/git_submodule_info.csv
 OXYLABS_USERNAME=<value>
 OXYLABS_PASSWORD=<value>
 MCP_TOOL_BASE_URL=<gateway-base-url>
-# 可选：OXYLABS_SCRAPER_URL=<queries-endpoint>
 ```
 
 修改后重启共享 MCP runtime。
