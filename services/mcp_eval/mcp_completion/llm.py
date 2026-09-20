@@ -17,6 +17,7 @@ from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error
+from .streaming import collect_litellm_response, llm_streaming_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,8 @@ async def _create_openai_compatible_completion(
 
     for provider_attempt in range(1, config.LLM_MAX_ATTEMPTS + 1):
         try:
-            return await litellm.acompletion(
+            use_streaming = llm_streaming_enabled()
+            provider_response = await litellm.acompletion(
                 model=model,
                 custom_llm_provider="openai",
                 messages=messages,
@@ -266,7 +268,23 @@ async def _create_openai_compatible_completion(
                 api_base=config.LLM_BASE_URL,
                 timeout=config.DEFAULT_TIMEOUT,
                 max_retries=0,
+                **(
+                    {
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    if use_streaming
+                    else {}
+                ),
                 **({"extra_body": extra_body} if extra_body else {}),
+            )
+            return (
+                await collect_litellm_response(
+                    provider_response,
+                    messages=messages,
+                )
+                if use_streaming
+                else provider_response
             )
         except Exception as error:
             if isinstance(
@@ -375,6 +393,7 @@ async def create_completion(
             attempt=attempt,
             max_attempts=max_attempts,
             base_url=config.LLM_BASE_URL,
+            streaming=llm_streaming_enabled(),
             request={
                 "messages": litellm_messages,
                 "tools": litellm_tools,
