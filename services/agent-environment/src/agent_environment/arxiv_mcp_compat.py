@@ -21,8 +21,20 @@ def _uses_relay(url: Any) -> bool:
     return enabled() and httpx.URL(str(url)).host in ARXIV_HOSTS
 
 
-def _httpx_response(method: str, url: Any, response: Any) -> httpx.Response:
-    request = httpx.Request(method, str(url))
+def _uses_httpx_relay(
+    client: httpx.Client | httpx.AsyncClient,
+    method: str,
+    url: Any,
+) -> bool:
+    if not enabled():
+        return False
+    resolved_url = httpx.URL(str(url))
+    if not resolved_url.host:
+        resolved_url = client.build_request(method, url).url
+    return resolved_url.host in ARXIV_HOSTS
+
+
+def _httpx_response(request: httpx.Request, response: Any) -> httpx.Response:
     return httpx.Response(
         response.status_code,
         headers=response.headers,
@@ -31,16 +43,31 @@ def _httpx_response(method: str, url: Any, response: Any) -> httpx.Response:
     )
 
 
-def _body(kwargs: dict[str, Any]) -> bytes | str | dict[str, Any] | None:
-    content = kwargs.get("content")
-    if content is not None:
-        return content
-    data = kwargs.get("data")
-    if data is not None:
-        return data
-    if kwargs.get("json") is not None:
-        return __import__("json").dumps(kwargs["json"], separators=(",", ":"))
-    return None
+def _prepare_httpx_request(
+    client: httpx.Client | httpx.AsyncClient,
+    method: str,
+    url: Any,
+    kwargs: dict[str, Any],
+) -> httpx.Request:
+    """Apply httpx's normal URL and payload encoding before using the relay."""
+    request_kwargs = {
+        key: kwargs[key]
+        for key in (
+            "content", "data", "files", "json", "params", "headers", "cookies",
+            "timeout", "extensions",
+        )
+        if key in kwargs
+    }
+    return client.build_request(method, url, **request_kwargs)
+
+
+def _relay_headers(prepared: Any, supplied: Any) -> dict[str, str]:
+    headers = dict(prepared)
+    supplied_names = {str(key).lower() for key in dict(supplied or {})}
+    if "user-agent" not in supplied_names:
+        headers.pop("user-agent", None)
+        headers.pop("User-Agent", None)
+    return headers
 
 
 def install_httpx_relay() -> None:
@@ -49,30 +76,34 @@ def install_httpx_relay() -> None:
     original_stream = httpx.Client.stream
 
     def sync_request(self, method, url, **kwargs):
-        if not _uses_relay(url):
+        if not _uses_httpx_relay(self, method, url):
             return original_sync(self, method, url, **kwargs)
+        request = _prepare_httpx_request(self, method, url, kwargs)
+        request.read()
         response = fetch(
-            method, str(url), params=kwargs.get("params"), body=_body(kwargs),
-            headers=dict(kwargs.get("headers") or {}),
+            method, str(request.url), body=request.content,
+            headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("follow_redirects", True)),
         )
-        return _httpx_response(method, url, response)
+        return _httpx_response(request, response)
 
     async def async_request(self, method, url, **kwargs):
-        if not _uses_relay(url):
+        if not _uses_httpx_relay(self, method, url):
             return await original_async(self, method, url, **kwargs)
         import asyncio
 
+        request = _prepare_httpx_request(self, method, url, kwargs)
+        await request.aread()
         response = await asyncio.to_thread(
-            fetch, method, str(url), params=kwargs.get("params"),
-            body=_body(kwargs), headers=dict(kwargs.get("headers") or {}),
+            fetch, method, str(request.url), body=request.content,
+            headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("follow_redirects", True)),
         )
-        return _httpx_response(method, url, response)
+        return _httpx_response(request, response)
 
     @contextlib.contextmanager
     def stream(self, method, url, **kwargs):
-        if not _uses_relay(url):
+        if not _uses_httpx_relay(self, method, url):
             with original_stream(self, method, url, **kwargs) as response:
                 yield response
             return
@@ -89,9 +120,21 @@ def install_requests_relay() -> None:
     def request(self, method, url, **kwargs):
         if not _uses_relay(url):
             return original(self, method, url, **kwargs)
+        request = self.prepare_request(requests.Request(
+            method,
+            url,
+            params=kwargs.get("params"),
+            data=kwargs.get("data"),
+            json=kwargs.get("json"),
+            files=kwargs.get("files"),
+            headers=kwargs.get("headers"),
+            cookies=kwargs.get("cookies"),
+            auth=kwargs.get("auth"),
+            hooks=kwargs.get("hooks"),
+        ))
         response = fetch(
-            method, url, params=kwargs.get("params"), body=kwargs.get("data"),
-            headers=dict(kwargs.get("headers") or {}),
+            method, request.url, body=request.body,
+            headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("allow_redirects", True)),
         )
         result = requests.Response()
@@ -99,7 +142,7 @@ def install_requests_relay() -> None:
         result.headers.update(response.headers)
         result._content = response.body
         result.url = response.url
-        result.request = requests.Request(method, url).prepare()
+        result.request = request
         return result
 
     requests.Session.request = request

@@ -330,7 +330,13 @@ def test_json_response_treats_broken_pipe_as_client_disconnect():
     ("url", "group"),
     [
         ("https://export.arxiv.org/api/query", "arxiv"),
+        ("https://export.arxiv.org/pdf/2501.00001", "arxiv"),
+        ("https://arxiv.org/abs/2501.00001", "arxiv"),
         ("https://arxiv.org/pdf/2501.00001", "arxiv"),
+        ("https://arxiv.org/html/2501.00001", "arxiv"),
+        ("https://arxiv.org/e-print/2501.00001", "arxiv"),
+        ("https://arxiv.org/src/2501.00001", "arxiv"),
+        ("https://www.arxiv.org/src/2501.00001", "arxiv"),
         ("https://nominatim.openstreetmap.org/search", "osm-nominatim"),
         ("https://overpass-api.de/api/interpreter", "osm-overpass"),
         ("https://router.project-osrm.org/route/v1/car/1,2;3,4", "osm-routing"),
@@ -352,6 +358,23 @@ def test_relay_allows_only_named_arxiv_and_osm_paths(url, group):
 def test_relay_rejects_unapproved_arxiv_and_osm_paths(url):
     with pytest.raises(ValueError, match="allowed MCP egress"):
         relay._validate_url(url)
+
+
+def test_relay_allows_arxiv_eprint_redirect_to_source_archive():
+    request = relay.urllib.request.Request(
+        "https://arxiv.org/e-print/1706.03762",
+    )
+    redirected = relay.SafeRedirect().redirect_request(
+        request,
+        None,
+        301,
+        "Moved Permanently",
+        {},
+        "https://arxiv.org/src/1706.03762",
+    )
+
+    assert redirected is not None
+    assert redirected.full_url == "https://arxiv.org/src/1706.03762"
 
 
 def test_controller_forwards_post_body_and_headers(monkeypatch):
