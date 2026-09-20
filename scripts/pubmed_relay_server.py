@@ -25,8 +25,12 @@ ALLOWED_TARGETS = {
     "www.ncbi.nlm.nih.gov": ("ncbi", "/pmc/articles/"),
     "en.wikipedia.org": ("wikipedia", "/w/api.php"),
     "export.arxiv.org": ("arxiv", "/api/query", "/pdf/"),
-    "arxiv.org": ("arxiv", "/abs/", "/pdf/", "/html/", "/e-print/"),
-    "www.arxiv.org": ("arxiv", "/abs/", "/pdf/", "/html/", "/e-print/"),
+    "arxiv.org": (
+        "arxiv", "/abs/", "/pdf/", "/html/", "/e-print/", "/src/",
+    ),
+    "www.arxiv.org": (
+        "arxiv", "/abs/", "/pdf/", "/html/", "/e-print/", "/src/",
+    ),
     "nominatim.openstreetmap.org": ("osm-nominatim", "/search", "/reverse"),
     "overpass-api.de": ("osm-overpass", "/api/interpreter"),
     "maps.mail.ru": ("osm-overpass", "/osm/tools/overpass/api/interpreter"),
