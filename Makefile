@@ -7,7 +7,7 @@ MCP_HOST_PORT ?= 1984
 MCP_STATUS_HOST_PORT ?= 1985
 # Host-networked shared MCP port is read from MCP_SHARED_PORT in .env.
 TASK_MONGO_IMAGE ?=
-ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:latest
+ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:rollout
 MONGO_FIXTURE_DUMP ?=
 MONGO_FIXTURE_DB ?=
 MONGO_FIXTURE_ID ?=

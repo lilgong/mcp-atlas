@@ -38,6 +38,7 @@ services/mcp_eval/convert_jsonl/
 # MCP/tool API call logs (per-key request counts)
 mcp_usage_log/
 token_usage_log/
+services/mcp_eval/token_usage_log_server/
 /completion_results/
 
 data_exports/mongo_dump_video_game_store/

@@ -157,11 +157,11 @@ git switch main
 git pull --ff-only origin main
 cp env.template .env  # 仅首次部署；已有 .env 时不要覆盖
 uv sync --project services/mcp_eval --frozen
-make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
+make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:rollout
 ```
 
 Wikipedia、arXiv 和 OSM 的逐请求 relay 适配位于 runtime 镜像内，因此拉取本分支后必须重建或加载
-由同一提交构建的 `mcp-atlas-runtime:latest`。仅重启 Python 服务不会更新已有镜像。
+由同一提交构建的 `mcp-atlas-runtime:rollout`。仅重启 Python 服务不会更新已有镜像。
 随后按 §10 重启共享 runtime 和 completion；旧进程不会自动加载新代码或 `.env`。
 
 ---
@@ -173,7 +173,7 @@ Wikipedia、arXiv 和 OSM 的逐请求 relay 适配位于 runtime 镜像内，�
 | 材料 | 用途 |
 | --- | --- |
 | `.env` | 模型端点、裁判端点、第三方 MCP 凭证、端口和运行参数 |
-| `mcp-atlas-runtime:latest` | 运行全部 MCP server 的软件镜像 |
+| `mcp-atlas-runtime:rollout` | 数据生产专用的 MCP server 软件镜像 |
 | 文件 fixture | 为每道题提供 `/data` |
 | Mongo fixture 镜像 | 为每道 Mongo 题提供独立数据库 |
 | Airtable/Notion/Calendar/Slack 数据 | 让有状态云端读取任务与官方 claims 对齐 |
@@ -315,8 +315,7 @@ MCP_DISCOVERY_TIMEOUT_SECONDS=50
 
 ```dotenv
 MCP_TASK_ISOLATION_ENABLED=true
-MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:latest
-MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:latest
+MCP_AGENT_IMAGE=mcp-atlas-runtime:rollout
 
 MCP_TASK_DATA_DIR=/home/lny/mcp-atlas/.runtime/fixtures/official-data-v2
 MCP_TASK_MONGO_IMAGE=mcp-task-mongo:official-video-game-store-v1
@@ -668,7 +667,7 @@ uv run python test_server_v2.py \
 
 ## 7. 准备 runtime 镜像
 
-`MCP_SHARED_AGENT_IMAGE` 与 `MCP_TASK_AGENT_IMAGE` 必须指向满足以下契约的镜像：
+`MCP_AGENT_IMAGE` 必须指向满足以下契约的镜像，共享探测和逐题隔离容器统一使用它：
 
 - label `mcp-atlas.runtime=true`
 - label `mcp-atlas.data-contract=external-data-v1`
@@ -680,7 +679,7 @@ uv run python test_server_v2.py \
 在镜像来源机器：
 
 ```bash
-docker save mcp-atlas-runtime:latest -o mcp-atlas-runtime.tar
+docker save mcp-atlas-runtime:rollout -o mcp-atlas-runtime.tar
 sha256sum mcp-atlas-runtime.tar
 ```
 
@@ -694,7 +693,7 @@ docker load -i mcp-atlas-runtime.tar
 检查镜像：
 
 ```bash
-docker image inspect mcp-atlas-runtime:latest \
+docker image inspect mcp-atlas-runtime:rollout \
   --format '{{.Id}} {{json .Config.Labels}} {{json .Config.Volumes}}'
 ```
 
@@ -706,7 +705,7 @@ docker image inspect mcp-atlas-runtime:latest \
 
 ```bash
 make build-atlas-runtime \
-  ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
+  ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:rollout
 ```
 
 这条命令就是完整的 runtime 镜像构建入口：它会把
@@ -723,7 +722,7 @@ runtime、completion 或 data-synthesis runtime；已经启动的进程不会热
 构建完成后执行同样的 inspect 命令：
 
 ```bash
-docker image inspect mcp-atlas-runtime:latest \
+docker image inspect mcp-atlas-runtime:rollout \
   --format '{{.Id}} {{json .Config.Labels}} {{json .Config.Volumes}}'
 ```
 
@@ -891,7 +890,7 @@ make run-docker-host
 ```
 
 该命令读取根目录 `.env`，使用 host network 启动
-`MCP_SHARED_AGENT_IMAGE`，并监听 `MCP_SHARED_PORT`。
+`MCP_AGENT_IMAGE`，并监听 `MCP_SHARED_PORT`。
 
 保持终端运行。
 
@@ -987,6 +986,15 @@ filesystem、Mongo、Arxiv/PubMed 等走当前主机上的逐任务容器。因�
 MCP-Atlas 的主机上执行，不能在另一台机器上只把 `--base-url` 指向目标机来代替验收
 目标机的 Docker 环境。每个列出的 server 都会执行真实代表调用，不会因为评测策略
 静默跳过。
+
+代表调用遵循 data-syn 的安全口径：Notion 使用内容搜索，不读取 workspace 用户目录；
+Memory 读取当前 graph，不搜索固定测试词；成功信封中的结构化错误以及空/占位结果都算失败。
+需要给上层编排器消费时可加 `--json-output <path>`，文件仅保存逐 server 状态、代表工具、
+耗时和脱敏错误，不保存完整工具响应，权限为 `0600`。
+
+数据合成编排器通过 `/v2/mcp_eval/tool-catalog` 获取完整 schema。该接口从共享 gateway 枚举
+cloud MCP，并用一次性 task-local/task-network 容器枚举实际隔离路由（包括只存在于 Mongo
+fixture 容器中的工具），随后回收容器；接口只执行 `list-tools`，不调用 MCP 工具。
 
 `test_server_v1.py` 仅用于所有工具都直接走共享 `/call-tool` 的 V1 runtime；它不会
 创建任务容器。当前任务隔离部署统一使用 `test_server_v2.py`。
@@ -1360,7 +1368,8 @@ evaluation_results/
 - 容器 stdout/stderr。
 
 配置中的 token、key、secret、password 会在 runtime JSONL 中替换为
-`<redacted>`。仍然不要把完整日志提交到 Git。
+`<redacted>`。共享 MCP 容器 stdout/stderr 也会在写入宿主日志前按当前环境中的实际凭证值
+脱敏。仍然不要把完整日志提交到 Git。
 
 检查容器是否正常回收：
 
@@ -1453,7 +1462,7 @@ does not implement the fixture-free external-data-v1 contract
 检查：
 
 ```bash
-docker image inspect mcp-atlas-runtime:latest \
+docker image inspect mcp-atlas-runtime:rollout \
   --format '{{json .Config.Labels}} {{json .Config.Volumes}}'
 ```
 

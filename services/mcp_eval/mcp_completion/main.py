@@ -20,12 +20,21 @@ from .runtime_log import write_runtime_event
 from .account_guard import FatalAccountError, describe_fatal_account_error
 from .task_sandbox import (
     DEFAULT_RUNTIME_IMAGE,
+    TaskSandbox,
     reap_owned_task_sandboxes,
     run_orphan_sweeper,
 )
+from .mcp_client.sandbox_client import SandboxMCPClient
 from .failure_protocol import failure_receipt
 from .runtime_identity import runtime_identity
-from .tool_policy import route_for_tool, server_for_tool, ToolRoute
+from .tool_policy import (
+    TASK_LOCAL_SERVERS,
+    TASK_NETWORK_SERVERS,
+    generation_policy_for_tool,
+    route_for_tool,
+    server_for_tool,
+    ToolRoute,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -68,9 +77,7 @@ async def lifespan(_app: FastAPI):
         port=config.PORT,
         shared_mcp_url=config.MCP_SERVER_URL,
         task_isolation_enabled=isolation_enabled,
-        task_agent_image=os.getenv(
-            "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
-        ),
+        task_agent_image=os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
     )
     try:
         yield
@@ -143,12 +150,118 @@ SYNTHESIS_PROTOCOL_CAPABILITIES = {
         ],
     },
     "runtime": {
+        "tool_catalog_endpoint": "/v2/mcp_eval/tool-catalog",
         "features": [
             "fixture_identity",
+            "generation_safety_policy",
+            "routed_tool_catalog",
             "tool_policy",
         ],
     },
 }
+
+
+async def _list_isolated_routes(
+    local_servers: set[str],
+    network_servers: set[str],
+):
+    """Discover actual task-route schemas in one disposable sandbox stack."""
+    sandbox = TaskSandbox.from_servers(
+        f"tool-catalog-{uuid.uuid4().hex[:12]}",
+        local_servers=local_servers,
+        network_servers=network_servers,
+    )
+    try:
+        await sandbox.start()
+        discovered = []
+        groups = (
+            (local_servers, sandbox.local_url, sandbox.local_container_name),
+            (network_servers, sandbox.network_url, sandbox.network_container_name),
+        )
+        for servers, url, container_name in groups:
+            if not servers:
+                continue
+            if not container_name or not url:
+                raise RuntimeError(
+                    f"catalog sandbox has no container for {sorted(servers)}"
+                )
+            client = SandboxMCPClient(
+                url,
+                enabled_tools=None,
+                container_name=container_name,
+            )
+            tools = await client.list_tools()
+            for tool in tools:
+                name = tool.name
+                owner = server_for_tool(name)
+                if owner is None and len(servers) == 1:
+                    owner = next(iter(servers))
+                    name = f"{owner}_{name}"
+                    tool = tool.model_copy(update={"name": name})
+                if owner not in servers:
+                    raise RuntimeError(
+                        f"catalog tool {name!r} is outside route servers {sorted(servers)}"
+                    )
+                discovered.append(tool)
+        discovered_servers = {
+            server_for_tool(tool.name) for tool in discovered
+        }
+        missing = (local_servers | network_servers) - discovered_servers
+        if missing:
+            raise RuntimeError(
+                f"task-routed catalog returned no tools for {sorted(missing)}"
+            )
+        return discovered
+    finally:
+        await asyncio.shield(sandbox.close())
+
+
+async def build_routed_tool_catalog() -> Dict[str, Any]:
+    """Return schemas from every configured route, including task-only Mongo."""
+    shared_client = SandboxMCPClient(config.MCP_SERVER_URL, enabled_tools=None)
+    shared_tools = await shared_client.list_tools()
+    by_name = {tool.name: tool for tool in shared_tools}
+    shared_servers = {
+        server for tool in shared_tools
+        if (server := server_for_tool(tool.name)) is not None
+    }
+
+    isolation_enabled = (
+        os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
+        not in {"0", "false", "no"}
+    )
+    discovered_routes: Dict[str, str] = {
+        server: "shared" for server in sorted(shared_servers)
+    }
+    if isolation_enabled:
+        local_servers = set(TASK_LOCAL_SERVERS)
+        if not (os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip():
+            local_servers.discard("mongodb")
+        network_servers = set(TASK_NETWORK_SERVERS)
+        routed_servers = local_servers | network_servers
+        by_name = {
+            name: tool for name, tool in by_name.items()
+            if server_for_tool(name) not in routed_servers
+        }
+        if routed_servers:
+            for tool in await _list_isolated_routes(local_servers, network_servers):
+                if tool.name in by_name:
+                    raise RuntimeError(f"duplicate routed catalog tool: {tool.name}")
+                by_name[tool.name] = tool
+        for server in local_servers:
+            discovered_routes[server] = "task_local"
+        for server in network_servers:
+            discovered_routes[server] = "task_network"
+
+    return {
+        "schema_version": 1,
+        "runtime_identity": runtime_identity(),
+        "tools": [
+            by_name[name].model_dump(by_alias=True, exclude_none=True)
+            for name in sorted(by_name)
+        ],
+        "server_sources": discovered_routes,
+    }
 
 
 async def _collect_agent_outputs(
@@ -251,6 +364,23 @@ async def capabilities():
     return SYNTHESIS_PROTOCOL_CAPABILITIES
 
 
+@app.get("/v2/mcp_eval/tool-catalog")
+async def tool_catalog():
+    """Discover the complete live schema surface across shared and task routes."""
+    try:
+        return await build_routed_tool_catalog()
+    except Exception as exc:
+        write_runtime_event(
+            "service",
+            "routed_tool_catalog_failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "routed_tool_catalog_failed", "message": str(exc)},
+        ) from exc
+
+
 @app.post("/v2/mcp_eval/classify-tools")
 async def classify_tools(body: Dict[str, List[str]]):
     """Expose the runtime's authoritative safety/routing decision."""
@@ -260,18 +390,17 @@ async def classify_tools(body: Dict[str, List[str]]):
     records = []
     for name in names:
         route = route_for_tool(name)
+        generation = generation_policy_for_tool(name)
         records.append({
             "name": name,
             "server": server_for_tool(name),
             "route": route.value,
-            "read_only": route not in {
-                ToolRoute.BLOCKED_CLOUD_WRITE,
-                ToolRoute.BLOCKED_UNSUPPORTED,
-            },
+            "read_only": generation["effect"] == "read",
             "blocked": route in {
                 ToolRoute.BLOCKED_CLOUD_WRITE,
                 ToolRoute.BLOCKED_UNSUPPORTED,
             },
+            **generation,
         })
     return {"policy_version": 1, "tools": records}
 

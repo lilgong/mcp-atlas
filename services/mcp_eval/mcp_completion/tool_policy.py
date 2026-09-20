@@ -101,6 +101,41 @@ TASK_NETWORK_SERVERS = frozenset({"arxiv", "pubmed"})
 TASK_MONGODB_DATABASE = "store"
 UNSUPPORTED_TOOLS: frozenset[str] = frozenset()
 
+# Generation safety is deliberately separate from routing.  A tool can be safe
+# to execute in a disposable task container while still being inappropriate for
+# read-only evidence synthesis (for example ``mongodb_drop-database``).
+_LOCAL_READ_ACTIONS = {
+    "desktop-commander": frozenset({
+        "get_config", "get_file_info", "get_usage_stats", "list_directory",
+        "list_processes", "list_sessions", "read_file", "read_multiple_files",
+        "read_process_output", "search_code", "search_files",
+    }),
+    "filesystem": frozenset({
+        "directory_tree", "get_file_info", "list_allowed_directories",
+        "list_directory", "list_directory_with_sizes", "read_file",
+        "read_media_file", "read_multiple_files", "read_text_file",
+        "search_files",
+    }),
+    "git": frozenset({
+        "git_diff", "git_diff_staged", "git_diff_unstaged", "git_log",
+        "git_show", "git_status",
+    }),
+    "memory": frozenset({"open_nodes", "read_graph", "search_nodes"}),
+    "mongodb": frozenset({
+        "aggregate", "collection-indexes", "collection-schema",
+        "collection-storage-size", "count", "db-stats", "explain", "find",
+        "list-collections", "list-databases", "mongodb-logs",
+    }),
+}
+_LOCAL_COMPUTE_SERVERS = frozenset({
+    "cli-mcp-server", "mcp-code-executor", "mcp-server-code-runner",
+})
+_CLOUD_COMPUTE_SERVERS = frozenset({"calculator", "e2b-server", "lara-translate"})
+_ENTRY_TOKENS = (
+    "list", "search", "schema", "directory_tree", "resolve", "read_graph",
+)
+_SUPPORT_TOKENS = ("get_config", "get_usage", "logs", "status", "security_rules")
+
 
 class ToolRoute(str, Enum):
     CLOUD = "cloud"
@@ -244,6 +279,55 @@ def route_for_tool(tool_name: str) -> ToolRoute:
     if server in TASK_NETWORK_SERVERS:
         return ToolRoute.TASK_NETWORK
     return ToolRoute.CLOUD
+
+
+def generation_policy_for_tool(tool_name: str) -> dict[str, object]:
+    """Classify whether a live tool may be exposed to evidence generation.
+
+    Routing answers *where* a call can execute.  This policy answers whether a
+    normal read-only synthesis campaign should expose it at all.  Unknown
+    task-local actions fail closed instead of inheriting safety from isolation.
+    """
+
+    route = route_for_tool(tool_name)
+    server = server_for_tool(tool_name)
+    if route in {ToolRoute.BLOCKED_CLOUD_WRITE, ToolRoute.BLOCKED_UNSUPPORTED}:
+        effect = "cloud_mutation" if route is ToolRoute.BLOCKED_CLOUD_WRITE else "unknown"
+        allowed = False
+    elif server in _LOCAL_COMPUTE_SERVERS:
+        effect, allowed = "compute", True
+    elif server in _LOCAL_READ_ACTIONS:
+        prefix = f"{server}_"
+        action = tool_name[len(prefix):] if tool_name.startswith(prefix) else tool_name
+        allowed = action in _LOCAL_READ_ACTIONS[server]
+        effect = "read" if allowed else "local_mutation"
+    elif route is ToolRoute.TASK_NETWORK:
+        effect, allowed = "read", True
+    elif server in _CLOUD_COMPUTE_SERVERS:
+        effect, allowed = "compute", True
+    elif server is None:
+        effect, allowed = "unknown", False
+    else:
+        # Shared-account mutation tools were already rejected by route_for_tool.
+        effect, allowed = "read", True
+
+    lowered = tool_name.casefold()
+    if not allowed:
+        coverage_role = "excluded"
+    elif effect == "compute":
+        coverage_role = "compute"
+    elif any(token in lowered for token in _SUPPORT_TOKENS):
+        coverage_role = "support"
+    elif any(token in lowered for token in _ENTRY_TOKENS):
+        coverage_role = "entry"
+    else:
+        coverage_role = "evidence"
+    return {
+        "effect": effect,
+        "generation_allowed": allowed,
+        "coverage_role": coverage_role,
+        "policy_version": "generation-safety-v1",
+    }
 
 
 def partition_tools(tool_names: Iterable[str]) -> dict[ToolRoute, list[str]]:

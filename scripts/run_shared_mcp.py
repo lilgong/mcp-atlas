@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,6 +16,28 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
+
+
+def secret_values(environment: dict[str, str]) -> list[str]:
+    """Return configured secrets for exact-value log redaction."""
+    markers = (
+        "KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "USERNAME",
+        "EMAIL", "CLIENT_ID", "PAGE_ID",
+    )
+    values = {
+        value for name, value in environment.items()
+        if value and len(value) >= 4 and any(marker in name.upper() for marker in markers)
+    }
+    connection = environment.get("MONGODB_CONNECTION_STRING", "")
+    if len(connection) >= 4:
+        values.add(connection)
+    return sorted(values, key=len, reverse=True)
+
+
+def redact_line(line: str, secrets: list[str]) -> str:
+    for value in secrets:
+        line = line.replace(value, "<redacted>")
+    return line
 
 
 def configured_env_file() -> Path:
@@ -57,7 +81,7 @@ def main() -> int:
     )
     if isolation_enabled:
         validate_shared_bind_host(host)
-    image = os.getenv("MCP_SHARED_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
+    image = os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
     usage_log_dir = Path(
         os.getenv("MCP_USAGE_LOG_DIR") or ROOT / "mcp_usage_log"
     ).expanduser().resolve()
@@ -96,8 +120,28 @@ def main() -> int:
         "--host", host,
         "--port", str(port),
     ]
-    os.execvp(command[0], command)
-    return 0
+    # Some third-party MCP SDKs dump request headers on failures.  Proxy the
+    # container output so credential values never reach terminal/runtime logs.
+    secrets = secret_values(dict(os.environ))
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    def forward_signal(signum, _frame):
+        if process.poll() is None:
+            process.send_signal(signum)
+
+    signal.signal(signal.SIGTERM, forward_signal)
+    signal.signal(signal.SIGINT, forward_signal)
+    assert process.stdout is not None
+    for line in process.stdout:
+        sys.stdout.write(redact_line(line, secrets))
+        sys.stdout.flush()
+    return process.wait()
 
 
 if __name__ == "__main__":

@@ -29,8 +29,11 @@ import argparse
 import asyncio
 import csv
 import datetime as dt
+import dataclasses
 import io
 import json
+import os
+import re
 import sys
 import time
 import uuid
@@ -168,21 +171,146 @@ def _flat(s: str) -> str:
     return " ".join(s.split())
 
 
-def _tool_errored(body: str) -> bool:
-    """MCP 工具级错误：[{type:text, text:"Error: ..."}] 或整体含 error。"""
+_ERROR_PREFIX_RE = re.compile(
+    r"^\s*(?:error|authentication error|authorization error|unauthorized|"
+    r"forbidden|an error occurred while\b[^:]*|http error during\b[^:]*|"
+    r"request error during\b[^:]*|tool execution failed)\s*[:\-]",
+    re.IGNORECASE,
+)
+_RATE_LIMIT_RE = re.compile(
+    r"^\s*(?:rate[- ]limit(?:ed|ing)\b|rate[- ]limit "
+    r"(?:exceeded|reached)\b|(?:monthly\s+)?quota "
+    r"(?:exceeded|reached)\b|too many requests\b)",
+    re.IGNORECASE,
+)
+_SEMANTIC_RESULT_KEYS = {
+    "content", "coordinates", "data", "documents", "entries", "facts",
+    "items", "links", "matches", "records", "results", "rows",
+    "sections", "summary", "text",
+}
+_EMPTY_METADATA_KEYS = {
+    "count", "cursor", "has_more", "limit", "message", "meta",
+    "metadata", "next_cursor", "offset", "page", "page_size",
+    "pagination", "query", "request", "status", "success", "total",
+    "total_count", "total_results", "type", "mimetype",
+}
+_SENSITIVE_PROBE_TOOLS = {
+    "notion_API-get-user",
+    "notion_API-get-users",
+}
+
+
+def _decoded(value: str) -> Any:
     try:
-        data = json.loads(body)
-    except Exception:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _structured_error(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_structured_error(child) for child in value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if _ERROR_PREFIX_RE.search(stripped) or _RATE_LIMIT_RE.search(stripped):
+            return True
+        decoded = _decoded(stripped)
+        return decoded is not None and _structured_error(decoded)
+    if not isinstance(value, dict):
         return False
-    if isinstance(data, dict) and "error" in str(data).lower():
+    if value.get("isError") is True or value.get("object") == "error":
         return True
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                text = item.get("text", "")
-                if isinstance(text, str) and text.startswith("Error:"):
-                    return True
+    if value.get("error") not in (None, False, "", [], {}):
+        return True
+    if value.get("success") is False:
+        return True
+    status = str(value.get("status") or "").strip().lower()
+    if status in {"error", "failed", "failure"}:
+        return True
+    try:
+        if int(value.get("statusCode", value.get("status"))) >= 400:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if set(value) <= {"type", "text", "mimeType"} and isinstance(value.get("text"), str):
+        return _structured_error(value["text"])
+    return any(
+        _structured_error(child)
+        for key, child in value.items()
+        if str(key).lower() in {"content", "structuredcontent"}
+    )
+
+
+def _tool_errored(body: str) -> bool:
+    """Recognize explicit MCP/upstream failures without matching prose like error rate."""
+    decoded = _decoded(body)
+    return _structured_error(decoded if decoded is not None else body)
+
+
+def _semantically_empty(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.casefold() in {"none", "null", "nil", "undefined", "n/a"}:
+            return True
+        if re.match(
+            r"^no (?:results|matches|records|items) (?:were )?found\b",
+            stripped,
+            re.IGNORECASE,
+        ):
+            return True
+        decoded = _decoded(stripped)
+        return decoded is not None and _semantically_empty(decoded)
+    if isinstance(value, (list, tuple)):
+        return not value or all(_semantically_empty(child) for child in value)
+    if isinstance(value, dict):
+        if value.get("exists") is False:
+            return True
+        semantic = [
+            child for key, child in value.items()
+            if str(key).lower() in _SEMANTIC_RESULT_KEYS
+        ]
+        if semantic and all(_semantically_empty(child) for child in semantic):
+            other = [
+                child for key, child in value.items()
+                if str(key).lower()
+                not in _SEMANTIC_RESULT_KEYS | _EMPTY_METADATA_KEYS
+            ]
+            if not other or all(_semantically_empty(child) for child in other):
+                return True
+        payload = [
+            child for key, child in value.items()
+            if str(key).lower() not in {"type", "mimetype"}
+        ]
+        return not value or (bool(payload) and all(_semantically_empty(child) for child in payload))
     return False
+
+
+def _result_is_empty(body: str) -> bool:
+    decoded = _decoded(body)
+    return _semantically_empty(decoded if decoded is not None else body)
+
+
+def _secret_values() -> list[str]:
+    markers = (
+        "KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "USERNAME",
+        "EMAIL", "CLIENT_ID", "PAGE_ID",
+    )
+    values = {
+        value for name, value in os.environ.items()
+        if value and len(value) >= 4 and any(marker in name.upper() for marker in markers)
+    }
+    connection = os.getenv("MONGODB_CONNECTION_STRING", "")
+    if len(connection) >= 4:
+        values.add(connection)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact(text: str) -> str:
+    for value in _secret_values():
+        text = text.replace(value, "<redacted>")
+    return text
 
 
 def _texts(body: str) -> str:
@@ -508,6 +636,7 @@ class Result:
     status: str
     elapsed: float = 0.0
     detail: str = ""
+    tool: str = ""
 
 
 async def run_probe(call, server: str, timeout: float) -> Result:
@@ -525,12 +654,21 @@ async def run_probe(call, server: str, timeout: float) -> Result:
 
 
 async def run_smoke(call, server: str, tool: str, args: dict) -> Result:
+    if tool in _SENSITIVE_PROBE_TOOLS:
+        return Result(
+            server, "smoke", FAIL, 0.0,
+            f"refusing account-personal probe tool: {tool}", tool,
+        )
     t0 = time.monotonic()
     try:
-        await call(tool, args)
-        return Result(server, "smoke", OK, time.monotonic() - t0)
+        body = await call(tool, args)
+        if _result_is_empty(body):
+            raise ApiError(f"{tool}: empty_or_placeholder_result")
+        return Result(server, "smoke", OK, time.monotonic() - t0, tool=tool)
     except ApiError as e:
-        return Result(server, "smoke", FAIL, time.monotonic() - t0, str(e))
+        return Result(
+            server, "smoke", FAIL, time.monotonic() - t0, _redact(str(e)), tool,
+        )
 
 
 async def load_target_servers(
@@ -625,14 +763,14 @@ def _render_results(results: list[Result]) -> None:
             if r.server in PROBES:
                 print(f"       └─ 验的是: {PROBES[r.server][1]}")
             if r.detail:
-                print(f"       └─ {r.detail}")
+                print(f"       └─ {_redact(r.detail)}")
 
     if smoke_res:
         print(f"\n{'='*78}\n连通性冒烟（无专属数据的服务，只验 API 能否调通）\n{'='*78}")
         for r in sorted(smoke_res, key=lambda x: x.server):
             print(f"{icon[r.status]} {'OK' if r.status == OK else r.status:9s} {r.server:18s} {r.elapsed:5.1f}s")
             if r.detail:
-                print(f"       └─ {r.detail}")
+                print(f"       └─ {_redact(r.detail)}")
 
     n = {s: sum(1 for r in results if r.status == s) for s in (OK, BAD, FAIL)}
     print(f"\n{'='*78}")
@@ -645,6 +783,38 @@ def _render_results(results: list[Result]) -> None:
         print("   依赖它的评测任务会照跑但拿不到分——注意这类失败会压低分数。")
     if n[FAIL]:
         print("→ 💥 调用本身失败：检查 key、服务是否启动、MCP_SERVER_URL 端口。")
+
+
+def _write_results(path: Path, results: list[Result], *, mode: str) -> None:
+    """Persist a compact, secret-redacted probe report with restrictive permissions."""
+    counts = {status: sum(r.status == status for r in results) for status in (OK, BAD, FAIL)}
+    payload = {
+        "schema_version": 1,
+        "mode": mode,
+        "ok": all(result.status == OK for result in results),
+        "summary": {
+            "total": len(results),
+            "ok": counts[OK],
+            "data_bad": counts[BAD],
+            "api_fail": counts[FAIL],
+        },
+        "results": [
+            {**dataclasses.asdict(result), "detail": _redact(result.detail)}
+            for result in sorted(results, key=lambda item: item.server)
+        ],
+    }
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 async def run_legacy(
@@ -802,6 +972,11 @@ def _parse_cli(description: str, *, default_concurrency: int):
             "MCP_COMPLETION_INPUT，未配置时使用 MCP-Atlas.csv"
         ),
     )
+    parser.add_argument(
+        "--json-output",
+        default=None,
+        help="把逐服务结果写入指定 JSON（不保存工具响应，文件权限 0600）",
+    )
     return parser, parser.parse_args()
 
 
@@ -830,6 +1005,8 @@ def cli_legacy() -> None:
             args.retries,
         )
     )
+    if args.json_output:
+        _write_results(Path(args.json_output), results, mode="legacy")
     _exit_if_unhealthy(results)
 
 
@@ -864,4 +1041,6 @@ def cli_isolated() -> None:
             input_path,
         )
     )
+    if args.json_output:
+        _write_results(Path(args.json_output), results, mode="isolated")
     _exit_if_unhealthy(results)

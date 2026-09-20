@@ -26,8 +26,11 @@ def test_synthesis_capabilities_are_explicit_and_non_secret():
     }
     assert set(result["runtime"]["features"]) >= {
         "fixture_identity",
+        "generation_safety_policy",
+        "routed_tool_catalog",
         "tool_policy",
     }
+    assert result["runtime"]["tool_catalog_endpoint"] == "/v2/mcp_eval/tool-catalog"
     assert "api_key" not in str(result).lower()
     assert "credential_env" not in str(result).lower()
 

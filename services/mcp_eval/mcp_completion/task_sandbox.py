@@ -268,9 +268,7 @@ class TaskSandbox:
             task_id=task_id,
             local_servers=set(local_servers),
             network_servers=set(network_servers),
-            agent_image=os.getenv(
-                "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
-            ),
+            agent_image=os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
             mongo_image=(os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip(),
             startup_timeout=float(
                 os.getenv("MCP_TASK_SANDBOX_STARTUP_TIMEOUT", "180")

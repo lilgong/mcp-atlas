@@ -17,6 +17,7 @@ from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error
+from .model_rate_limit import reserve_delay
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,9 @@ async def _create_openai_compatible_completion(
 
     for provider_attempt in range(1, config.LLM_MAX_ATTEMPTS + 1):
         try:
+            delay = await asyncio.to_thread(reserve_delay, config.LLM_BASE_URL, config.LLM_API_KEY)
+            if delay:
+                await asyncio.sleep(delay)
             return await litellm.acompletion(
                 model=model,
                 custom_llm_provider="openai",
@@ -304,6 +308,8 @@ async def _create_openai_compatible_completion(
                 raise
 
             status_code = _model_error_status_code(error)
+            if status_code in {401, 402, 403} or is_fatal_account_error(error):
+                raise
             should_retry = (
                 status_code in RETRYABLE_MODEL_STATUS_CODES
                 and provider_attempt < config.LLM_MAX_ATTEMPTS
