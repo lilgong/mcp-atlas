@@ -6,10 +6,12 @@ import base64
 import json
 import os
 import urllib.error
-import urllib.request
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+import httpx
 
 
 RELAY_URL = (os.getenv("PUBMED_RELAY_URL") or "").strip().rstrip("/")
@@ -49,6 +51,9 @@ def fetch(
         query = urllib.parse.urlencode(params, doseq=True)
         url = f"{url}{'&' if urllib.parse.urlsplit(url).query else '?'}{query}"
         params = None
+    # Match normal httpx URL handling even for callers that supply a raw URL.
+    # Reapplying this conversion preserves existing escapes and arXiv's +TO+.
+    url = str(httpx.URL(url))
     if body is not None and not isinstance(body, bytes):
         if isinstance(body, str):
             body = body.encode()
