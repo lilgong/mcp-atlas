@@ -18,6 +18,7 @@ from .config import config
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error
 from .model_rate_limit import reserve_delay
+from .streaming import collect_litellm_response, llm_streaming_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +289,8 @@ async def _create_openai_compatible_completion(
             delay = await asyncio.to_thread(reserve_delay, config.LLM_BASE_URL, config.LLM_API_KEY)
             if delay:
                 await asyncio.sleep(delay)
-            return await litellm.acompletion(
+            use_streaming = llm_streaming_enabled()
+            provider_response = await litellm.acompletion(
                 model=model,
                 custom_llm_provider="openai",
                 messages=messages,
@@ -298,7 +300,23 @@ async def _create_openai_compatible_completion(
                 timeout=config.DEFAULT_TIMEOUT,
                 max_retries=0,
                 **({"prompt_cache_key": prompt_cache_key} if prompt_cache_key else {}),
+                **(
+                    {
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    if use_streaming
+                    else {}
+                ),
                 **({"extra_body": extra_body} if extra_body else {}),
+            )
+            return (
+                await collect_litellm_response(
+                    provider_response,
+                    messages=messages,
+                )
+                if use_streaming
+                else provider_response
             )
         except Exception as error:
             if isinstance(
@@ -413,6 +431,7 @@ async def create_completion(
             attempt=attempt,
             max_attempts=max_attempts,
             base_url=config.LLM_BASE_URL,
+            streaming=llm_streaming_enabled(),
             request={
                 "messages": litellm_messages,
                 "tools": litellm_tools,

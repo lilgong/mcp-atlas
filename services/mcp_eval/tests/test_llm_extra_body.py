@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -8,7 +9,7 @@ from mcp_completion.schema import UserMessage
 
 
 class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
-    async def _call(self, extra_body, prompt_cache_key=None):
+    async def _call(self, extra_body, prompt_cache_key=None, *, streaming=False):
         provider_response = {
             "choices": [
                 {
@@ -24,6 +25,10 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("mcp_completion.llm.litellm.acompletion", completion),
             patch("mcp_completion.llm.write_runtime_event"),
+            patch.dict(
+                os.environ,
+                {"LLM_STREAMING_ENABLED": "true" if streaming else "false"},
+            ),
         ):
             await create_completion(
                 model="test-model",
@@ -70,6 +75,18 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
         kwargs = await self._call({}, prompt_cache_key="synthesis-case-1")
 
         self.assertEqual(kwargs["prompt_cache_key"], "synthesis-case-1")
+
+    async def test_completion_requests_lossless_streaming(self):
+        kwargs = await self._call({}, streaming=True)
+
+        self.assertIs(kwargs["stream"], True)
+        self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+
+    async def test_non_streaming_omits_stream_parameters(self):
+        kwargs = await self._call({}, streaming=False)
+
+        self.assertNotIn("stream", kwargs)
+        self.assertNotIn("stream_options", kwargs)
 
 
 class DisabledThinkingContractTests(unittest.IsolatedAsyncioTestCase):

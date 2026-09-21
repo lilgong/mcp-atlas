@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import mcp_evals_scores
+from litellm.types.utils import ModelResponse
 from mcp_evals_scores import (
     AsyncLiteLLMClient,
     CoverageEvaluator,
@@ -25,6 +26,33 @@ def _fake_response(content='{"coverage": "fulfilled"}'):
             )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+
+class _AsyncStream:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def __aiter__(self):
+        async def iterate():
+            for item in self.chunks:
+                await asyncio.sleep(0)
+                yield item
+
+        return iterate()
+
+
+def _stream_chunk(content, finish_reason=None):
+    return ModelResponse(
+        model="judge-test",
+        stream=True,
+        choices=[
+            {
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": finish_reason,
+            }
+        ],
     )
 
 
@@ -82,6 +110,71 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.source_kind, "evaluator_model")
         self.assertEqual(raised.exception.source_name, "gpt-5.4")
         self.assertEqual(raised.exception.credential_envs, ("EVAL_LLM_API_KEY",))
+
+    async def test_streamed_strict_json_is_parsed_after_completion(self):
+        captured = {}
+
+        async def fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return _AsyncStream(
+                [
+                    _stream_chunk('{"claim_text":"claim",'),
+                    _stream_chunk(
+                        '"coverage_outcome":"fulfilled",'
+                        '"justification":"covered",'
+                        '"confidence_level":1.0}',
+                        finish_reason="stop",
+                    ),
+                ]
+            )
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(
+                evaluator_model="gpt-5.4",
+                semaphore_limit=1,
+                request_delay=0.0,
+            )
+        )
+        with patch.object(
+            mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ), patch.object(
+            mcp_evals_scores, "TOKEN_LOG_PATH", self._log_path()
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"LLM_STREAMING_ENABLED": "true"}
+        ):
+            result = await client.generate_structured_content(
+                "prompt", get_single_claim_evaluation_schema()
+            )
+
+        self.assertIs(captured["stream"], True)
+        self.assertEqual(captured["stream_options"], {"include_usage": True})
+        self.assertEqual(result["coverage_outcome"], "fulfilled")
+
+    async def test_non_streaming_judge_omits_stream_parameters(self):
+        captured = {}
+
+        async def fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return _fake_response('{"ok":true}')
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(
+                evaluator_model="gpt-5.4",
+                semaphore_limit=1,
+                request_delay=0.0,
+            )
+        )
+        with patch.object(
+            mcp_evals_scores.litellm, "acompletion", fake_acompletion
+        ), patch.object(
+            mcp_evals_scores, "TOKEN_LOG_PATH", self._log_path()
+        ), patch.dict(
+            mcp_evals_scores.os.environ, {"LLM_STREAMING_ENABLED": "false"}
+        ):
+            await client.generate_structured_content("prompt", {})
+
+        self.assertNotIn("stream", captured)
+        self.assertNotIn("stream_options", captured)
 
     def test_evaluator_credentials_do_not_fallback_to_completion_config(self):
         with patch.dict(
