@@ -48,6 +48,10 @@ from mcp_completion.account_guard import (
     is_fatal_account_error,
 )
 from mcp_completion.config import normalize_openai_base_url
+from mcp_completion.streaming import (
+    collect_litellm_response,
+    llm_streaming_enabled,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -64,8 +68,8 @@ os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 os.environ["NO_PROXY"] = "*"
 
-# Per-request wall clock for a single claim judgement. litellm's default is
-# 6000s, which turns one upstream stall into an hour of held concurrency.
+# Per-request timeout for a single claim judgement. In streaming mode this
+# bounds waiting for the next chunk rather than the total healthy stream.
 EVAL_REQUEST_TIMEOUT = float(os.getenv("EVAL_REQUEST_TIMEOUT", "600"))
 
 # =========================================================================
@@ -530,9 +534,8 @@ class AsyncLiteLLMClient(AsyncLLMClient):
         claim_index = context.get("claim_index", "unknown")
         claim_count = context.get("claim_count", "unknown")
         try:
-            # The semaphore covers the HTTP request only. Holding it across the
-            # rate-limit sleep and JSON parsing meant a stalled request starved
-            # the slots every other queued claim was waiting on.
+            # The semaphore covers opening and fully consuming the response,
+            # but not the rate-limit sleep or local JSON parsing.
             async with self.semaphore:
                 self.request_count += 1
 
@@ -540,7 +543,8 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 # envelope. Putting ``response_schema`` next to
                 # ``type=json_object`` is a Gemini-style extension and leaves
                 # the schema unenforced on OpenAI-compatible gateways.
-                response = await litellm.acompletion(
+                use_streaming = llm_streaming_enabled()
+                provider_response = await litellm.acompletion(
                     model=self.config.evaluator_model,
                     custom_llm_provider="openai",
                     messages=[{"role": "user", "content": prompt}],
@@ -567,10 +571,26 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                     # inherits litellm's 6000s default, so an upstream stall
                     # blocks a slot for over an hour.
                     timeout=EVAL_REQUEST_TIMEOUT,
+                    **(
+                        {
+                            "stream": True,
+                            "stream_options": {"include_usage": True},
+                        }
+                        if use_streaming
+                        else {}
+                    ),
                     # The OpenAI SDK retries twice on its own, which multiplies
                     # with the tenacity retry above (6 x 3 = 18 requests). Keep
                     # retries in one place so the total is predictable.
                     max_retries=0,
+                )
+                response = (
+                    await collect_litellm_response(
+                        provider_response,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    if use_streaming
+                    else provider_response
                 )
 
             # Rate limiting delay
@@ -1041,6 +1061,7 @@ async def main(args):
     logger.info(f"  pass_threshold  = {args.pass_threshold}")
     logger.info(f"  eval_base_url   = {_eval_base or '(litellm 默认/官方)'}")
     logger.info(f"  eval_api_key    = {_key_disp}")
+    logger.info(f"  llm_streaming   = {llm_streaming_enabled()}")
     logger.info("======================================")
 
     try:
