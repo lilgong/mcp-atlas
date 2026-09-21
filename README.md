@@ -256,6 +256,13 @@ MCP_COMPLETION_MODEL=<model-name>
 网关时直接更换 `LLM_API_KEY` 和 `LLM_BASE_URL`。Base URL 填网关根地址
 即可，代码会自动补 `/v1`；原有已经带 `/v1` 的配置也继续兼容。
 
+completion 请求默认使用流式传输；设置 `LLM_STREAMING_ENABLED=false` 可关闭。
+流式模式会先
+完整重建一轮 assistant 的 `reasoning_content`、`content` 和全部 tool-call
+arguments，再执行 MCP 工具；不会把半截参数写入轨迹或提前调用工具。关闭时不发送
+`stream`/`stream_options`，保持原非流式请求。`DEFAULT_TIMEOUT` 在流式模式下
+表示等待下一块数据的空闲上限，持续收到数据的长推理可超过该时长。
+
 ### 5.2 裁判模型
 
 ```dotenv
@@ -267,6 +274,9 @@ EVAL_LLM_BASE_URL=<evaluator-base-url>
 三项均为评分端独立配置。`EVAL_LLM_MODEL` 填写网关接受的裸模型名；
 Key 和 Base URL 不会回退到 completion 的 `LLM_*` 配置。
 `EVAL_LLM_BASE_URL` 同样可以只填网关根地址，代码会自动补 `/v1`。
+
+流式开关也适用于裁判请求；裁判的 strict JSON 会在流完整聚合后再解析。
+流提前中断或缺少 finish reason 会被判为失败，不会使用半截 JSON 打分。
 
 ### 5.3 端口
 
