@@ -110,6 +110,27 @@ class ToolCallOutputMessage(BaseModel):
 Message = Union[SystemMessage, UserMessage, AssistantMessage, ToolCallOutputMessage]
 
 
+class SynthesisControl(BaseModel):
+    """Controller of the data-syn P2 synthesis agent loop.
+
+    Mirrors ``services/synthesis_agent_service.py`` of mcp-atlas-data-syn:
+    a per-turn budget-status message, repeated-tool warnings, quarantine of a
+    server after a timeout, a model-visible per-result character limit and a
+    whole-context character limit.  Evaluation runs never send it.
+    """
+
+    max_repeat_per_tool: int = Field(8, alias="maxRepeatPerTool", ge=1)
+    per_result_max_chars: int = Field(6000, alias="perResultMaxChars", ge=1)
+    context_max_chars: int = Field(180_000, alias="contextMaxChars", ge=1)
+    no_retry_timeout_servers: List[str] = Field(
+        default_factory=list, alias="noRetryTimeoutServers",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
 class RunAgentAPIRequestBody(BaseModel):
     """Request body for running MCP eval."""
 
@@ -127,6 +148,7 @@ class RunAgentAPIRequestBody(BaseModel):
     evaluation_id: Optional[str] = Field(None, alias="evaluationId")
     include_telemetry: bool = Field(False, alias="includeTelemetry")
     prompt_cache_key: Optional[str] = Field(None, alias="promptCacheKey", min_length=1)
+    synthesis_control: Optional[SynthesisControl] = Field(None, alias="synthesisControl")
 
     class Config:
         populate_by_name = True

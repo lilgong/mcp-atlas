@@ -366,6 +366,25 @@ async def handle_run_mcp_eval(
     )
 
     async with mcp_client:
+        if body.synthesis_control is not None:
+            from .synthesis_loop import run_synthesis_eval
+
+            async for output in run_synthesis_eval(
+                mcp_client,
+                body.model,
+                body.messages,
+                body.max_turns,
+                body.max_tool_calls,
+                body.synthesis_control,
+                extra_body=body.extra_body,
+                retry_thinking_contract_violations=body.retry_thinking_contract_violations,
+                task_id=task_id,
+                include_telemetry=body.include_telemetry,
+                prompt_cache_key=body.prompt_cache_key,
+                output_factory=AgentOutput,
+            ):
+                yield output
+            return
         async for output in run_mcp_eval(
             mcp_client=mcp_client,
             model=body.model,
