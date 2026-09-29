@@ -48,6 +48,18 @@ def _safe_fragment(value: str, limit: int = 30) -> str:
     return (value or "task")[:limit]
 
 
+def _launch_labels() -> tuple[str, ...]:
+    """Label task resources with the runtime launch that owns them.
+
+    The synthesis pipeline shuts a launch down by this label, so a sandbox that
+    outlives its completion service is still removed with the gateway.
+    """
+    launch_id = (os.getenv("MCP_ATLAS_LAUNCH_ID") or "").strip()
+    if not launch_id:
+        return ()
+    return ("--label", f"mcp-atlas.launch-id={_safe_fragment(launch_id, 50)}")
+
+
 def _owner_label() -> str:
     configured = os.getenv("MCP_SANDBOX_OWNER")
     raw = configured or f"{socket.gethostname()}-{os.getenv('PORT', '3000')}"
@@ -416,6 +428,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             name,
         )
         self.task_network = name
@@ -467,6 +480,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             self.mongo_socket_volume,
         )
         await _run(
@@ -512,6 +526,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             "--security-opt",
             "no-new-privileges:true",
             "--cap-drop",
@@ -648,6 +663,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             "--security-opt",
             "no-new-privileges:true",
             "--cap-drop",

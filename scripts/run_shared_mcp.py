@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -82,6 +83,12 @@ def main() -> int:
     if isolation_enabled:
         validate_shared_bind_host(host)
     image = os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
+    launch_id = (os.getenv("MCP_ATLAS_LAUNCH_ID") or uuid.uuid4().hex).strip()
+    safe_launch_id = "".join(
+        character if character.isalnum() or character in "_.-" else "-"
+        for character in launch_id
+    )[:48]
+    container_name = f"mcp-atlas-shared-{safe_launch_id}"
     usage_log_dir = Path(
         os.getenv("MCP_USAGE_LOG_DIR") or ROOT / "mcp_usage_log"
     ).expanduser().resolve()
@@ -109,6 +116,9 @@ def main() -> int:
         )
     command = [
         "docker", "run", "--rm", "--network", "host",
+        "--name", container_name,
+        "--label", f"mcp-atlas.launch-id={launch_id}",
+        "--label", "mcp-atlas.role=shared-gateway",
         "--add-host=host.docker.internal:host-gateway",
         "--env-file", str(env_file),
         "--env", "MCP_ATLAS_SHARED_RUNTIME=true",
@@ -129,19 +139,46 @@ def main() -> int:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        # The orchestrator signals this wrapper's process group.  Keep the
+        # Docker client in its own group so the wrapper can stop the container
+        # explicitly instead of merely killing the client and orphaning it.
+        start_new_session=True,
     )
+
+    def stop_container(*, remove: bool = False) -> None:
+        command = ["docker", "rm", "-f", container_name] if remove else [
+            "docker", "stop", "--time", "10", container_name,
+        ]
+        try:
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # RuntimeManager performs a second launch-label cleanup.  Never
+            # let a cleanup-tool failure hide the gateway's real exit status.
+            pass
 
     def forward_signal(signum, _frame):
         if process.poll() is None:
-            process.send_signal(signum)
+            stop_container()
 
     signal.signal(signal.SIGTERM, forward_signal)
     signal.signal(signal.SIGINT, forward_signal)
-    assert process.stdout is not None
-    for line in process.stdout:
-        sys.stdout.write(redact_line(line, secrets))
-        sys.stdout.flush()
-    return process.wait()
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            sys.stdout.write(redact_line(line, secrets))
+            sys.stdout.flush()
+        return process.wait()
+    finally:
+        # --rm normally removes the container.  This final targeted cleanup is
+        # deliberately redundant: losing the docker client must never leave a
+        # host-network container holding the gateway port.
+        stop_container(remove=True)
 
 
 if __name__ == "__main__":

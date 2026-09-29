@@ -137,7 +137,7 @@ def make_isolated_caller(
         while True:
             try:
                 response = await asyncio.wait_for(
-                    client.call_tool(tool, args),
+                    client.call_tool(tool, args, use_cache=False),
                     timeout=timeout,
                 )
                 body = json.dumps(

@@ -209,8 +209,8 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, exc_type, exc, traceback):
                 return None
 
-            async def call_tool(self, tool, args):
-                calls.append((tool, args))
+            async def call_tool(self, tool, args, use_cache=True):
+                calls.append((tool, args, use_cache))
                 item = SimpleNamespace(
                     model_dump=lambda **kwargs: {
                         "type": "text",
@@ -242,6 +242,8 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["mongodb_count"], requested)
         self.assertEqual("mongodb_count", calls[0][0])
+        # Probes bypass the gateway cache so a cached failure cannot mask the service.
+        self.assertIs(False, calls[0][2])
         self.assertIn("DATA OK   mongodb", output.getvalue())
 
     async def test_e2b_is_called_through_v2_instead_of_policy_skipped(
@@ -260,8 +262,8 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, exc_type, exc, traceback):
                 return None
 
-            async def call_tool(self, tool, args):
-                calls.append((tool, args))
+            async def call_tool(self, tool, args, use_cache=True):
+                calls.append((tool, args, use_cache))
                 item = SimpleNamespace(
                     model_dump=lambda **kwargs: {
                         "type": "text",
@@ -293,6 +295,7 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["e2b-server_run_code"], requested)
         self.assertEqual("e2b-server_run_code", calls[0][0])
+        self.assertIs(False, calls[0][2])
         self.assertIn("OK        e2b-server", output.getvalue())
         self.assertNotIn("POLICY SKIP", output.getvalue())
 

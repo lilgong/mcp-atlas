@@ -13,6 +13,7 @@ from mcp_server_probe import (
     _write_results,
     run_smoke,
 )
+from mcp_completion.mcp_client.sandbox_client import SandboxMCPClient
 from test_servers import TEST_CALLS
 
 
@@ -43,6 +44,17 @@ def test_empty_search_envelope_is_not_usable():
     assert not _result_is_empty(json.dumps([{
         "type": "text", "text": json.dumps({"results": [{"id": "1"}]}),
     }]))
+
+
+def test_sandbox_client_can_disable_gateway_cache():
+    client = SandboxMCPClient(
+        "http://127.0.0.1:1", enabled_tools=["oxylabs_google_search_scraper"],
+    )
+    assert client is not None
+    # The probe's isolated caller uses this keyword; the sandbox client encodes
+    # it in the gateway request body. This test intentionally stays offline.
+    import inspect
+    assert "use_cache" in inspect.signature(client.call_tool).parameters
 
 
 def test_sensitive_probe_is_refused_before_call():

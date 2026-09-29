@@ -417,7 +417,9 @@ class IsolatedMCPClient(MCPClient):
                     by_name.setdefault(tool.name, tool)
         return list(by_name.values())
 
-    async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
+    async def call_tool(
+        self, tool_name: str, args: Any, *, use_cache: bool = True,
+    ) -> CallToolResponse:
         if tool_name in self.blocked_tools or route_for_tool(
             tool_name
         ) in {
@@ -470,7 +472,12 @@ class IsolatedMCPClient(MCPClient):
                 rate_limit_queued_ms=rate_limit_queued_ms,
             )
             try:
-                response = await client.call_tool(tool_name, args)
+                if use_cache:
+                    response = await client.call_tool(tool_name, args)
+                else:
+                    response = await client.call_tool(
+                        tool_name, args, use_cache=False,
+                    )
             except Exception as exc:
                 rate_limited = _contains_rate_limit_marker(exc)
                 shared_cooldown_seconds = call_slot.observe_rate_limit(

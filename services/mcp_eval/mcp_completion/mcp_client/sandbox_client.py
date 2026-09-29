@@ -91,7 +91,9 @@ class SandboxMCPClient(MCPClient):
             logger.error(f"Failed to list tools from sandbox: {error}")
             raise
 
-    async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
+    async def call_tool(
+        self, tool_name: str, args: Any, *, use_cache: bool = True,
+    ) -> CallToolResponse:
         """Call a tool in the sandbox."""
         if (
             self._enabled_tool_set is not None
@@ -112,6 +114,7 @@ class SandboxMCPClient(MCPClient):
             body = {
                 "tool_name": backend_tool_name,
                 "tool_args": args,
+                "use_cache": use_cache,
             }
 
             if self.container_name:
