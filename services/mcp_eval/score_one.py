@@ -21,6 +21,9 @@ def main() -> None:
     parser.add_argument("--input-price", type=float, default=0.0)
     parser.add_argument("--cached-input-price", type=float, default=0.0)
     parser.add_argument("--output-price", type=float, default=0.0)
+    # "final" scores only the answer claims; "all" also scores anchor and
+    # intermediate claims, as the MCP-Atlas release grades every GTFA claim.
+    parser.add_argument("--claim-scope", choices=("final", "all"), default="final")
     args = parser.parse_args()
     request = json.load(sys.stdin)
     inputs = request.get("inputs", {})
@@ -29,7 +32,10 @@ def main() -> None:
     if request.get("protocol_version") != 1 or not isinstance(task, dict) or not isinstance(candidate, dict):
         print(json.dumps({"status": "failure", "failure_class": "infrastructure", "reason_code": "coverage_input_invalid"}))
         return
-    claims = [item for item in task.get("claims", []) if isinstance(item, dict) and item.get("role") == "final"]
+    claims = [
+        item for item in task.get("claims", [])
+        if isinstance(item, dict) and (args.claim_scope == "all" or item.get("role") == "final")
+    ]
     answer = candidate.get("final_answer")
     if not claims or not isinstance(answer, str):
         print(json.dumps({"status": "failure", "failure_class": "infrastructure", "reason_code": "coverage_input_invalid"}))
