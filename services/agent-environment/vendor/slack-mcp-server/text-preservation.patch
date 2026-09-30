@@ -1,0 +1,395 @@
+diff --git a/pkg/text/content_preservation_test.go b/pkg/text/content_preservation_test.go
+new file mode 100644
+index 0000000..23b5d6c
+--- /dev/null
++++ b/pkg/text/content_preservation_test.go
+@@ -0,0 +1,214 @@
++package text
++
++import (
++	"encoding/csv"
++	"strings"
++	"testing"
++)
++
++func TestProcessText_AtlasMessageCSVRoundTrip(t *testing.T) {
++	// Official GameCube quote plus characters commonly used in Slack messages.
++	raw := "I recommend The Legend of Zelda: The Wind Waker on GameCube. It's a masterpiece with such a beautiful story.\nShe said \"$5 + 2°C\" — 👨‍👩‍👧 🎉 <@U0123ABC>"
++	processed := ProcessText(raw)
++	if processed != raw {
++		t.Fatalf("message changed: got %q, want %q", processed, raw)
++	}
++	var buffer strings.Builder
++	writer := csv.NewWriter(&buffer)
++	if err := writer.Write([]string{"user", processed}); err != nil {
++		t.Fatal(err)
++	}
++	writer.Flush()
++	if err := writer.Error(); err != nil {
++		t.Fatal(err)
++	}
++	record, err := csv.NewReader(strings.NewReader(buffer.String())).Read()
++	if err != nil || record[1] != raw {
++		t.Fatalf("CSV round trip failed: got %q, error %v", record, err)
++	}
++}
++
++func TestProcessText_UnsafeRunes(t *testing.T) {
++	for _, r := range []rune{0, 1, 0x1f, 0x7f, 0x80, 0x9f, 0xfeff, 0x200b, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069} {
++		if got := ProcessText("a" + string(r) + "b"); got != "ab" {
++			t.Errorf("control U+%04X: got %q, want ab", r, got)
++		}
++	}
++}
++
++func TestProcessText_LinkNormalization(t *testing.T) {
++	tests := []struct {
++		name     string
++		input    string
++		expected string
++	}{
++		{
++			name:     "Slack-style link in middle",
++			input:    "aaabbcc <https://google.com|This is a link> aabbcc",
++			expected: "aaabbcc https://google.com - This is a link, aabbcc",
++		},
++		{
++			name:     "Slack-style link at end",
++			input:    "aaabbcc <https://google.com|This is a link>",
++			expected: "aaabbcc https://google.com - This is a link",
++		},
++		{
++			name:     "Slack-style link at end with spaces",
++			input:    "aaabbcc <https://google.com|This is a link>   ",
++			expected: "aaabbcc https://google.com - This is a link",
++		},
++		{
++			name:     "Two links, second at end",
++			input:    "First <https://site1.com|Site One> then <https://site2.com|Site Two>",
++			expected: "First https://site1.com - Site One, then https://site2.com - Site Two",
++		},
++		{
++			name:     "Two links, text after second",
++			input:    "First <https://site1.com|Site One> then <https://site2.com|Site Two> done",
++			expected: "First https://site1.com - Site One, then https://site2.com - Site Two, done",
++		},
++		{
++			name:     "Markdown link at end",
++			input:    "Check this [Google](https://google.com)",
++			expected: "Check this https://google.com - Google",
++		},
++		{
++			name:     "Markdown link in middle",
++			input:    "Check this [Google](https://google.com) out",
++			expected: "Check this https://google.com - Google, out",
++		},
++		{
++			name:     "HTML anchor at end",
++			input:    `Visit <a href="https://example.com">Example</a>`,
++			expected: "Visit https://example.com - Example",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			result := ProcessText(tt.input)
++			if result != tt.expected {
++				t.Errorf("ProcessText() = %q, expected %q", result, tt.expected)
++			}
++		})
++	}
++}
++
++func TestProcessText_PreservesContent(t *testing.T) {
++	tests := []struct {
++		name     string
++		input    string
++		expected string
++	}{
++		{
++			name:     "apostrophes in contractions",
++			input:    "I'll let you know what didn't work, it's fine",
++			expected: "I'll let you know what didn't work, it's fine",
++		},
++		{
++			name:     "straight double quotes",
++			input:    `she said "hello" and left`,
++			expected: `she said "hello" and left`,
++		},
++		{
++			name:     "curly quotes from iOS",
++			input:    "\u2018don\u2019t\u2019 \u201csay\u201d that",
++			expected: "\u2018don\u2019t\u2019 \u201csay\u201d that",
++		},
++		{
++			name:     "exclamation and question marks",
++			input:    "wow! really?! amazing!!",
++			expected: "wow! really?! amazing!!",
++		},
++		{
++			name:     "parentheses and brackets",
++			input:    "see note (important) and [aside]",
++			expected: "see note (important) and [aside]",
++		},
++		{
++			name:     "blockquote marker",
++			input:    "> this was quoted",
++			expected: "> this was quoted",
++		},
++		{
++			name:     "currency and math",
++			input:    "costs $5.00 (2+2 = 4)",
++			expected: "costs $5.00 (2+2 = 4)",
++		},
++		{
++			name:     "markdown emphasis",
++			input:    "*bold* _italic_ ~strike~ `code`",
++			expected: "*bold* _italic_ ~strike~ `code`",
++		},
++		{
++			name:     "unicode emoji",
++			input:    "great work \U0001F389 \U0001F44D",
++			expected: "great work \U0001F389 \U0001F44D",
++		},
++		{
++			name:     "raw slack mention markup",
++			input:    "cc <@U0123ABC> in <#C0456DEF|general>",
++			expected: "cc <@U0123ABC> in <#C0456DEF|general>",
++		},
++		{
++			name:     "raw broadcast mention",
++			input:    "<!channel> please review",
++			expected: "<!channel> please review",
++		},
++		{
++			name:     "preserves newlines, collapses inline spaces",
++			input:    "first line\n\nsecond  line   with   gaps",
++			expected: "first line\n\nsecond line with gaps",
++		},
++		{
++			name:     "strips bidi override (prompt injection vector)",
++			input:    "safe\u202etext",
++			expected: "safetext",
++		},
++		{
++			name:     "strips ZWSP and BOM",
++			input:    "a\u200bb\ufeffc",
++			expected: "abc",
++		},
++		{
++			name:     "preserves ZWJ in family emoji sequence",
++			input:    "hi \U0001F468\u200D\U0001F469\u200D\U0001F467 bye",
++			expected: "hi \U0001F468\u200D\U0001F469\u200D\U0001F467 bye",
++		},
++		{
++			name:     "preserves ZWJ and VS16 in rainbow flag",
++			input:    "\U0001F3F3\uFE0F\u200D\U0001F308",
++			expected: "\U0001F3F3\uFE0F\u200D\U0001F308",
++		},
++		{
++			name:     "preserves ZWNJ in Persian text",
++			input:    "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
++			expected: "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
++		},
++		{
++			name:     "strips DEL and C0 controls; tabs collapse to space, newlines kept",
++			input:    "ok\x01\x7fmessage\twith\ntabs",
++			expected: "okmessage with\ntabs",
++		},
++		{
++			name: "twelve Slack-style links in one message (regression for placeholder bug)",
++			input: "see <https://a.example/1|one> and <https://b.example/2|two> and <https://c.example/3|three> " +
++				"and <https://d.example/4|four> and <https://e.example/5|five> and <https://f.example/6|six> " +
++				"and <https://g.example/7|seven> and <https://h.example/8|eight> and <https://i.example/9|nine> " +
++				"and <https://j.example/10|ten> and <https://k.example/11|eleven> and <https://l.example/12|twelve>",
++			expected: "see https://a.example/1 - one, and https://b.example/2 - two, and https://c.example/3 - three, " +
++				"and https://d.example/4 - four, and https://e.example/5 - five, and https://f.example/6 - six, " +
++				"and https://g.example/7 - seven, and https://h.example/8 - eight, and https://i.example/9 - nine, " +
++				"and https://j.example/10 - ten, and https://k.example/11 - eleven, and https://l.example/12 - twelve",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			result := ProcessText(tt.input)
++			if result != tt.expected {
++				t.Errorf("ProcessText(%q)\n  got:  %q\n  want: %q", tt.input, result, tt.expected)
++			}
++		})
++	}
++}
+diff --git a/pkg/text/text_processor.go b/pkg/text/text_processor.go
+index 26bcd9b..3b9b8dd 100644
+--- a/pkg/text/text_processor.go
++++ b/pkg/text/text_processor.go
+@@ -92,9 +92,11 @@ func Workspace(rawURL string) (string, error) {
+ }
+ 
+ func ProcessText(s string) string {
+-	s = filterSpecialChars(s)
++	s = normalizeLinks(s)
++	s = stripUnsafeRunes(s)
++	s = collapseInlineSpaces(s)
+ 
+-	return s
++	return strings.TrimSpace(s)
+ }
+ 
+ func HumanizeCertificates(certs []*x509.Certificate) string {
+@@ -110,28 +112,14 @@ func HumanizeCertificates(certs []*x509.Certificate) string {
+ 	return strings.Join(descriptions, ", ")
+ }
+ 
+-func filterSpecialChars(text string) string {
+-	replaceWithCommaCheck := func(match []string, isLast bool) string {
+-		var url, linkText string
+-
+-		if len(match) == 3 && strings.Contains(match[0], "|") {
+-			url = match[1]
+-			linkText = match[2]
+-		} else if len(match) == 3 {
+-			linkText = match[1]
+-			url = match[2]
+-		}
+-
+-		replacement := url + " - " + linkText
+-
+-		if !isLast {
+-			replacement += ","
+-		}
+-
+-		return replacement
+-	}
++var (
++	slackLinkRegex    = regexp.MustCompile(`<(https?://[^>|]+)\|([^>]+)>`)
++	markdownLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^)]+)\)`)
++	htmlLinkRegex     = regexp.MustCompile(`<a\s+href=["']([^"']+)["'][^>]*>([^<]+)</a>`)
++	inlineSpaceRegex  = regexp.MustCompile(`[ \t]+`)
++)
+ 
+-	// Helper function to check if this is the last link/element
++func normalizeLinks(text string) string {
+ 	isLastInText := func(original string, currentText string) bool {
+ 		linkPos := strings.LastIndex(currentText, original)
+ 		if linkPos == -1 {
+@@ -141,60 +129,64 @@ func filterSpecialChars(text string) string {
+ 		return afterLink == ""
+ 	}
+ 
+-	// Handle Slack-style links: <URL|Description>
+-	slackLinkRegex := regexp.MustCompile(`<(https?://[^>|]+)\|([^>]+)>`)
+-	slackMatches := slackLinkRegex.FindAllStringSubmatch(text, -1)
+-	for _, match := range slackMatches {
+-		original := match[0]
+-		isLast := isLastInText(original, text)
+-		replacement := replaceWithCommaCheck(match, isLast)
+-		text = strings.Replace(text, original, replacement, 1)
++	render := func(url, linkText string, isLast bool) string {
++		out := url + " - " + linkText
++		if !isLast {
++			out += ","
++		}
++		return out
+ 	}
+ 
+-	// Handle markdown links: [Description](URL)
+-	markdownLinkRegex := regexp.MustCompile(`\[([^\]]+)\]\((https?://[^)]+)\)`)
+-	markdownMatches := markdownLinkRegex.FindAllStringSubmatch(text, -1)
+-	for _, match := range markdownMatches {
++	for _, match := range slackLinkRegex.FindAllStringSubmatch(text, -1) {
+ 		original := match[0]
+-		isLast := isLastInText(original, text)
+-		replacement := replaceWithCommaCheck(match, isLast)
+-		text = strings.Replace(text, original, replacement, 1)
++		text = strings.Replace(text, original, render(match[1], match[2], isLastInText(original, text)), 1)
+ 	}
+ 
+-	htmlLinkRegex := regexp.MustCompile(`<a\s+href=["']([^"']+)["'][^>]*>([^<]+)</a>`)
+-	htmlMatches := htmlLinkRegex.FindAllStringSubmatch(text, -1)
+-	for _, match := range htmlMatches {
++	for _, match := range markdownLinkRegex.FindAllStringSubmatch(text, -1) {
+ 		original := match[0]
+-		isLast := isLastInText(original, text)
+-		url := match[1]
+-		linkText := match[2]
+-		replacement := url + " - " + linkText
+-		if !isLast {
+-			replacement += ","
+-		}
+-		text = strings.Replace(text, original, replacement, 1)
++		text = strings.Replace(text, original, render(match[2], match[1], isLastInText(original, text)), 1)
+ 	}
+ 
+-	urlRegex := regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
+-	urls := urlRegex.FindAllString(text, -1)
+-
+-	protected := text
+-	for i, url := range urls {
+-		placeholder := "___URL_PLACEHOLDER_" + string(rune(48+i)) + "___"
+-		protected = strings.Replace(protected, url, placeholder, 1)
++	for _, match := range htmlLinkRegex.FindAllStringSubmatch(text, -1) {
++		original := match[0]
++		text = strings.Replace(text, original, render(match[1], match[2], isLastInText(original, text)), 1)
+ 	}
+ 
+-	cleanRegex := regexp.MustCompile(`[^0-9\p{L}\p{M}\s\.\,\-_:/\?=&%]`)
+-	cleaned := cleanRegex.ReplaceAllString(protected, "")
++	return text
++}
+ 
+-	// Restore the URLs
+-	for i, url := range urls {
+-		placeholder := "___URL_PLACEHOLDER_" + string(rune(48+i)) + "___"
+-		cleaned = strings.Replace(cleaned, placeholder, url, 1)
++// stripUnsafeRunes removes runes that are display-corrupting or carry no
++// semantic content: C0/C1 controls (except \t \n \r), DEL, BOM, ZWSP,
++// LRM/RLM, bidi overrides, and bidi isolates. Bidi overrides are a known
++// prompt-injection vector in chat corpora. U+200C (ZWNJ) and U+200D (ZWJ)
++// are preserved: they are required for Persian and Arabic letter joining
++// and for emoji ZWJ sequences such as family and flag emoji.
++func stripUnsafeRunes(s string) string {
++	var b strings.Builder
++	b.Grow(len(s))
++	for _, r := range s {
++		switch {
++		case r == '\t' || r == '\n' || r == '\r':
++			b.WriteRune(r)
++		case r < 0x20 || r == 0x7F:
++			continue
++		case r >= 0x80 && r <= 0x9F:
++			continue
++		case r == 0xFEFF:
++			continue
++		case r == 0x200B, r == 0x200E, r == 0x200F: // ZWSP, LRM, RLM; U+200C ZWNJ and U+200D ZWJ preserved
++			continue
++		case r >= 0x202A && r <= 0x202E:
++			continue
++		case r >= 0x2066 && r <= 0x2069:
++			continue
++		default:
++			b.WriteRune(r)
++		}
+ 	}
++	return b.String()
++}
+ 
+-	spaceRegex := regexp.MustCompile(`\s+`)
+-	cleaned = spaceRegex.ReplaceAllString(cleaned, " ")
+-
+-	return strings.TrimSpace(cleaned)
++func collapseInlineSpaces(s string) string {
++	return inlineSpaceRegex.ReplaceAllString(s, " ")
+ }
+diff --git a/pkg/text/text_processor_test.go b/pkg/text/text_processor_test.go
+index 771f326..6d4759f 100644
+--- a/pkg/text/text_processor_test.go
++++ b/pkg/text/text_processor_test.go
+@@ -153,7 +153,7 @@ func TestFilterSpecialCharsWithCommas(t *testing.T) {
+ 
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+-			result := filterSpecialChars(tt.input)
++			result := ProcessText(tt.input)
+ 			if result != tt.expected {
+ 				t.Errorf("filterSpecialChars() = %q, expected %q", result, tt.expected)
+ 			}
