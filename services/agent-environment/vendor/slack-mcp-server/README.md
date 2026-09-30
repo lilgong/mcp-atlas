@@ -8,7 +8,7 @@ fixture imports lose names such as `Steve Shins` even though Slack still
 returns the profile value.
 
 The runtime keeps the official version and public tool schemas intact, with two
-targeted compatibility patches.
+targeted compatibility patches, plus the upstream text-preservation fix.
 
 `realname-fallback.patch` resolves an empty real name in this order:
 
@@ -25,5 +25,18 @@ message epoch and range filters are correct. Full dates become a one-day range;
 month/year values become a full-month range.
 
 The runtime Docker build checks out the immutable upstream 1.1.23 commit,
-applies both patches, runs their focused upstream-style unit tests, and replaces
+applies all three patches, runs their focused upstream-style unit tests, and replaces
 only the npm package's platform binary.
+
+`text-preservation.patch` backports the `ProcessText` pipeline from upstream
+v1.3.0 (a079b3cd4d5836d791c942a9fc107987e7865b37). Normal punctuation, quotes,
+currency/math/unit symbols, Markdown, Slack mentions, Unicode emoji, ZWJ and
+ZWNJ are preserved. Slack/Markdown/HTML links retain the upstream rendering;
+inline spaces and tabs collapse, while internal newlines remain intact.
+C0/C1 controls (except tab/newline/carriage return), DEL, BOM, ZWSP and bidi
+control characters are removed according to upstream behavior.
+
+This patch keeps the v1.1.23 tool schemas, authentication, cache and search
+behavior. Its tests include upstream link/content cases and an official
+GameCube message with a quoted, multiline CSV round trip. Runtime builds run
+the entire `pkg/text` test suite so text regressions fail the build.

@@ -41,6 +41,7 @@ SOURCE_FILES = (
     "src/agent_environment/mcp_server_template.json",
     "vendor/slack-mcp-server/realname-fallback.patch",
     "vendor/slack-mcp-server/imported-date-filter.patch",
+    "vendor/slack-mcp-server/text-preservation.patch",
 )
 
 
