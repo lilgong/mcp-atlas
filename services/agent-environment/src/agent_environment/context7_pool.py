@@ -25,8 +25,11 @@ def record_attempt(slot, tool, status):
     root.mkdir(parents=True, exist_ok=True)
     row = json.dumps({"service": "context7", "status": status, "key_slot": slot + 1,
                       "tool": tool, "timestamp": time.time(), "measurement": "mcp_attempt"}) + "\n"
-    fd = os.open(root / "context7-pool.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    # The gateway runs as root in the container; the host-owned enclosing
+    # directory is private, but its usage reader must read this secret-free log.
+    fd = os.open(root / "context7-pool.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
     try:
+        os.fchmod(fd, 0o644)
         os.write(fd, row.encode())
     finally:
         os.close(fd)

@@ -1,6 +1,15 @@
 import asyncio
 import mcp.types
-from agent_environment.context7_pool import Context7Pool
+from agent_environment.context7_pool import Context7Pool, record_attempt
+
+
+def test_usage_log_is_host_readable_and_contains_no_credentials(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv('MCP_USAGE_LOG_DIR', str(tmp_path))
+    record_attempt(0, 'resolve-library-id', 200)
+    path = tmp_path / 'context7-pool.jsonl'
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert json.loads(path.read_text())['service'] == 'context7'
 
 
 def run_async(function):
