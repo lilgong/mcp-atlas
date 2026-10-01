@@ -1,5 +1,7 @@
 import asyncio
 import unittest
+import os
+import tempfile
 from unittest.mock import AsyncMock, patch
 
 import litellm
@@ -31,6 +33,14 @@ class _ProviderError(RuntimeError):
 
 
 class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.settings = patch.object(config, "LLM_API_KEY", "test-key")
+        self.settings.start()
+        self.environment = patch.dict(os.environ, {"LLM_API_KEYS": "", "LLM_MAX_RPM": "0"})
+        self.environment.start()
+        self.addCleanup(self.settings.stop)
+        self.addCleanup(self.environment.stop)
+
     async def _run(self):
         return await create_completion(
             model="bare-model-name",
@@ -178,6 +188,29 @@ class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.source_name, "bare-model-name")
         self.assertEqual(raised.exception.credential_envs, ("LLM_API_KEY",))
+
+    async def test_model_pool_switches_after_quota_and_preserves_request(self):
+        with tempfile.TemporaryDirectory() as root:
+            completion = AsyncMock(side_effect=[_ProviderError(402, "insufficient balance"), _response()])
+            with (patch.dict(os.environ, {"LLM_API_KEYS": '["test-key", "test-key-2"]',
+                                          "LLM_KEY_POOL_DB": root + "/pool.db"}),
+                  patch("mcp_completion.llm.litellm.acompletion", completion),
+                  patch("mcp_completion.llm.write_runtime_event")):
+                result = await self._run()
+            self.assertEqual(result.message.content, "ok")
+            self.assertEqual([call.kwargs["api_key"] for call in completion.await_args_list], ["test-key", "test-key-2"])
+            self.assertEqual(completion.await_args_list[0].kwargs["messages"], completion.await_args_list[1].kwargs["messages"])
+
+    async def test_all_model_keys_exhausted_is_fatal_not_an_infinite_retry(self):
+        with tempfile.TemporaryDirectory() as root:
+            completion = AsyncMock(side_effect=_ProviderError(402, "insufficient balance"))
+            with (patch.dict(os.environ, {"LLM_API_KEYS": '["test-key", "test-key-2"]',
+                                          "LLM_KEY_POOL_DB": root + "/pool.db"}),
+                  patch("mcp_completion.llm.litellm.acompletion", completion),
+                  patch("mcp_completion.llm.write_runtime_event")):
+                with self.assertRaises(FatalAccountError):
+                    await self._run()
+            self.assertEqual(completion.await_count, 2)
 
 
 class OpenAIBaseURLTests(unittest.TestCase):

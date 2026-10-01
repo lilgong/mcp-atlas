@@ -29,6 +29,11 @@ def secret_values(environment: dict[str, str]) -> list[str]:
         value for name, value in environment.items()
         if value and len(value) >= 4 and any(marker in name.upper() for marker in markers)
     }
+    for name in ("CONTEXT7_API_KEYS", "LLM_API_KEYS"):
+        raw = environment.get(name, "")
+        pool = json.loads(raw) if raw.strip().startswith("[") else raw.split(",")
+        if isinstance(pool, list):
+            values.update(k for k in pool if isinstance(k, str) and len(k) >= 4)
     connection = environment.get("MONGODB_CONNECTION_STRING", "")
     if len(connection) >= 4:
         values.add(connection)

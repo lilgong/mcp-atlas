@@ -198,6 +198,15 @@ async def log_handler(message: LogMessage) -> None:
 def create_server_client(
     server_name: str, server_config: dict[str, Any]
 ) -> RouterClient:
+    if server_name == "context7":
+        from .context7_pool import Context7Pool, configured_keys
+        keys = configured_keys(os.getenv("CONTEXT7_API_KEY", ""), os.getenv("CONTEXT7_API_KEYS", ""))
+        if len(keys) > 1:
+            return cast(RouterClient, Context7Pool(server_config, keys, _create_direct_client))
+    return _create_direct_client(server_name, server_config)
+
+
+def _create_direct_client(server_name: str, server_config: dict[str, Any]) -> RouterClient:
     """Create a direct, single-server client without FastMCP's composite proxy."""
     parsed_config = MCPConfig.from_dict(
         {"mcpServers": {server_name: server_config}}

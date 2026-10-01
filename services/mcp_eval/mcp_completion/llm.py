@@ -1,6 +1,7 @@
 """LLM completion functionality using LiteLLM."""
 
 import asyncio
+from .key_pool import choose as choose_key, exhaust as exhaust_key, keys as pool_keys, KeyPoolExhausted
 import json
 import logging
 import re
@@ -284,9 +285,15 @@ async def _create_openai_compatible_completion(
     retried because the upstream generation may still be running.
     """
 
-    for provider_attempt in range(1, config.LLM_MAX_ATTEMPTS + 1):
+    provider_attempt = 0
+    attempted_keys = set()
+    key = None
+    while provider_attempt < config.LLM_MAX_ATTEMPTS:
+        if key is None:
+            key = await asyncio.to_thread(choose_key, config.LLM_BASE_URL, config.LLM_API_KEY, attempted_keys)
+        provider_attempt += 1
         try:
-            delay = await asyncio.to_thread(reserve_delay, config.LLM_BASE_URL, config.LLM_API_KEY)
+            delay = await asyncio.to_thread(reserve_delay, config.LLM_BASE_URL, key)
             if delay:
                 await asyncio.sleep(delay)
             use_streaming = llm_streaming_enabled()
@@ -295,7 +302,7 @@ async def _create_openai_compatible_completion(
                 custom_llm_provider="openai",
                 messages=messages,
                 tools=tools,
-                api_key=config.LLM_API_KEY,
+                api_key=key,
                 api_base=config.LLM_BASE_URL,
                 timeout=config.DEFAULT_TIMEOUT,
                 max_retries=0,
@@ -327,6 +334,14 @@ async def _create_openai_compatible_completion(
 
             status_code = _model_error_status_code(error)
             if status_code in {401, 402, 403} or is_fatal_account_error(error):
+                if len(pool_keys(config.LLM_API_KEY)) > 1:
+                    attempted_keys.add(key)
+                    await asyncio.to_thread(exhaust_key, config.LLM_BASE_URL, config.LLM_API_KEY, key)
+                    key = None
+                    provider_attempt -= 1  # Key failover is not a transient retry.
+                    write_runtime_event("model_calls", "model_key_disabled", task_id=task_id,
+                                        call_id=call_id, reason="account_unavailable", remaining=len(pool_keys(config.LLM_API_KEY))-len(attempted_keys))
+                    continue
                 raise
             should_retry = (
                 status_code in RETRYABLE_MODEL_STATUS_CODES
@@ -464,7 +479,7 @@ async def create_completion(
                 error_type=type(error).__name__,
                 error=str(error),
             )
-            if is_fatal_account_error(error):
+            if isinstance(error, KeyPoolExhausted) or is_fatal_account_error(error):
                 raise FatalAccountError(
                     "model credential is invalid or out of funds",
                     source_kind="model",
