@@ -1,6 +1,6 @@
 import asyncio
 import mcp.types
-from agent_environment.context7_pool import Context7Pool, record_attempt
+from agent_environment.credential_pool import Context7Pool, record_attempt
 
 
 def test_usage_log_is_host_readable_and_contains_no_credentials(tmp_path, monkeypatch):

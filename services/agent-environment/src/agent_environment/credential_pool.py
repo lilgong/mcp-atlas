@@ -1,4 +1,4 @@
-"""Read-only Context7 calls rotate credentials without changing public tools."""
+"""Read-only MCP credential pools; public tool schemas and arguments stay fixed."""
 import asyncio
 import json
 import re
@@ -15,19 +15,25 @@ EXHAUSTED = re.compile(
     r"monthly.{0,50}(?:quota|limit)|(?:quota|credit|balance).{0,50}(?:exceeded|exhausted|insufficient)|"
     r"insufficient.{0,20}(?:quota|credit|balance)|invalid.{0,15}(?:key|token)|unauthorized|"
     r"余额不足|额度.{0,10}(?:不足|耗尽|用尽)", re.I)
+TWELVEDATA_EXHAUSTED = re.compile(
+    r"twelvedata_daily_credits_exhausted|run out of api credits for the day|"
+    r"daily.{0,40}(?:credit|quota|limit).{0,40}(?:reached|exceeded|exhausted)|"
+    r"(?:invalid|incorrect|expired).{0,15}(?:api.?key|token)|"
+    r"api.?key.{0,15}(?:invalid|incorrect|expired)|unauthorized|"
+    r"TwelveData upstream HTTP 401", re.I)
 
 
-def record_attempt(slot, tool, status):
+def record_attempt(slot, tool, status, service="context7"):
     directory = os.getenv("MCP_USAGE_LOG_DIR")
     if not directory:
         return
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
-    row = json.dumps({"service": "context7", "status": status, "key_slot": slot + 1,
+    row = json.dumps({"service": service, "status": status, "key_slot": slot + 1,
                       "tool": tool, "timestamp": time.time(), "measurement": "mcp_attempt"}) + "\n"
     # The gateway runs as root in the container; the host-owned enclosing
     # directory is private, but its usage reader must read this secret-free log.
-    fd = os.open(root / "context7-pool.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    fd = os.open(root / f"{service}-pool.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
     try:
         os.fchmod(fd, 0o644)
         os.write(fd, row.encode())
@@ -35,20 +41,30 @@ def record_attempt(slot, tool, status):
         os.close(fd)
 
 
-def configured_keys(primary, raw):
+def configured_keys(primary, raw, variable="CONTEXT7_API_KEYS"):
     extra = json.loads(raw) if raw.strip().startswith("[") else raw.split(",")
     if not isinstance(extra, list) or any(not isinstance(k, str) for k in extra):
-        raise ValueError("CONTEXT7_API_KEYS must contain strings")
+        raise ValueError(f"{variable} must contain strings")
     return list(dict.fromkeys(k.strip() for k in [primary, *extra] if k.strip()))
 
 
-class Context7Pool:
+class CredentialPool:
+    server_name = "context7"
+    key_env = "CONTEXT7_API_KEY"
+    exhausted_pattern = EXHAUSTED
+    all_exhausted_message = "Context7: monthly quota reached or invalid API key for all configured credentials."
+
+    def _bind_key(self, config, key):
+        config.setdefault("env", {})[self.key_env] = key
+
     def __init__(self, server_config, keys, factory):
+        if not keys:
+            raise ValueError("MCP credential pool requires at least one key")
         self.clients = []
         for key in keys:
             config = deepcopy(server_config)
-            config.setdefault("env", {})["CONTEXT7_API_KEY"] = key
-            self.clients.append(factory("context7", config))
+            self._bind_key(config, key)
+            self.clients.append(factory(self.server_name, config))
         self.locks = [asyncio.Lock() for _ in keys]
         self.entered = set()
         self.disabled = set()
@@ -81,29 +97,50 @@ class Context7Pool:
                     self.cursor = slot + 1
             if slot is None:
                 return mcp.types.CallToolResult(isError=True, content=[mcp.types.TextContent(
-                    type="text", text="Context7: monthly quota reached or invalid API key for all configured credentials.")])
+                    type="text", text=self.all_exhausted_message)])
             attempted.add(slot)
             try:
                 client = await self._client(slot)
                 result = await client.call_tool_mcp(name, arguments, timeout=timeout)
                 text = " ".join(getattr(c, "text", "") for c in result.content)
                 error_surface = result.isError or (len(text) < 1500 and re.match(
-                    r"\s*(?:error|monthly quota|you (?:have )?(?:reached|exceeded)|invalid|unauthorized|额度|余额)", text, re.I))
-                exhausted = bool(error_surface and EXHAUSTED.search(text))
+                    r"\s*(?:error|monthly quota|you (?:have )?(?:reached|exceeded|run out)|invalid|unauthorized|twelvedata|额度|余额)", text, re.I))
+                exhausted = bool(error_surface and self.exhausted_pattern.search(text))
             except Exception as error:
-                record_attempt(slot, name, 429 if EXHAUSTED.search(str(error)) else 500)
-                if not EXHAUSTED.search(str(error)):
+                record_attempt(slot, name, 429 if self.exhausted_pattern.search(str(error)) else 500, self.server_name)
+                if not self.exhausted_pattern.search(str(error)):
                     raise
                 exhausted = True
             else:
-                record_attempt(slot, name, 429 if exhausted else 500 if result.isError else 200)
+                record_attempt(slot, name, 429 if exhausted else 500 if result.isError else 200, self.server_name)
             if not exhausted:
-                logger.info("context7 key_slot=%d status=ok", slot + 1)
+                logger.info("%s key_slot=%d status=ok", self.server_name, slot + 1)
                 return result
             async with self.selection_lock:
                 self.disabled.add(slot)
-            logger.warning("context7 key_slot=%d status=disabled retry_next=true", slot + 1)
+            logger.warning("%s key_slot=%d status=disabled retry_next=true", self.server_name, slot + 1)
 
     async def close(self):
         await asyncio.gather(*(self.clients[i].close() for i in self.entered), return_exceptions=True)
         self.entered.clear()
+
+
+class Context7Pool(CredentialPool):
+    pass
+
+
+class TwelveDataPool(CredentialPool):
+    server_name = "twelvedata"
+    key_env = "TWELVE_DATA_API_KEY"
+    exhausted_pattern = TWELVEDATA_EXHAUSTED
+    all_exhausted_message = "TWELVEDATA_DAILY_CREDITS_EXHAUSTED: all configured credentials exhausted or invalid."
+
+    def _bind_key(self, config, key):
+        super()._bind_key(config, key)
+        # The template's -k argument has already been expanded before routing.
+        # Merely replacing env would make every slot use the same original key.
+        args = config.get("args") or []
+        positions = [i for i, value in enumerate(args) if value == "-k"]
+        if len(positions) != 1 or positions[0] + 1 >= len(args):
+            raise ValueError("TwelveData credential pool requires the pinned -k transport binding")
+        args[positions[0] + 1] = key

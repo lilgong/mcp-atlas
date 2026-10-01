@@ -29,7 +29,7 @@ def secret_values(environment: dict[str, str]) -> list[str]:
         value for name, value in environment.items()
         if value and len(value) >= 4 and any(marker in name.upper() for marker in markers)
     }
-    for name in ("CONTEXT7_API_KEYS", "LLM_API_KEYS"):
+    for name in ("CONTEXT7_API_KEYS", "TWELVE_DATA_API_KEYS", "LLM_API_KEYS"):
         raw = environment.get(name, "")
         pool = json.loads(raw) if raw.strip().startswith("[") else raw.split(",")
         if isinstance(pool, list):

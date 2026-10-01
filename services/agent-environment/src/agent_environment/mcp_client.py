@@ -198,11 +198,12 @@ async def log_handler(message: LogMessage) -> None:
 def create_server_client(
     server_name: str, server_config: dict[str, Any]
 ) -> RouterClient:
-    if server_name == "context7":
-        from .context7_pool import Context7Pool, configured_keys
-        keys = configured_keys(os.getenv("CONTEXT7_API_KEY", ""), os.getenv("CONTEXT7_API_KEYS", ""))
+    if server_name in {"context7", "twelvedata"}:
+        from .credential_pool import Context7Pool, TwelveDataPool, configured_keys
+        pool = Context7Pool if server_name == "context7" else TwelveDataPool
+        keys = configured_keys(os.getenv(pool.key_env, ""), os.getenv(pool.key_env + "S", ""), pool.key_env + "S")
         if len(keys) > 1:
-            return cast(RouterClient, Context7Pool(server_config, keys, _create_direct_client))
+            return cast(RouterClient, pool(server_config, keys, _create_direct_client))
     return _create_direct_client(server_name, server_config)
 
 

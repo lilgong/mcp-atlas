@@ -6,6 +6,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from scripts.run_shared_mcp import redact_line, secret_values
 
 
+def test_each_twelvedata_pool_key_is_redacted():
+    secrets = secret_values({"TWELVE_DATA_API_KEYS": '["fake-secret-one", "fake-secret-two"]'})
+    assert redact_line("fake-secret-one fake-secret-two", secrets) == "<redacted> <redacted>"
+
+
 def test_secret_values_include_credentials_but_not_normal_configuration():
     values = secret_values({
         "NOTION_TOKEN": "notion-secret",
