@@ -50,13 +50,18 @@ async def test_nine_keys_rotate_and_keep_public_arguments():
 
 
 @run_async
-async def test_quota_retries_next_and_exhausted_key_is_not_reused():
-    pool, calls = make({0,1})
+async def test_quota_retries_next_and_recovered_keys_are_usable_without_restart():
+    exhausted = {0,1}
+    pool, calls = make(exhausted)
     result = await pool.call_tool_mcp('get-library-docs', {})
     assert not result.isError and calls == [0,1,2]
     for _ in range(10):
         await pool.call_tool_mcp('get-library-docs', {})
-    assert calls.count(0) == 1 and calls.count(1) == 1
+    assert calls.count(0) > 1 and calls.count(1) > 1
+    exhausted.clear()
+    pool.cursor = 0
+    result = await pool.call_tool_mcp('get-library-docs', {})
+    assert not result.isError and calls[-1] == 0
 
 
 @run_async
@@ -65,4 +70,4 @@ async def test_all_exhausted_stops_after_nine_attempts():
     result = await pool.call_tool_mcp('get-library-docs', {})
     assert result.isError and len(calls) == 9
     await pool.call_tool_mcp('get-library-docs', {})
-    assert len(calls) == 9
+    assert len(calls) == 18

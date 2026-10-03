@@ -67,7 +67,6 @@ class CredentialPool:
             self.clients.append(factory(self.server_name, config))
         self.locks = [asyncio.Lock() for _ in keys]
         self.entered = set()
-        self.disabled = set()
         self.cursor = 0
         self.selection_lock = asyncio.Lock()
 
@@ -88,11 +87,15 @@ class CredentialPool:
         return await (await self._client(0)).list_tools()
 
     async def call_tool_mcp(self, name, arguments, timeout=None):
+        # Credential failure belongs to this request, not the lifetime of the
+        # gateway. Daily/monthly quotas can reset while this process stays up.
+        # Try every configured key at most once; only a fresh all-key failure
+        # may produce the account-stop marker.
         attempted = set()
         while True:
             async with self.selection_lock:
                 choices = [(self.cursor + i) % len(self.clients) for i in range(len(self.clients))]
-                slot = next((i for i in choices if i not in self.disabled and i not in attempted), None)
+                slot = next((i for i in choices if i not in attempted), None)
                 if slot is not None:
                     self.cursor = slot + 1
             if slot is None:
@@ -116,9 +119,7 @@ class CredentialPool:
             if not exhausted:
                 logger.info("%s key_slot=%d status=ok", self.server_name, slot + 1)
                 return result
-            async with self.selection_lock:
-                self.disabled.add(slot)
-            logger.warning("%s key_slot=%d status=disabled retry_next=true", self.server_name, slot + 1)
+            logger.warning("%s key_slot=%d status=unavailable_for_request retry_next=true", self.server_name, slot + 1)
 
     async def close(self):
         await asyncio.gather(*(self.clients[i].close() for i in self.entered), return_exceptions=True)

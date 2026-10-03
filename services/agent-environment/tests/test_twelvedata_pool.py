@@ -53,14 +53,20 @@ def test_four_keys_rotate_under_concurrency_and_bind_real_transport_arguments():
     RuntimeError("TWELVEDATA_DAILY_CREDITS_EXHAUSTED"),
     "TwelveData upstream HTTP 401: Invalid API key",
 ])
-def test_confirmed_exhaustion_or_auth_retries_same_request_then_skips_slot(failure):
+def test_confirmed_exhaustion_or_auth_retries_same_request_without_permanent_ban(failure):
     async def run():
-        pool, calls, _ = make({0: failure})
+        responses = {0: failure}
+        pool, calls, _ = make(responses)
         result = await pool.call_tool_mcp("GetTimeSeries", {"symbol": "MSFT", "interval": "1day"})
         assert not result.isError
         assert [c[0] for c in calls] == [0, 1] and calls[0][1:] == calls[1][1:]
         for _ in range(8): await pool.call_tool_mcp("GetPrice", {})
-        assert [c[0] for c in calls].count(0) == 1
+        assert [c[0] for c in calls].count(0) > 1
+        # A quota reset/key recovery needs no restart or manual state reset.
+        responses[0] = "price=123"
+        pool.cursor = 0
+        result = await pool.call_tool_mcp("GetPrice", {})
+        assert not result.isError and calls[-1][0] == 0
         await pool.close()
     asyncio.run(run())
 
@@ -73,7 +79,7 @@ def test_minute_limits_or_endpoint_entitlements_do_not_disable_credentials(failu
     async def run():
         pool, calls, _ = make({0: failure})
         result = await pool.call_tool_mcp("GetPrice", {})
-        assert result.isError and len(calls) == 1 and not pool.disabled
+        assert result.isError and len(calls) == 1
         await pool.close()
     asyncio.run(run())
 
@@ -86,12 +92,12 @@ def test_all_four_exhausted_emit_stable_account_stop_marker_and_no_extra_attempt
         assert result.isError and "TWELVEDATA_DAILY_CREDITS_EXHAUSTED" in result.content[0].text
         assert len(calls) == 4
         await pool.call_tool_mcp("GetPrice", {})
-        assert len(calls) == 4
+        assert len(calls) == 8
         await pool.close()
     asyncio.run(run())
     path = tmp_path / "twelvedata-pool.jsonl"
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    assert [r["key_slot"] for r in rows] == [1, 2, 3, 4]
+    assert [r["key_slot"] for r in rows] == [1, 2, 3, 4] * 2
     assert all(r["service"] == "twelvedata" and r["status"] == 429 for r in rows)
     assert "fake-key" not in path.read_text() and path.stat().st_mode & 0o777 == 0o644
 
@@ -99,3 +105,19 @@ def test_all_four_exhausted_emit_stable_account_stop_marker_and_no_extra_attempt
 def test_missing_key_argument_fails_closed():
     with pytest.raises(ValueError, match="transport binding"):
         TwelveDataPool({"args": []}, ["fake"], lambda *_: None)
+
+
+def test_concurrent_all_key_failures_are_bounded_per_request_then_recover():
+    async def run():
+        responses = {i: "TWELVEDATA_DAILY_CREDITS_EXHAUSTED" for i in range(4)}
+        pool, calls, _ = make(responses)
+        results = await asyncio.gather(*(pool.call_tool_mcp("GetPrice", {"request": i})
+                                        for i in range(8)))
+        assert all(r.isError for r in results) and len(calls) == 32
+        for i in range(8):
+            assert sorted(slot for slot, _, args in calls if args["request"] == i) == list(range(4))
+        responses.clear()
+        result = await pool.call_tool_mcp("GetPrice", {"request": "after-reset"})
+        assert not result.isError and len(calls) == 33
+        await pool.close()
+    asyncio.run(run())
