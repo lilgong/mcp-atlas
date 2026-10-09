@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import uuid
 import threading
 import time
 import urllib.error
@@ -51,8 +52,11 @@ PORT = int(os.getenv("PUBMED_RELAY_PORT") or "3985")
 MIN_INTERVAL = float(os.getenv("PUBMED_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
 UPSTREAM_TIMEOUT = float(os.getenv("PUBMED_RELAY_UPSTREAM_TIMEOUT_SECONDS") or "45")
 MAX_RESPONSE_BYTES = int(os.getenv("PUBMED_RELAY_MAX_RESPONSE_BYTES") or str(64 * 1024 * 1024))
-LOG_PATH = Path(os.getenv("PUBMED_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
-WIKIPEDIA_LANES = 4
+LOG_PATH = Path(os.getenv("MCP_RELAY_USAGE_LOG") or os.getenv("PUBMED_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
+WIKIPEDIA_LANES = 1
+LIMITS_PATH = LOG_PATH.parent / "limits.json"
+RELAY_USER_AGENT = os.getenv("MCP_RELAY_USER_AGENT") or "MCPAtlasRelay/1.0 (https://github.com/lilgong/mcp-atlas)"
+CONFIG_LOCK = threading.Lock()
 
 
 class RelayAccountError(RuntimeError):
@@ -130,27 +134,26 @@ class Controller:
         self.session_id = _new_ipwo_session_id()
         self.rotation_count = 0
         self.min_interval = MIN_INTERVAL if min_interval is None else min_interval
+        self.max_concurrency: int | None = None
+        self.active = 0
+        self.slots = threading.Condition(self.lock)
 
     def current_account_error(self) -> str | None:
         with self.lock:
             return self.account_error
 
     def _wait_for_slot(self) -> None:
-        """Pace request starts without serializing their network wait time."""
-        while True:
-            with self.lock:
+        """Pace HTTP starts and wake pending requests after live policy edits."""
+        with self.slots:
+            while True:
                 if self.account_error:
                     raise RelayAccountError(self.account_error)
                 now = time.monotonic()
-                delay = max(
-                    self.last_started + self.min_interval - now,
-                    self.blocked_until - now,
-                    0.0,
-                )
+                delay = max(self.last_started + self.min_interval - now, self.blocked_until - now, 0.0)
                 if delay <= 0:
                     self.last_started = now
                     return
-            time.sleep(delay)
+                self.slots.wait(timeout=delay)
 
     def _set_cooldown(self, seconds: float) -> None:
         with self.lock:
@@ -179,7 +182,22 @@ class Controller:
         with self.lock:
             return self.rotation_count
 
-    def fetch(
+    def fetch(self, url: str, allow_redirects: bool, **kwargs):
+        admitted = time.monotonic()
+        with self.slots:
+            while self.max_concurrency is not None and self.active >= self.max_concurrency:
+                self.slots.wait()
+            self.active += 1
+        try:
+            concurrency_wait_ms = (time.monotonic() - admitted) * 1000
+            result = self._fetch(url, allow_redirects, **kwargs)
+            return (*result[:-1], result[-1] + concurrency_wait_ms)
+        finally:
+            with self.slots:
+                self.active -= 1
+                self.slots.notify_all()
+
+    def _fetch(
         self, url: str, allow_redirects: bool, *, method: str = "GET",
         body: bytes | None = None, headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], bytes, str, int, float]:
@@ -196,7 +214,15 @@ class Controller:
                 }
                 if method != "GET" or body is not None or headers:
                     request_options.update(method=method, body=body, headers=headers)
-                final = _fetch_once(url, allow_redirects, **request_options)
+                request_id = uuid.uuid4().hex
+                parsed_target = urllib.parse.urlsplit(url)
+                _append_log({"event": "http_started", "request_id": request_id, "host": parsed_target.hostname, "path": parsed_target.path, "attempt": attempt + 1})
+                try:
+                    final = _fetch_once(url, allow_redirects, **request_options)
+                except Exception as exc:
+                    _append_log({"event": "http_finished", "request_id": request_id, "category": "network_error", "error_type": type(exc).__name__})
+                    raise
+                _append_log({"event": "http_finished", "request_id": request_id, "status": final[0], "category": "rate_limit" if final[0] == 429 else "upstream_error" if final[0] >= 400 else "success", "retry_after_seconds": _retry_after(final[1])})
             except RelayAccountError as exc:
                 self._latch_account_error(str(exc))
             except RelayUpstreamError:
@@ -280,18 +306,73 @@ class ControllerPool:
             raise RelayAccountError(error) from None
 
 
-CONTROLLERS = {
-    "ncbi": Controller(),
-    # Wikipedia Action API calls are stateless. Four independently paced,
-    # sticky exits prevent Atlas evaluation and P2 from building a multi-minute
-    # queue behind one residential IP. NCBI remains single-exit because one
-    # PubMed workflow benefits from a stable identity.
-    "wikipedia": ControllerPool(WIKIPEDIA_LANES),
-    "arxiv": Controller(3.0),
-    "osm-nominatim": Controller(1.0),
-    "osm-overpass": Controller(1.0),
-    "osm-routing": Controller(1.0),
+DEFAULT_LIMITS = {
+    "ncbi": {"minIntervalMs": 334},
+    "ncbi-key": {"minIntervalMs": 100},
+    "ncbi-pmc": {"minIntervalMs": 1000},
+    "wikipedia": {"minIntervalMs": 300, "concurrency": 1},
+    "arxiv": {"minIntervalMs": 3000, "concurrency": 1},
+    "osm-nominatim": {"minIntervalMs": 1000, "concurrency": 1},
+    "osm-overpass": {"minIntervalMs": 0},
+    "osm-routing": {"minIntervalMs": 1000},
 }
+CONTROLLERS = {name: Controller(0) for name in DEFAULT_LIMITS}
+
+
+def apply_limits(values: dict, *, persist: bool = True) -> None:
+    if not isinstance(values, dict) or set(values) != set(DEFAULT_LIMITS):
+        raise ValueError("Supply limits for every supported upstream category")
+    normalized = {}
+    for name, item in values.items():
+        if not isinstance(item, dict) or set(item) - {"minIntervalMs", "concurrency"}:
+            raise ValueError("Invalid upstream limit")
+        interval = item.get("minIntervalMs", 0)
+        concurrency = item.get("concurrency")
+        if type(interval) is not int or not 0 <= interval <= 600000:
+            raise ValueError("Invalid request interval")
+        if concurrency is not None and (type(concurrency) is not int or not 1 <= concurrency <= 1000):
+            raise ValueError("Invalid request concurrency")
+        normalized[name] = {"minIntervalMs": interval}
+        if concurrency is not None:
+            normalized[name]["concurrency"] = concurrency
+    with CONFIG_LOCK:
+        if persist:
+            LIMITS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary = LIMITS_PATH.with_suffix(".tmp")
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(normalized, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, LIMITS_PATH)
+            directory_fd = os.open(LIMITS_PATH.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        for name, item in normalized.items():
+            controller = CONTROLLERS[name]
+            with controller.slots:
+                controller.min_interval = item["minIntervalMs"] / 1000
+                controller.max_concurrency = item.get("concurrency")
+                controller.slots.notify_all()
+
+
+def current_limits() -> dict:
+    with CONFIG_LOCK:
+        return {name: {"minIntervalMs": round(controller.min_interval * 1000), **({"concurrency": controller.max_concurrency} if controller.max_concurrency is not None else {})} for name, controller in CONTROLLERS.items()}
+
+
+def controller_for_url(url: str, group: str) -> Controller:
+    if group != "ncbi":
+        return CONTROLLERS[group]
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname != "eutils.ncbi.nlm.nih.gov":
+        return CONTROLLERS["ncbi-pmc"]
+    has_key = bool(urllib.parse.parse_qs(parsed.query).get("api_key"))
+    return CONTROLLERS["ncbi-key" if has_key else "ncbi"]
+
+
+apply_limits(json.loads(LIMITS_PATH.read_text()) if LIMITS_PATH.exists() else DEFAULT_LIMITS, persist=False)
 
 
 def _retry_after(headers: dict[str, str]) -> float:
@@ -359,7 +440,7 @@ def _fetch_once(
         key: value for key, value in (headers or {}).items()
         if key.lower() in {"accept", "content-type", "range", "user-agent"}
     }
-    forwarded.setdefault("User-Agent", "mcp_atlas_egress_relay/1.0")
+    forwarded.setdefault("User-Agent", RELAY_USER_AGENT)
     request = urllib.request.Request(
         url, data=body or None, headers=forwarded, method=method,
     )
@@ -397,8 +478,19 @@ def _append_log(event: dict[str, Any]) -> None:
     event["timestamp"] = datetime.now(timezone.utc).isoformat()
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-    with open(LOG_PATH, "a", encoding="utf-8") as handle:
-        handle.write(line)
+    fd = os.open(LOG_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        encoded = line.encode("utf-8")
+        if os.write(fd, encoded) != len(encoded):
+            raise OSError("Incomplete relay audit write")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory_fd = os.open(LOG_PATH.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -422,7 +514,16 @@ class Handler(BaseHTTPRequestHandler):
             # no live connection on which a second error response could work.
             return False
 
+    def _authorized(self) -> bool:
+        return bool(TOKEN) and hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {TOKEN}")
+
     def do_GET(self) -> None:
+        if self.path == "/v1/limits":
+            if not self._authorized():
+                self._json(401, {"error": "unauthorized"})
+                return
+            self._json(200, {"limits": current_limits()})
+            return
         if self.path == "/health":
             account_error = next(
                 (
@@ -455,6 +556,26 @@ class Handler(BaseHTTPRequestHandler):
                 })
         else:
             self._json(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:
+        if self.path != "/v1/limits":
+            self._json(404, {"error": "not found"})
+            return
+        if not self._authorized():
+            self._json(401, {"error": "unauthorized"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 65536:
+                raise ValueError("invalid request size")
+            payload = json.loads(self.rfile.read(length))
+            apply_limits(payload.get("limits"))
+            _append_log({"event": "limits_updated", "limits": current_limits()})
+            self._json(200, {"limits": current_limits()})
+        except (ValueError, TypeError) as exc:
+            self._json(400, {"error": str(exc)})
+        except OSError:
+            self._json(500, {"error": "Unable to persist relay limits"})
 
     def do_POST(self) -> None:
         started = time.monotonic()
@@ -493,9 +614,7 @@ class Handler(BaseHTTPRequestHandler):
             if query:
                 separator = "&" if urllib.parse.urlsplit(url).query else "?"
                 url = f"{url}{separator}{query}"
-            status, headers, body, final_url, attempts, queued_ms = CONTROLLERS[
-                target_group
-            ].fetch(
+            status, headers, body, final_url, attempts, queued_ms = controller_for_url(url, target_group).fetch(
                 url, bool(payload.get("allow_redirects", False)),
                 method=method,
                 body=request_body,
@@ -513,6 +632,10 @@ class Handler(BaseHTTPRequestHandler):
                 "client": self.client_address[0],
                 "host": parsed.hostname,
                 "path": parsed.path,
+                "event": "http_completed",
+                "category": "rate_limit" if status == 429 else "upstream_error" if status >= 400 else "success",
+                "upstream_group": target_group,
+                "retry_after_seconds": _retry_after(headers),
                 "status": status,
                 "response_bytes": len(body),
                 "egress_backend": "ipwo",
@@ -537,7 +660,8 @@ class Handler(BaseHTTPRequestHandler):
                 "error": str(exc),
             })
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            self._json(400, {"error": str(exc)})
+            _append_log({"event": "request_rejected", "status": 400, "error_type": type(exc).__name__})
+            self._json(400, {"error": "Invalid relay request"})
         except Exception as exc:
             # URL-opening exceptions can include the authenticated proxy URL.
             # Return only the exception class so credentials never reach logs or
