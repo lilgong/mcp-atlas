@@ -26,10 +26,10 @@ PMC_BASE = "https://www.ncbi.nlm.nih.gov/pmc/articles"
 REQUEST_INTERVAL_SECONDS = 0.4
 REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_RESULTS = 100
-RELAY_URL = (os.getenv("MCP_RELAY_URL", os.getenv("PUBMED_RELAY_URL")) or "").strip().rstrip("/")
-RELAY_TOKEN = (os.getenv("MCP_RELAY_TOKEN", os.getenv("PUBMED_RELAY_TOKEN")) or "").strip()
+RELAY_URL = (os.getenv("MCP_RELAY_URL") or "").strip().rstrip("/")
+RELAY_TOKEN = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
 RELAY_TIMEOUT_SECONDS = float(
-    os.getenv("MCP_RELAY_TIMEOUT_SECONDS", os.getenv("PUBMED_RELAY_TIMEOUT_SECONDS")) or "90"
+    os.getenv("MCP_RELAY_TIMEOUT_SECONDS") or "90"
 )
 
 

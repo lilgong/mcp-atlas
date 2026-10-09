@@ -239,8 +239,8 @@ def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
 
 def _relay_handles_server(server: str) -> bool:
     return server in {"arxiv", "osm-mcp-server", "pubmed", "wikipedia"} and bool(
-        (os.getenv("PUBMED_RELAY_URL") or "").strip()
-        and (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+        (os.getenv("MCP_RELAY_URL") or "").strip()
+        and (os.getenv("MCP_RELAY_TOKEN") or "").strip()
     )
 
 

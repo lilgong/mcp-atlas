@@ -142,15 +142,9 @@ def test_httpx_relay_resolves_only_relative_urls(monkeypatch):
     assert client.build_count == 1
 
 
-def test_generic_relay_names_override_legacy_and_empty_values_disable(monkeypatch):
+def test_generic_relay_names_and_empty_values_disable(monkeypatch):
     import importlib
     with monkeypatch.context() as env:
-        env.setenv("PUBMED_RELAY_URL", "http://legacy-relay")
-        env.setenv("PUBMED_RELAY_TOKEN", "legacy-token")
-        env.delenv("MCP_RELAY_URL", raising=False)
-        env.delenv("MCP_RELAY_TOKEN", raising=False)
-        importlib.reload(relay_client)
-        assert relay_client.RELAY_URL == "http://legacy-relay"
         env.setenv("MCP_RELAY_URL", "http://generic-relay")
         env.setenv("MCP_RELAY_TOKEN", "generic-token")
         importlib.reload(relay_client)

@@ -15,7 +15,7 @@ from pathlib import Path
 logger = create_logger(__name__)
 
 CLIENT_INIT_TIMEOUT_SECONDS = 45.0
-AUTO_DETECT_OPTIONAL_VARS = frozenset({"MCP_TOOL_BASE_URL"})
+AUTO_DETECT_OPTIONAL_VARS = frozenset({"MCP_TOOL_BASE_URL", "NCBI_API_KEY", "NCBI_EMAIL", "NCBI_TOOL", "OSM_OVERPASS_URLS"})
 
 
 def configured_client_init_timeout_seconds() -> float:

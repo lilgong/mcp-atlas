@@ -41,18 +41,18 @@ ALLOWED_TARGETS = {
         "/routed-foot/route/v1/",
     ),
 }
-TOKEN = (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+TOKEN = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
 IPWO_PROXY_HOST = (os.getenv("IPWO_PROXY_HOST") or "").strip()
 IPWO_PROXY_PORT = (os.getenv("IPWO_PROXY_PORT") or "").strip()
 IPWO_PROXY_USERNAME = (os.getenv("IPWO_PROXY_USERNAME") or "").strip()
 IPWO_PROXY_PASSWORD = (os.getenv("IPWO_PROXY_PASSWORD") or "").strip()
 IPWO_PROXY_COUNTRY = (os.getenv("IPWO_PROXY_COUNTRY") or "").strip().upper()
-BIND = (os.getenv("PUBMED_RELAY_BIND") or "127.0.0.1").strip()
-PORT = int(os.getenv("PUBMED_RELAY_PORT") or "3985")
-MIN_INTERVAL = float(os.getenv("PUBMED_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
-UPSTREAM_TIMEOUT = float(os.getenv("PUBMED_RELAY_UPSTREAM_TIMEOUT_SECONDS") or "45")
-MAX_RESPONSE_BYTES = int(os.getenv("PUBMED_RELAY_MAX_RESPONSE_BYTES") or str(64 * 1024 * 1024))
-LOG_PATH = Path(os.getenv("MCP_RELAY_USAGE_LOG") or os.getenv("PUBMED_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
+BIND = (os.getenv("MCP_RELAY_BIND") or "127.0.0.1").strip()
+PORT = int(os.getenv("MCP_RELAY_PORT") or "3985")
+MIN_INTERVAL = float(os.getenv("MCP_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
+UPSTREAM_TIMEOUT = float(os.getenv("MCP_RELAY_UPSTREAM_TIMEOUT_SECONDS") or "45")
+MAX_RESPONSE_BYTES = int(os.getenv("MCP_RELAY_MAX_RESPONSE_BYTES") or str(64 * 1024 * 1024))
+LOG_PATH = Path(os.getenv("MCP_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
 WIKIPEDIA_LANES = 1
 LIMITS_PATH = LOG_PATH.parent / "limits.json"
 RELAY_USER_AGENT = os.getenv("MCP_RELAY_USER_AGENT") or "MCPAtlasRelay/1.0 (https://github.com/lilgong/mcp-atlas)"
@@ -678,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     if not TOKEN:
-        raise SystemExit("PUBMED_RELAY_TOKEN must be set")
+        raise SystemExit("MCP_RELAY_TOKEN must be set")
     try:
         _validate_ipwo_config()
     except ValueError as exc:

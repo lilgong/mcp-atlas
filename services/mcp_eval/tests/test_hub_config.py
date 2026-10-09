@@ -68,9 +68,9 @@ class HubConfigTests(unittest.IsolatedAsyncioTestCase):
             "MCP_RELAY_URL": "http://relay:9123",
             "MCP_RELAY_TOKEN": "relay-synthetic",
             "MCP_RELAY_TIMEOUT_SECONDS": "90",
-            "PUBMED_RELAY_URL": "http://relay:9123",
-            "PUBMED_RELAY_TOKEN": "relay-synthetic",
-            "PUBMED_RELAY_TIMEOUT_SECONDS": "90",
+            "MCP_RELAY_URL": "http://relay:9123",
+            "MCP_RELAY_TOKEN": "relay-synthetic",
+            "MCP_RELAY_TIMEOUT_SECONDS": "90",
         }
         client = AsyncMock()
         client.get.return_value = httpx.Response(
@@ -114,14 +114,14 @@ class PerTaskRelayTests(unittest.IsolatedAsyncioTestCase):
         from mcp_completion.hub_config import managed_task_relays
 
         on = {
-            "PUBMED_RELAY_URL": "http://relay",
-            "PUBMED_RELAY_TOKEN": "fixture",
-            "PUBMED_RELAY_TIMEOUT_SECONDS": "90",
+            "MCP_RELAY_URL": "http://relay",
+            "MCP_RELAY_TOKEN": "fixture",
+            "MCP_RELAY_TIMEOUT_SECONDS": "90",
         }
         off = {
-            "PUBMED_RELAY_URL": "",
-            "PUBMED_RELAY_TOKEN": "",
-            "PUBMED_RELAY_TIMEOUT_SECONDS": "90",
+            "MCP_RELAY_URL": "",
+            "MCP_RELAY_TOKEN": "",
+            "MCP_RELAY_TIMEOUT_SECONDS": "90",
         }
         with patch(
             "mcp_completion.hub_config.managed_task_relay",
@@ -145,19 +145,19 @@ class PerTaskRelayTests(unittest.IsolatedAsyncioTestCase):
             sandbox.task_workspace = Path(directory)
             values = sandbox._configure_network_relays(
                 {
-                    "arxiv": {"PUBMED_RELAY_URL": "", "PUBMED_RELAY_TOKEN": ""},
+                    "arxiv": {"MCP_RELAY_URL": "", "MCP_RELAY_TOKEN": ""},
                     "pubmed": {
-                        "PUBMED_RELAY_URL": "http://relay",
-                        "PUBMED_RELAY_TOKEN": "private-fixture-token",
+                        "MCP_RELAY_URL": "http://relay",
+                        "MCP_RELAY_TOKEN": "private-fixture-token",
                     },
                 }
             )
             template = json.loads(sandbox.network_template.read_text())
             a = template["mcpServers"]["arxiv"]["env"]
             b = template["mcpServers"]["pubmed"]["env"]
-            self.assertNotEqual(a["PUBMED_RELAY_URL"], b["PUBMED_RELAY_URL"])
-            self.assertEqual(values[a["PUBMED_RELAY_URL"][2:-1]], "")
-            self.assertEqual(values[b["PUBMED_RELAY_URL"][2:-1]], "http://relay")
+            self.assertNotEqual(a["MCP_RELAY_URL"], b["MCP_RELAY_URL"])
+            self.assertEqual(values[a["MCP_RELAY_URL"][2:-1]], "")
+            self.assertEqual(values[b["MCP_RELAY_URL"][2:-1]], "http://relay")
             self.assertNotIn(
                 "private-fixture-token", sandbox.network_template.read_text()
             )

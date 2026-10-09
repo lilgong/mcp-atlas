@@ -14,9 +14,9 @@ from typing import Any
 import httpx
 
 
-RELAY_URL = (os.getenv("MCP_RELAY_URL", os.getenv("PUBMED_RELAY_URL")) or "").strip().rstrip("/")
-RELAY_TOKEN = (os.getenv("MCP_RELAY_TOKEN", os.getenv("PUBMED_RELAY_TOKEN")) or "").strip()
-RELAY_TIMEOUT = float(os.getenv("MCP_RELAY_TIMEOUT_SECONDS", os.getenv("PUBMED_RELAY_TIMEOUT_SECONDS")) or "90")
+RELAY_URL = (os.getenv("MCP_RELAY_URL") or "").strip().rstrip("/")
+RELAY_TOKEN = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
+RELAY_TIMEOUT = float(os.getenv("MCP_RELAY_TIMEOUT_SECONDS") or "90")
 
 
 @dataclass(frozen=True)

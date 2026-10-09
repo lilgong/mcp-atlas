@@ -366,15 +366,16 @@ class TaskSandbox:
                         "NCBI_API_KEY",
                         "NCBI_EMAIL",
                         "NCBI_TOOL",
-                        "PUBMED_RELAY_URL",
-                        "PUBMED_RELAY_TOKEN",
-                        "PUBMED_RELAY_TIMEOUT_SECONDS",
+                        "OSM_OVERPASS_URLS",
+                        "MCP_RELAY_URL",
+                        "MCP_RELAY_TOKEN",
+                        "MCP_RELAY_TIMEOUT_SECONDS",
                     )
                     if (value := (os.getenv(name) or "").strip())
                 }
                 managed_relay = await managed_task_relays(self.network_servers)
                 if managed_relay is not None:
-                    for name in ("PUBMED_RELAY_URL", "PUBMED_RELAY_TOKEN", "PUBMED_RELAY_TIMEOUT_SECONDS"):
+                    for name in ("MCP_RELAY_URL", "MCP_RELAY_TOKEN", "MCP_RELAY_TIMEOUT_SECONDS"):
                         network_env.pop(name, None)
                     network_env.update(self._configure_network_relays(managed_relay))
                 await self._start_agent_container(

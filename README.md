@@ -472,10 +472,10 @@ MONGODB_CONNECTION_STRING=
 relay 主机的 `.env` 配置：
 
 ```dotenv
-PUBMED_RELAY_TOKEN=<足够长的随机token>
-PUBMED_RELAY_BIND=0.0.0.0
-PUBMED_RELAY_PORT=3985
-PUBMED_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
+MCP_RELAY_TOKEN=<足够长的随机token>
+MCP_RELAY_BIND=0.0.0.0
+MCP_RELAY_PORT=3985
+MCP_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
 IPWO_PROXY_HOST=<IPWO proxy host>
 IPWO_PROXY_PORT=<IPWO proxy port>
 IPWO_PROXY_USERNAME=<IPWO username>
@@ -492,9 +492,9 @@ make run-egress-relay
 每台评测机器只配置：
 
 ```dotenv
-PUBMED_RELAY_URL=http://<relay内网IP>:3985
-PUBMED_RELAY_TOKEN=<与relay主机相同的token>
-PUBMED_RELAY_TIMEOUT_SECONDS=90
+MCP_RELAY_URL=http://<relay内网IP>:3985
+MCP_RELAY_TOKEN=<与relay主机相同的token>
+MCP_RELAY_TIMEOUT_SECONDS=90
 ```
 
 不要把 IPWO 凭证复制到评测机器，也不需要在评测机器启动 relay。data-syn 若同时
@@ -509,7 +509,7 @@ relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议�
 粘性出口，为无状态的 Wikipedia Action API 使用四条独立粘性出口 lane。arXiv 全局
 每 3 秒最多启动一次请求，OSM 各类上游全局每秒最多启动一次。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
 住宅代理的 `sid`。请求记录
-写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
+写入 `MCP_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
 集中 relay 会跨机器统一 PubMed、Wikipedia、arXiv 和 OSM 的每次真实 HTTP 请求节奏。

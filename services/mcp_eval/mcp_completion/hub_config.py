@@ -79,12 +79,6 @@ async def managed_task_relay(servers: list[str]) -> dict[str, str] | None:
                     "MCP_RELAY_URL",
                     "MCP_RELAY_TOKEN",
                     "MCP_RELAY_TIMEOUT_SECONDS",
-                    "WIKIPEDIA_RELAY_URL",
-                    "WIKIPEDIA_RELAY_TOKEN",
-                    "WIKIPEDIA_RELAY_TIMEOUT_SECONDS",
-                    "PUBMED_RELAY_URL",
-                    "PUBMED_RELAY_TOKEN",
-                    "PUBMED_RELAY_TIMEOUT_SECONDS",
                 }
                 if (
                     body.get("success") is not True

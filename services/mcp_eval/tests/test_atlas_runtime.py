@@ -302,8 +302,8 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "/agent-environment/src/agent_environment/arxiv_mcp_compat.py",
                     ],
                     "env": {
-                        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-                        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+                        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+                        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
                     },
                 },
                 template_config["mcpServers"]["arxiv"],
