@@ -140,3 +140,24 @@ def test_httpx_relay_resolves_only_relative_urls(monkeypatch):
     monkeypatch.setattr(arxiv_compat, "enabled", lambda: False)
     assert not arxiv_compat._uses_httpx_relay(client, "GET", "/not-resolved")
     assert client.build_count == 1
+
+
+def test_generic_relay_names_override_legacy_and_empty_values_disable(monkeypatch):
+    import importlib
+    with monkeypatch.context() as env:
+        env.setenv("PUBMED_RELAY_URL", "http://legacy-relay")
+        env.setenv("PUBMED_RELAY_TOKEN", "legacy-token")
+        env.delenv("MCP_RELAY_URL", raising=False)
+        env.delenv("MCP_RELAY_TOKEN", raising=False)
+        importlib.reload(relay_client)
+        assert relay_client.RELAY_URL == "http://legacy-relay"
+        env.setenv("MCP_RELAY_URL", "http://generic-relay")
+        env.setenv("MCP_RELAY_TOKEN", "generic-token")
+        importlib.reload(relay_client)
+        assert relay_client.RELAY_URL == "http://generic-relay"
+        assert relay_client.RELAY_TOKEN == "generic-token"
+        env.setenv("MCP_RELAY_URL", "")
+        env.setenv("MCP_RELAY_TOKEN", "")
+        importlib.reload(relay_client)
+        assert not relay_client.enabled()
+    importlib.reload(relay_client)

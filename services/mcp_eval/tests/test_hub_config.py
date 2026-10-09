@@ -65,6 +65,9 @@ class HubConfigTests(unittest.IsolatedAsyncioTestCase):
             "MCPHUB_TOKEN": "operator-synthetic",
         }
         values = {
+            "MCP_RELAY_URL": "http://relay:9123",
+            "MCP_RELAY_TOKEN": "relay-synthetic",
+            "MCP_RELAY_TIMEOUT_SECONDS": "90",
             "PUBMED_RELAY_URL": "http://relay:9123",
             "PUBMED_RELAY_TOKEN": "relay-synthetic",
             "PUBMED_RELAY_TIMEOUT_SECONDS": "90",
