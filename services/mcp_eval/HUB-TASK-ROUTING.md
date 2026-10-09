@@ -12,7 +12,8 @@ For full Hub routing, configure task targets in Hub, and set these values in the
 ```dotenv
 HOST=0.0.0.0
 MCP_TOOL_TRANSPORT=hub
-MCPHUB_URL=http://127.0.0.1:3002
+MCPHUB_URL=http://host.docker.internal:3002
+MCPHUB_CONFIG_URL=http://127.0.0.1:3002
 MCPHUB_TOKEN=<existing system all-access operator Bearer Key>
 MCPHUB_TASK_ROUTING=true
 MCPHUB_TARGET=atlas/official
@@ -30,6 +31,10 @@ point at the shared agent environment on 2984. For multiple completion workers,
 each process needs its own reachable callback URL. No extra port or Docker socket
 is added to Hub. The current bridge registry is process-local: do not load-balance
 its callbacks across unrelated completion workers.
+
+`MCPHUB_CONFIG_URL` is the Hub root reachable from the completion host. If omitted,
+the adapter uses `MCPHUB_URL`, which must then be reachable from that process too.
+The shared container uses `MCPHUB_URL`; these addresses may differ.
 
 `MCPHUB_SERVERS` remains the list of selected **shared** MCPs in the shared agent
 environment. Do not put task-isolated MCPs in that list. Set `MCPHUB_TARGET` there
