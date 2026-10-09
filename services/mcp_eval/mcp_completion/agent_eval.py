@@ -327,8 +327,6 @@ async def handle_run_mcp_eval(
     task_id = body.task_id or f"request-{uuid.uuid4().hex[:14]}"
     mcp_client = IsolatedMCPClient(
         task_id=task_id,
-        model=body.model,
-        run_id=body.evaluation_id,
         shared_url=config.MCP_SERVER_URL,
         enabled_tools=body.enabled_tools,
     )

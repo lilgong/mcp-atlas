@@ -18,7 +18,6 @@ MCPHUB_TOKEN=<existing system all-access operator Bearer Key>
 MCPHUB_TASK_ROUTING=true
 MCPHUB_TARGET=atlas/official
 MCPHUB_TASK_CALLBACK_URL=http://host.docker.internal:3500
-MCPHUB_BENCHMARK=MCP-Atlas
 MCPHUB_MANAGE_RATE_LIMITS=true
 MCPHUB_MANAGE_RELAY=true
 ```
@@ -38,11 +37,9 @@ The shared container uses `MCPHUB_URL`; these addresses may differ.
 
 `MCPHUB_SERVERS` remains the list of selected **shared** MCPs in the shared agent
 environment. Do not put task-isolated MCPs in that list. Set `MCPHUB_TARGET` there
-as well for shared MCPs configured with targets, and `MCPHUB_BENCHMARK` for reporting.
-You can also set `MCPHUB_MODEL` and `MCPHUB_RUN_ID` in that shared process; these are
-process-wide labels. Task connections automatically record the actual request's
-model and evaluation ID. Shared MCP calls do not yet attach a different model label
-per concurrent completion request.
+as well for shared MCPs configured with targets.
+Call statistics aggregate all completed calls per MCP over the selected month or
+UTC date range. No model, benchmark or evaluation-run labels are required.
 
 To use a different workspace/fixture, select its exact configured path, for example
 `MCPHUB_TARGET=atlas/syn-1`. Never mix workspace credentials in a rotating pool.

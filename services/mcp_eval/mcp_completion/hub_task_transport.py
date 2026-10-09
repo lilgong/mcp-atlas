@@ -120,8 +120,6 @@ class HubTaskClient(MCPClient):
         server_for_tool,
         *,
         task_id: str,
-        model: str | None = None,
-        run_id: str | None = None,
     ):
         self.upstream = upstream
         self.tools = frozenset(tools)
@@ -139,13 +137,6 @@ class HubTaskClient(MCPClient):
         if not token or any(c.isspace() for c in token):
             raise RuntimeError("Task registration requires a Hub operator Bearer Key")
         self.headers = {"Authorization": f"Bearer {token}"}
-        for name, value in {
-            "benchmark": os.getenv("MCPHUB_BENCHMARK", ""),
-            "model": model,
-            "run-id": run_id,
-        }.items():
-            if value:
-                self.headers[f"X-MCPHub-{name}"] = str(value)[:160]
         # Unique even when the same benchmark task is run concurrently by models.
         self.task_id = (
             re.sub(r"[^A-Za-z0-9_.:-]", "_", task_id)[:80] + ":" + uuid.uuid4().hex

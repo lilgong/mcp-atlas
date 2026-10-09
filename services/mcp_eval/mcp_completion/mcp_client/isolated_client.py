@@ -252,13 +252,9 @@ class IsolatedMCPClient(MCPClient):
         *,
         task_id: str,
         shared_url: str,
-        model: str | None = None,
-        run_id: str | None = None,
         enabled_tools: Optional[List[str]],
     ):
         self.task_id = task_id
-        self.model = model
-        self.run_id = run_id
         self._hub_clients = []
         self.shared_url = shared_url.rstrip("/")
         self.requested_tools = list(dict.fromkeys(enabled_tools or []))
@@ -385,7 +381,7 @@ class IsolatedMCPClient(MCPClient):
         if task_hub_enabled():
             for route, tools in ((ToolRoute.TASK_LOCAL, local_tools), (ToolRoute.TASK_NETWORK, network_tools)):
                 if tools:
-                    hub = HubTaskClient(self._clients[route], tools, server_for_tool, task_id=self.task_id, model=self.model, run_id=self.run_id)
+                    hub = HubTaskClient(self._clients[route], tools, server_for_tool, task_id=self.task_id)
                     await hub.start()
                     self._hub_clients.append(hub)
                     self._clients[route] = hub

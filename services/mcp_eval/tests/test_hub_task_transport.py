@@ -107,15 +107,16 @@ class HubTaskTransportTests(unittest.IsolatedAsyncioTestCase):
                         ["filesystem_read_file"],
                         lambda name: "filesystem",
                         task_id="same-benchmark-task",
-                        model="model-a",
-                        run_id="run-a",
                     )
                     await client.start()
                     clients.append(client)
                 self.assertNotEqual(
                     registrations[0][0]["taskId"], registrations[1][0]["taskId"]
                 )
-                self.assertEqual(registrations[0][1]["x-mcphub-model"], "model-a")
+                self.assertFalse(
+                    {"x-mcphub-model", "x-mcphub-benchmark", "x-mcphub-run-id"}
+                    & registrations[0][1].keys()
+                )
                 self.assertEqual(registrations[0][0]["target"], "atlas/official")
                 for value, client in zip(["task-a", "task-b"], clients):
                     self.assertEqual(

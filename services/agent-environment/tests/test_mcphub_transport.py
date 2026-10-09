@@ -151,11 +151,9 @@ def test_bad_hub_prefix_is_rejected():
     asyncio.run(run())
 
 
-def test_target_and_reporting_labels_are_generic_and_direct_mode_ignores_them():
+def test_target_routes_without_reporting_labels_and_direct_mode_ignores_it():
     environment = {**ENV, "MCPHUB_TARGET": "another-benchmark/suite-2", "MCPHUB_BENCHMARK": "another-benchmark", "MCPHUB_MODEL": "test-model", "MCPHUB_RUN_ID": "run-2"}
     headers = hub_server_configs(environment, {"brave-search"})["brave-search"]["headers"]
     assert headers["X-MCPHub-target"] == "another-benchmark/suite-2"
-    assert headers["X-MCPHub-model"] == "test-model"
-    assert headers["X-MCPHub-benchmark"] == "another-benchmark"
-    assert headers["X-MCPHub-run-id"] == "run-2"
+    assert set(headers) == {"Authorization", "X-MCPHub-target"}
     assert hub_server_configs({**environment, "MCP_TOOL_TRANSPORT": "direct"}, {"brave-search"}) == {}

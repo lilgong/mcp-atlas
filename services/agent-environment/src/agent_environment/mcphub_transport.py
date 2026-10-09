@@ -56,10 +56,9 @@ def hub_server_configs(
         )
     separator = environment.get("MCPHUB_NAME_SEPARATOR") or "-"
     headers = {"Authorization": f"Bearer {token}"}
-    for label in ("TARGET", "MODEL", "BENCHMARK", "RUN_ID"):
-        value = (environment.get(f"MCPHUB_{label}") or "").strip()
-        if value:
-            headers[f"X-MCPHub-{label.lower().replace('_', '-')}"] = value[:160]
+    target = (environment.get("MCPHUB_TARGET") or "").strip()
+    if target:
+        headers["X-MCPHub-target"] = target[:160]
     return {
         name: {
             "url": f"{base}/mcp/{quote(name, safe='')}",
