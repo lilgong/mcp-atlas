@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..hub_config import hub_manages_policy
+
 import asyncio
 import contextlib
 import json
@@ -206,7 +208,7 @@ def _is_rate_limited_tool_result(result: Any) -> bool:
 @contextlib.asynccontextmanager
 async def _server_call_slot(tool_name: str):
     server = server_for_tool(tool_name) or ""
-    if _relay_handles_server(server):
+    if hub_manages_policy(server) or _relay_handles_server(server):
         # The relay schedules individual upstream HTTP requests. Serializing the
         # entire multi-request MCP call here causes head-of-line blocking across
         # evaluation and synthesis processes without adding upstream safety.
@@ -230,7 +232,7 @@ async def _server_call_slot(tool_name: str):
 
 
 def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
-    if _relay_handles_server(server_for_tool(tool_name) or ""):
+    if hub_manages_policy(server_for_tool(tool_name) or "") or _relay_handles_server(server_for_tool(tool_name) or ""):
         return None
     return _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
 

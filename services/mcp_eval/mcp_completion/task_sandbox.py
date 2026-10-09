@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .hub_config import managed_task_relay
+
 import asyncio
 import hashlib
 import json
@@ -369,6 +371,11 @@ class TaskSandbox:
                     )
                     if (value := (os.getenv(name) or "").strip())
                 }
+                managed_relay = await managed_task_relay(self.network_servers)
+                if managed_relay is not None:
+                    for name in ("PUBMED_RELAY_URL", "PUBMED_RELAY_TOKEN", "PUBMED_RELAY_TIMEOUT_SECONDS"):
+                        network_env.pop(name, None)
+                    network_env.update(managed_relay)
                 await self._start_agent_container(
                     kind="network",
                     enabled_servers=self.network_servers,
