@@ -55,11 +55,16 @@ def hub_server_configs(
             "MCPHUB_SERVERS must select known shared servers, excluding task-isolated servers"
         )
     separator = environment.get("MCPHUB_NAME_SEPARATOR") or "-"
+    headers = {"Authorization": f"Bearer {token}"}
+    for label in ("TARGET", "MODEL", "BENCHMARK", "RUN_ID"):
+        value = (environment.get(f"MCPHUB_{label}") or "").strip()
+        if value:
+            headers[f"X-MCPHub-{label.lower().replace('_', '-')}"] = value[:160]
     return {
         name: {
             "url": f"{base}/mcp/{quote(name, safe='')}",
             "transport": "streamable-http",
-            "headers": {"Authorization": f"Bearer {token}"},
+            "headers": dict(headers),
             "atlas_hub_prefix": f"{name}{separator}",
         }
         for name in names

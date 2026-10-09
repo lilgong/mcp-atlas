@@ -112,6 +112,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from .hub_task_transport import router as task_bridge_router
+app.include_router(task_bridge_router)
+
 # Every HTTP attempt has its own ID.  This lets the benchmark client cancel the
 # exact evaluation it timed out on and wait for its model call and sandbox to
 # finish tearing down before it retries.

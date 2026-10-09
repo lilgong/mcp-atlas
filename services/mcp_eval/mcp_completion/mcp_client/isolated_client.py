@@ -252,15 +252,20 @@ class IsolatedMCPClient(MCPClient):
         *,
         task_id: str,
         shared_url: str,
+        model: str | None = None,
+        run_id: str | None = None,
         enabled_tools: Optional[List[str]],
     ):
         self.task_id = task_id
+        self.model = model
+        self.run_id = run_id
+        self._hub_clients = []
         self.shared_url = shared_url.rstrip("/")
         self.requested_tools = list(dict.fromkeys(enabled_tools or []))
         self.allowed_tools: set[str] = set()
         self.blocked_tools: set[str] = set()
         self._route_tools: dict[ToolRoute, list[str]] = {}
-        self._clients: dict[ToolRoute, SandboxMCPClient] = {}
+        self._clients: dict[ToolRoute, MCPClient] = {}
         self._sandbox: Optional[TaskSandbox] = None
         self._semaphore_acquired = False
         self._entered = False
@@ -293,6 +298,9 @@ class IsolatedMCPClient(MCPClient):
             os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
             not in {"0", "false", "no"}
         )
+        from ..hub_task_transport import task_hub_enabled
+        if task_hub_enabled() and not isolation_enabled:
+            raise RuntimeError("Hub task routing requires task isolation")
         try:
             if isolation_enabled:
                 await self._start_isolated_clients()
@@ -373,6 +381,15 @@ class IsolatedMCPClient(MCPClient):
                     enabled_tools=network_tools,
                 )
 
+        from ..hub_task_transport import HubTaskClient, task_hub_enabled
+        if task_hub_enabled():
+            for route, tools in ((ToolRoute.TASK_LOCAL, local_tools), (ToolRoute.TASK_NETWORK, network_tools)):
+                if tools:
+                    hub = HubTaskClient(self._clients[route], tools, server_for_tool, task_id=self.task_id, model=self.model, run_id=self.run_id)
+                    await hub.start()
+                    self._hub_clients.append(hub)
+                    self._clients[route] = hub
+
         if cloud_tools:
             self._clients[ToolRoute.CLOUD] = SandboxMCPClient(
                 self.shared_url,
@@ -392,6 +409,8 @@ class IsolatedMCPClient(MCPClient):
 
     async def close(self) -> None:
         try:
+            await asyncio.gather(*(hub.close() for hub in self._hub_clients), return_exceptions=True)
+            self._hub_clients.clear()
             if self._sandbox is not None:
                 await self._sandbox.close()
                 self._sandbox = None

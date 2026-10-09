@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .hub_config import managed_task_relay
+from .hub_config import managed_task_relays
 
 import asyncio
 import hashlib
@@ -246,6 +246,7 @@ class TaskSandbox:
     containers: list[ManagedContainer] = field(default_factory=list)
     owned_names: set[str] = field(default_factory=set)
     _started_at: float = field(default_factory=time.monotonic)
+    network_template: Optional[Path] = None
     _closed: bool = False
 
     def _claim_name(self, name: str) -> str:
@@ -371,11 +372,11 @@ class TaskSandbox:
                     )
                     if (value := (os.getenv(name) or "").strip())
                 }
-                managed_relay = await managed_task_relay(self.network_servers)
+                managed_relay = await managed_task_relays(self.network_servers)
                 if managed_relay is not None:
                     for name in ("PUBMED_RELAY_URL", "PUBMED_RELAY_TOKEN", "PUBMED_RELAY_TIMEOUT_SECONDS"):
                         network_env.pop(name, None)
-                    network_env.update(managed_relay)
+                    network_env.update(self._configure_network_relays(managed_relay))
                 await self._start_agent_container(
                     kind="network",
                     enabled_servers=self.network_servers,
@@ -620,6 +621,29 @@ class TaskSandbox:
             f"Mongo fixture container {name} was not ready: {last_error}"
         )
 
+    def _configure_network_relays(
+        self, snapshots: dict[str, dict[str, str]]
+    ) -> dict[str, str]:
+        if self.task_workspace is None:
+            raise TaskSandboxError("Task workspace missing")
+        repository_root = Path(__file__).resolve().parents[3]
+        source = (
+            repository_root
+            / "services/agent-environment/src/agent_environment/mcp_server_template.json"
+        )
+        template = json.loads(source.read_text())
+        environment = {}
+        for index, (server, values) in enumerate(sorted(snapshots.items())):
+            target = template["mcpServers"][server].setdefault("env", {})
+            for name, value in values.items():
+                variable = f"MCPHUB_TASK_RELAY_{index}_{name}"
+                target[name] = "${" + variable + "}"
+                environment[variable] = value
+        self.network_template = self.task_workspace / "network-template.json"
+        self.network_template.write_text(json.dumps(template))
+        self.network_template.chmod(0o600)
+        return environment
+
     async def _start_agent_container(
         self,
         *,
@@ -696,6 +720,11 @@ class TaskSandbox:
         # networking but must not publish a host port.
         if kind == "network":
             command.extend(["--publish", "127.0.0.1::1984"])
+            if self.network_template:
+                command.extend([
+                    "--volume",
+                    f"{self.network_template}:/agent-environment/src/agent_environment/mcp_server_template.json:ro",
+                ])
         for key, value in sorted(extra_env.items()):
             command.extend(["--env", f"{key}={value}"])
         command.append(self.agent_image)

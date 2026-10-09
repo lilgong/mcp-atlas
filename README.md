@@ -1650,36 +1650,29 @@ docker run --rm hello-world
 
 ## 可选 MCPHub 模式
 
-默认继续直连。改造版共享 MCP 可以打包到 Hub 并通过原有自定义导入、凭证和
-Bearer Keys 管理。Hub 的 `Dockerfile.atlas` 和 `scripts/export_atlas_servers.py`
-复用本项目固定版本及兼容代码，不需要额外的一步 HTTP 转发。
+默认继续直连，`MCP_TOOL_TRANSPORT=direct` 不访问 Hub。共享 MCP 可以复用本项目
+固定版本及兼容代码，打包到 Hub 后通过原有服务注册、凭证和 Bearer Keys 管理。
 
 ```dotenv
 MCP_TOOL_TRANSPORT=hub
 MCPHUB_URL=http://host.docker.internal:3002
-MCPHUB_TOKEN=<Hub 原有 Bearer Key>
+MCPHUB_TOKEN=<Hub 原有 operator Bearer Key>
 MCPHUB_SERVERS=brave-search,exa,lara-translate,weather-data,oxylabs
 MCPHUB_NAME_SEPARATOR=-
 MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:mcphub
 MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub
 ```
 
-先 `make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:mcphub`，再打包
-Hub，最后重启共享 runtime。仅选中的共享 MCP 改成连接 Hub，其余继续原来的直连。
-自动模式不要求 Atlas 持有选中服务的真实 key；显式 `ENABLED_SERVERS` 仍限制启用范围。
-隔离工具不能选择到 Hub；工具名称、任务隔离和允许列表保持原行为。
-直连仍保留原有限速。Hub 模式默认 `MCPHUB_MANAGE_RATE_LIMITS=true`，
-只有选中服务把外层工具调度交给 Hub；旧 Hub 未配置按服务策略时设为 false。
-切回 `MCP_TOOL_TRANSPORT=direct` 使用 Atlas 原有凭证。
+只有 `MCPHUB_SERVERS` 中选定的共享服务转到 Hub，其余保持直连。工具名称保持一致。
+限速直接在 Hub 的每个 MCP 注册项设置，共享给所有调用方；有兼容 wrapper 的服务
+可以选择走 relay，实际 HTTP 请求限速由 relay 控制。Hub 的调用日志、调用统计和
+运行日志使用同一个网页入口；持久化日志不写入完整 key 或请求内容。
 
-改造版一步 MCP 的实际请求日志改为持久的 started/finished 事件；请求开始日志不能
-写入并 fsync 时拒绝发送。只数 started 计算请求次数。凭证以哈希标识，不保存 key
-或请求正文。Hub 镜像启用 stderr 输出，事件可在原有 Logs 页面查看；工具调用次数
-使用数据库模式下的原有 Activity 页面。上游请求和工具活动尚未通过任务 ID 关联。
+10 个任务隔离 MCP 也可经由 Hub：另外开启 `MCPHUB_TASK_ROUTING=true`，在 Hub
+配置临时任务目标，并明确设置 `MCPHUB_TARGET` 和可从 Hub 到达的
+`MCPHUB_TASK_CALLBACK_URL`。隔离容器仍由 Atlas 启动和销毁，Hub 不接 Docker socket。
+目标路径缺失、未知、无权限或者租约过期时直接失败，不回退到其他工作区。
+共享服务列表仍不包含任务型 MCP，两类客户端的接入方式不同。
 
-Hub 新增的 Atlas 集成页面管理按 MCP 排队、并发、429 冷却及已有 relay 的连接。
-`MCPHUB_MANAGE_RELAY=true` 可让新建 Arxiv/PubMed 隔离任务从 Hub 读取 relay 快照，
-另设 `MCPHUB_CONFIG_URL=http://127.0.0.1:3002` 供测评宿主机访问，并用已有 operator
-Bearer Key 授权相应服务。默认 false，直连模式不访问 Hub；已启动任务不热替换连接。
-住宅代理凭据与 HTTP 请求级间隔继续由原 relay 管理。Hub 内可导入全部 26 个共享
-服务，10 个任务隔离服务保持 Atlas 托管，main 分支及实际 `.env` 不因该功能改变。
+完整配置与适用范围参见 [Hub 任务路由](services/mcp_eval/HUB-TASK-ROUTING.md)。
+main 分支和实际 `.env` 保持原模式；新功能在 mcphub 分支，可通过环境变量选择启用。
