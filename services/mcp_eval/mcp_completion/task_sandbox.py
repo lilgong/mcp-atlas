@@ -7,6 +7,7 @@ from .hub_config import managed_task_relays, managed_task_startup_env
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ import httpx
 from dotenv import load_dotenv
 
 from .docker_http import docker_post_json
-from .runtime_log import container_log_path, write_runtime_event
+from .runtime_log import container_log_path, jsonable, write_runtime_event
 from .task_data import (
     TaskDataFixture,
     prepare_task_workspace,
@@ -1073,11 +1074,21 @@ class TaskSandbox:
 async def _reap_one(*args: str) -> bool:
     """Run one reaping command, absorbing timeouts and docker errors."""
     try:
-        _, _, code = await _run(*args, timeout=_teardown_timeout(), check=False)
-        return code == 0
+        stdout, stderr, code = await _run(*args, timeout=_teardown_timeout(), check=False)
+        if code == 0:
+            return True
+        detail = stderr or stdout or f"exit {code}"
+        write_runtime_event(
+            "sandbox", "orphan_reap_step_failed",
+            command=" ".join(args[:3]), target=args[-1],
+            exit_code=code, error=detail,
+        )
+        logging.warning("Sandbox cleanup failed for %s: %s", args[-1], jsonable(detail))
+        return False
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        logging.warning("Sandbox cleanup failed for %s: %s", args[-1], jsonable(str(exc)))
         write_runtime_event(
             "sandbox",
             "orphan_reap_step_failed",
@@ -1112,12 +1123,15 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
         else:
             command = ("docker", "network", "ls", "-q", *label_filters)
         try:
-            stdout, _, _ = await _run(
+            stdout, stderr, code = await _run(
                 *command, timeout=_teardown_timeout(), check=False
             )
+            if code != 0:
+                raise TaskSandboxError(stderr or stdout or f"exit {code}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logging.warning("Sandbox cleanup could not list %s: %s", kind, jsonable(str(exc)))
             write_runtime_event(
                 "sandbox",
                 "orphan_reap_listing_failed",
