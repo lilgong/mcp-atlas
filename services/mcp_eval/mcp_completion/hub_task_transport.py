@@ -136,7 +136,10 @@ class HubTaskClient(MCPClient):
         token = os.getenv("MCPHUB_TOKEN", "").strip()
         if not token or any(c.isspace() for c in token):
             raise RuntimeError("Task registration requires a Hub operator Bearer Key")
-        self.headers = {"Authorization": f"Bearer {token}"}
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "X-MCPHub-Target": self.target,
+        }
         # Unique even when the same benchmark task is run concurrently by models.
         self.task_id = (
             re.sub(r"[^A-Za-z0-9_.:-]", "_", task_id)[:80] + ":" + uuid.uuid4().hex
@@ -259,7 +262,10 @@ class HubTaskClient(MCPClient):
         data = self.connections[server]
         response = await self.http.post(
             f"{self.root}{data['path']}/{operation}",
-            headers={"Authorization": f"Bearer {data['token']}"},
+            headers={
+                "Authorization": f"Bearer {data['token']}",
+                "X-MCPHub-Target": self.target,
+            },
             json=body,
         )
         if response.status_code != 200:

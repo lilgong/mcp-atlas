@@ -1655,9 +1655,10 @@ docker run --rm hello-world
 
 ```dotenv
 MCP_TOOL_TRANSPORT=hub
-MCPHUB_URL=http://host.docker.internal:3002
-MCPHUB_TOKEN=<Hub 原有 operator Bearer Key>
-MCPHUB_SERVERS=brave-search,exa,lara-translate,weather-data,oxylabs
+MCPHUB_URL=http://127.0.0.1:3002
+MCPHUB_TOKEN=<Hub 中 atlas 用户组的调用 Key>
+MCPHUB_TARGET=atlas/official
+MCPHUB_SERVERS=airtable,alchemy,brave-search,calculator,clinicaltrialsgov-mcp-server,context7,ddg-search,e2b-server,exa,fetch,github,google-maps,google-workspace,lara-translate,met-museum,national-parks,notion,open-library,osm-mcp-server,oxylabs,slack,twelvedata,weather,weather-data,whois,wikipedia
 MCPHUB_NAME_SEPARATOR=-
 MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:mcphub
 MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub
@@ -1675,4 +1676,33 @@ MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub
 共享服务列表仍不包含任务型 MCP，两类客户端的接入方式不同。
 
 完整配置与适用范围参见 [Hub 任务路由](services/mcp_eval/HUB-TASK-ROUTING.md)。
-main 分支和实际 `.env` 保持原模式；新功能在 mcphub 分支，可通过环境变量选择启用。
+main 分支保留直连实现；mcphub 分支可以选择 `direct` 或 `hub`。当前本机 `.env`
+使用 Hub 模式。26 个共享 MCP 从 Hub 获取工具 schema 和调用结果；
+arxiv/pubmed 通过 Hub 的任务转发调用，但仍在 Atlas 的隔离任务容器执行；其他 8 个本地 MCP
+保持本地任务路由。`MCPHUB_TASK_ROUTING=true`、`MCPHUB_TASK_SERVERS=arxiv,pubmed`
+明确选择需要经过 Hub 的任务 MCP。
+`MCPHUB_MANAGE_RELAY=true` 让 arxiv/pubmed 的任务容器读取 Hub 的 relay 配置。
+PubMed 的 NCBI 变量由 Hub 中的任务目标明确发布给启动中的任务容器，
+Atlas `.env` 不保存这些变量或其他 MCP 上游 Key。`MCP_USAGE_LOG_DIR` 从 Atlas `.env`
+移除，Hub 模式的共享容器不再挂载用量日志目录。工具调用统计由 Hub 记录，Atlas
+仅保留测评轨迹、模型 token 和任务运行日志。
+
+启动：
+
+```bash
+make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:mcphub
+make run-docker-host
+# 另一终端启动测评服务，然后按原来的命令运行测评
+make run-mcp-completion
+```
+
+共享服务仍监听 `.env` 的 `MCP_SHARED_PORT`（本机 2984）。启动脚本只在共享容器内
+将 `ENABLED_SERVERS` 设置为 Hub 的共享列表，不会在测评进程中禁用任务 MCP。
+请求自动携带 `Authorization: Bearer ${MCPHUB_TOKEN}` 和
+`X-MCPHub-Target: ${MCPHUB_TARGET}`。Atlas 工具名称保持原有的 `服务器_工具` 格式。
+选中的 Hub 共享 MCP 不再叠加 Atlas 外层限速，未转发的任务 MCP 继续使用原来的策略。
+
+Relay 服务端的 IP 池、监听和鉴权配置单独放在 `.env.relay`。启动使用
+`make run-egress-relay`，或 `uv run --env-file .env.relay python scripts/pubmed_relay_server.py`。
+这次配置迁移不重启正在运行的 relay。
+切回直连时，应从备份恢复上游 MCP 的 Key，并使用原直连 runtime 镜像。

@@ -154,6 +154,12 @@ def test_bad_hub_prefix_is_rejected():
 def test_target_routes_without_reporting_labels_and_direct_mode_ignores_it():
     environment = {**ENV, "MCPHUB_TARGET": "another-benchmark/suite-2", "MCPHUB_BENCHMARK": "another-benchmark", "MCPHUB_MODEL": "test-model", "MCPHUB_RUN_ID": "run-2"}
     headers = hub_server_configs(environment, {"brave-search"})["brave-search"]["headers"]
-    assert headers["X-MCPHub-target"] == "another-benchmark/suite-2"
-    assert set(headers) == {"Authorization", "X-MCPHub-target"}
+    assert headers["X-MCPHub-Target"] == "another-benchmark/suite-2"
+    assert set(headers) == {"Authorization", "X-MCPHub-Target"}
     assert hub_server_configs({**environment, "MCP_TOOL_TRANSPORT": "direct"}, {"brave-search"}) == {}
+
+
+@pytest.mark.parametrize("target", ["x" * 161, "atlas/official\nother"])
+def test_invalid_target_is_rejected_instead_of_truncated(target):
+    with pytest.raises(ValueError, match="MCPHUB_TARGET"):
+        hub_server_configs({**ENV, "MCPHUB_TARGET": target}, {"brave-search"})

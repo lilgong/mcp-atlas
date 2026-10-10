@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .hub_config import managed_task_relays
+from .hub_config import managed_task_relays, managed_task_startup_env
 
 import asyncio
 import hashlib
@@ -106,12 +106,8 @@ async def inspect_mongo_fixture_image(image: str) -> dict[str, str]:
     image_id, _, labels_text = stdout.partition("\n")
     labels = json.loads(labels_text or "{}") or {}
     fixture_id = str(labels.get("mcp-atlas.fixture-id") or "")
-    logical_database = str(
-        labels.get("mcp-atlas.logical-database") or ""
-    )
-    content_sha256 = str(
-        labels.get("mcp-atlas.fixture-sha256") or ""
-    )
+    logical_database = str(labels.get("mcp-atlas.logical-database") or "")
+    content_sha256 = str(labels.get("mcp-atlas.fixture-sha256") or "")
     if (
         not fixture_id
         or logical_database != "store"
@@ -146,9 +142,7 @@ async def inspect_runtime_image(image: str) -> dict[str, str]:
         labels = json.loads(labels_text or "{}") or {}
         volumes = json.loads(volumes_text or "{}") or {}
     except json.JSONDecodeError as exc:
-        raise TaskSandboxError(
-            f"invalid runtime image metadata for {image!r}"
-        ) from exc
+        raise TaskSandboxError(f"invalid runtime image metadata for {image!r}") from exc
     if (
         labels.get("mcp-atlas.runtime") != "true"
         or labels.get("mcp-atlas.data-contract") != RUNTIME_DATA_CONTRACT
@@ -162,9 +156,7 @@ async def inspect_runtime_image(image: str) -> dict[str, str]:
     return {
         "image": image,
         "image_id": image_id,
-        "runtime_version": str(
-            labels.get("mcp-atlas.runtime-version") or ""
-        ),
+        "runtime_version": str(labels.get("mcp-atlas.runtime-version") or ""),
         "data_contract": RUNTIME_DATA_CONTRACT,
     }
 
@@ -272,13 +264,9 @@ class TaskSandbox:
             task_id=task_id,
             local_servers=set(local_servers),
             network_servers=set(network_servers),
-            agent_image=os.getenv(
-                "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
-            ),
+            agent_image=os.getenv("MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
             mongo_image=(os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip(),
-            startup_timeout=float(
-                os.getenv("MCP_TASK_SANDBOX_STARTUP_TIMEOUT", "180")
-            ),
+            startup_timeout=float(os.getenv("MCP_TASK_SANDBOX_STARTUP_TIMEOUT", "180")),
             memory_limit=os.getenv("MCP_TASK_SANDBOX_MEMORY", "3g"),
             cpu_limit=os.getenv("MCP_TASK_SANDBOX_CPUS", "2.0"),
             task_data_source=(os.getenv("MCP_TASK_DATA_DIR") or "").strip(),
@@ -287,7 +275,11 @@ class TaskSandbox:
     @property
     def local_url(self) -> Optional[str]:
         return next(
-            (container.url for container in self.containers if container.kind == "local"),
+            (
+                container.url
+                for container in self.containers
+                if container.kind == "local"
+            ),
             None,
         )
 
@@ -373,9 +365,19 @@ class TaskSandbox:
                     )
                     if (value := (os.getenv(name) or "").strip())
                 }
+                if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub":
+                    for key in ("NCBI_API_KEY", "NCBI_EMAIL", "NCBI_TOOL"):
+                        network_env.pop(key, None)
+                    network_env.update(
+                        await managed_task_startup_env(list(self.network_servers))
+                    )
                 managed_relay = await managed_task_relays(self.network_servers)
                 if managed_relay is not None:
-                    for name in ("MCP_RELAY_URL", "MCP_RELAY_TOKEN", "MCP_RELAY_TIMEOUT_SECONDS"):
+                    for name in (
+                        "MCP_RELAY_URL",
+                        "MCP_RELAY_TOKEN",
+                        "MCP_RELAY_TIMEOUT_SECONDS",
+                    ):
                         network_env.pop(name, None)
                     network_env.update(self._configure_network_relays(managed_relay))
                 await self._start_agent_container(
@@ -437,9 +439,7 @@ class TaskSandbox:
                     "MCP_TASK_MONGO_IMAGE is required for MongoDB tasks; "
                     "build a synthetic fixture image first"
                 )
-            self.mongo_fixture = await inspect_mongo_fixture_image(
-                self.mongo_image
-            )
+            self.mongo_fixture = await inspect_mongo_fixture_image(self.mongo_image)
             await self._create_mongo_socket_volume()
             await self._start_mongo()
             extra_env["MONGODB_CONNECTION_STRING"] = (
@@ -642,7 +642,7 @@ class TaskSandbox:
                 environment[variable] = value
         self.network_template = self.task_workspace / "network-template.json"
         self.network_template.write_text(json.dumps(template))
-        self.network_template.chmod(0o600)
+        self.network_template.chmod(0o644)
         return environment
 
     async def _start_agent_container(
@@ -722,10 +722,12 @@ class TaskSandbox:
         if kind == "network":
             command.extend(["--publish", "127.0.0.1::1984"])
             if self.network_template:
-                command.extend([
-                    "--volume",
-                    f"{self.network_template}:/agent-environment/src/agent_environment/mcp_server_template.json:ro",
-                ])
+                command.extend(
+                    [
+                        "--volume",
+                        f"{self.network_template}:/agent-environment/src/agent_environment/mcp_server_template.json:ro",
+                    ]
+                )
         for key, value in sorted(extra_env.items()):
             command.extend(["--env", f"{key}={value}"])
         command.append(self.agent_image)
@@ -782,12 +784,12 @@ class TaskSandbox:
             image_id=(self.runtime_image or {}).get("image_id"),
             runtime_version=(self.runtime_image or {}).get("runtime_version"),
             fixture_id=(
-                self.task_data_fixture.fixture_id
-                if self.task_data_fixture else None
+                self.task_data_fixture.fixture_id if self.task_data_fixture else None
             ),
             fixture_sha256=(
                 self.task_data_fixture.content_sha256
-                if self.task_data_fixture else None
+                if self.task_data_fixture
+                else None
             ),
             enabled_servers=servers,
             credential_env_names=sorted(extra_env),
@@ -836,9 +838,7 @@ class TaskSandbox:
                         )
                         tools = json.loads(body) if status == 200 else None
                     else:
-                        response = await client.post(
-                            f"{container.url}/list-tools"
-                        )
+                        response = await client.post(f"{container.url}/list-tools")
                         status = response.status_code
                         body = response.text
                         tools = response.json() if status == 200 else None
@@ -1003,15 +1003,24 @@ class TaskSandbox:
         """
         last_error = ""
         candidates = [
-            container for container in self.containers
+            container
+            for container in self.containers
             if container.kind in {"local", "network"}
         ]
         for container in candidates:
             try:
                 _, stderr, code = await _run(
-                    "docker", "exec", "--user", "0:0", container.name,
-                    "chmod", "-R", "a+rwX", "/data",
-                    timeout=30, check=False,
+                    "docker",
+                    "exec",
+                    "--user",
+                    "0:0",
+                    container.name,
+                    "chmod",
+                    "-R",
+                    "a+rwX",
+                    "/data",
+                    timeout=30,
+                    check=False,
                 )
             except Exception as exc:
                 last_error = str(exc)
@@ -1064,9 +1073,7 @@ class TaskSandbox:
 async def _reap_one(*args: str) -> bool:
     """Run one reaping command, absorbing timeouts and docker errors."""
     try:
-        _, _, code = await _run(
-            *args, timeout=_teardown_timeout(), check=False
-        )
+        _, _, code = await _run(*args, timeout=_teardown_timeout(), check=False)
         return code == 0
     except asyncio.CancelledError:
         raise
@@ -1137,13 +1144,13 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
 
     async def remove_owned(kind: str) -> tuple[int, int, int, int]:
         initial, initial_listing_failed = await list_owned(kind)
-        results = await asyncio.gather(
-            *(remove_one(kind, name) for name in initial)
-        ) if initial else []
+        results = (
+            await asyncio.gather(*(remove_one(kind, name) for name in initial))
+            if initial
+            else []
+        )
         remaining, final_listing_failed = await list_owned(kind)
-        failed_names = {
-            name for name, ok in zip(initial, results) if not ok
-        }
+        failed_names = {name for name, ok in zip(initial, results) if not ok}
         if final_listing_failed:
             # A failed verification cannot be reported as a clean result.
             remaining_count = len(failed_names)
@@ -1182,9 +1189,7 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
         network_listing_failures,
     ) = await remove_owned("network")
     listing_failures = (
-        container_listing_failures
-        + volume_listing_failures
-        + network_listing_failures
+        container_listing_failures + volume_listing_failures + network_listing_failures
     )
     result = {
         "containers_removed": containers_removed,
@@ -1193,9 +1198,7 @@ async def reap_owned_task_sandboxes() -> dict[str, int]:
         "volumes_remaining": volumes_remaining,
         "networks_removed": networks_removed,
         "networks_remaining": networks_remaining,
-        "removal_failures": (
-            container_failures + volume_failures + network_failures
-        ),
+        "removal_failures": (container_failures + volume_failures + network_failures),
         "listing_failures": listing_failures,
     }
 
@@ -1228,9 +1231,7 @@ async def _stale_named_resources(
     if not candidates:
         return []
 
-    stdout, _, code = await _run(
-        *inspect_args, *candidates, timeout=30, check=False
-    )
+    stdout, _, code = await _run(*inspect_args, *candidates, timeout=30, check=False)
     if code != 0:
         return []
 

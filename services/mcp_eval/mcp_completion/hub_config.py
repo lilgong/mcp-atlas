@@ -6,6 +6,15 @@ import os
 import httpx
 
 
+def task_hub_servers() -> set[str]:
+    defaults = "filesystem,git,memory,mongodb,cli-mcp-server,desktop-commander,mcp-code-executor,mcp-server-code-runner,arxiv,pubmed"
+    return {
+        name.strip()
+        for name in os.getenv("MCPHUB_TASK_SERVERS", defaults).split(",")
+        if name.strip()
+    }
+
+
 def hub_manages_policy(server: str) -> bool:
     return (
         os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub"
@@ -17,19 +26,7 @@ def hub_manages_policy(server: str) -> bool:
             or (
                 os.getenv("MCPHUB_TASK_ROUTING", "false").lower()
                 in {"true", "1", "yes"}
-                and server
-                in {
-                    "filesystem",
-                    "git",
-                    "memory",
-                    "mongodb",
-                    "cli-mcp-server",
-                    "desktop-commander",
-                    "mcp-code-executor",
-                    "mcp-server-code-runner",
-                    "arxiv",
-                    "pubmed",
-                }
+                and server in task_hub_servers()
             )
         )
     )
@@ -106,3 +103,43 @@ async def managed_task_relays(servers: list[str]) -> dict[str, dict[str, str]] |
             return None
         snapshots[server] = snapshot
     return snapshots or None
+
+
+async def managed_task_startup_env(servers: list[str]) -> dict[str, str]:
+    """Fetch explicitly published worker credentials; never persist them in .env."""
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() != "hub" or os.getenv(
+        "MCPHUB_TASK_ROUTING", "false"
+    ).lower() not in {"true", "1", "yes"}:
+        return {}
+    root = (os.getenv("MCPHUB_CONFIG_URL") or os.getenv("MCPHUB_URL") or "").rstrip("/")
+    token = os.getenv("MCPHUB_TOKEN", "")
+    if not root or not token:
+        raise RuntimeError("Hub worker setup requires URL and Bearer Key")
+    result: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        for server in sorted(set(servers) & task_hub_servers()):
+            response = await client.get(
+                f"{root}/api/servers/{server}/runtime",
+                params={"target": os.getenv("MCPHUB_TARGET", "")},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if response.status_code != 200:
+                raise RuntimeError("Hub task setup is unavailable or access was denied")
+            body = response.json()
+            values = body.get("data", {}).get("startupEnv")
+            if (
+                body.get("success") is not True
+                or not isinstance(values, dict)
+                or any(
+                    not isinstance(k, str)
+                    or not isinstance(v, str)
+                    or k.startswith("MCPHUB_")
+                    for k, v in values.items()
+                )
+            ):
+                raise RuntimeError("Invalid Hub task startup environment")
+            for key, value in values.items():
+                if key in result and result[key] != value:
+                    raise RuntimeError("Conflicting task startup environment")
+                result[key] = value
+    return result

@@ -30,12 +30,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    isolation_enabled = (
-        os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
-        not in {"0", "false", "no"}
-    )
+    isolation_enabled = os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
     sweeper: Optional[asyncio.Task] = None
     if isolation_enabled:
         validate_isolated_control_plane(config.HOST, config.MCP_SERVER_URL)
@@ -46,12 +48,8 @@ async def lifespan(_app: FastAPI):
         # compensation pass after Uvicorn has drained active requests.
         sweeper = asyncio.create_task(
             run_orphan_sweeper(
-                interval_seconds=float(
-                    os.getenv("MCP_SANDBOX_SWEEP_INTERVAL", "300")
-                ),
-                min_age_seconds=float(
-                    os.getenv("MCP_SANDBOX_ORPHAN_MAX_AGE", "1800")
-                ),
+                interval_seconds=float(os.getenv("MCP_SANDBOX_SWEEP_INTERVAL", "300")),
+                min_age_seconds=float(os.getenv("MCP_SANDBOX_ORPHAN_MAX_AGE", "1800")),
             )
         )
     write_runtime_event(
@@ -61,9 +59,7 @@ async def lifespan(_app: FastAPI):
         port=config.PORT,
         shared_mcp_url=config.MCP_SERVER_URL,
         task_isolation_enabled=isolation_enabled,
-        task_agent_image=os.getenv(
-            "MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE
-        ),
+        task_agent_image=os.getenv("MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
     )
     try:
         yield
@@ -89,9 +85,7 @@ async def lifespan(_app: FastAPI):
                     or cleanup["networks_remaining"]
                     or cleanup["listing_failures"]
                 ):
-                    logger.warning(
-                        "Shutdown left Atlas sandbox resources: %s", cleanup
-                    )
+                    logger.warning("Shutdown left Atlas sandbox resources: %s", cleanup)
                     write_runtime_event(
                         "sandbox",
                         "shutdown_orphans_remaining",
@@ -113,7 +107,32 @@ app = FastAPI(
 )
 
 from .hub_task_transport import router as task_bridge_router
+
 app.include_router(task_bridge_router)
+
+
+@app.middleware("http")
+async def restrict_remote_control_plane(request: Request, call_next):
+    """The callback shares this port; evaluation APIs remain loopback-only."""
+    if os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower() not in {
+        "false",
+        "0",
+        "no",
+    }:
+        from .config import _is_loopback_host
+
+        remote = request.client is None or not _is_loopback_host(request.client.host)
+        callback = request.method == "POST" and request.url.path.startswith(
+            "/internal/task-bridge/"
+        )
+        if remote and not callback:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                {"detail": "Control plane requires a local client"}, status_code=403
+            )
+    return await call_next(request)
+
 
 # Every HTTP attempt has its own ID.  This lets the benchmark client cancel the
 # exact evaluation it timed out on and wait for its model call and sandbox to

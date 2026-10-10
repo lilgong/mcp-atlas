@@ -58,7 +58,9 @@ def hub_server_configs(
     headers = {"Authorization": f"Bearer {token}"}
     target = (environment.get("MCPHUB_TARGET") or "").strip()
     if target:
-        headers["X-MCPHub-target"] = target[:160]
+        if len(target) > 160 or any(ord(char) < 32 or ord(char) == 127 for char in target):
+            raise ValueError("MCPHUB_TARGET must be an exact path of at most 160 characters")
+        headers["X-MCPHub-Target"] = target
     return {
         name: {
             "url": f"{base}/mcp/{quote(name, safe='')}",

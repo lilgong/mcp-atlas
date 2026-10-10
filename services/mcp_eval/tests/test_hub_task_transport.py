@@ -181,3 +181,33 @@ class HubTaskTransportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.root, "http://host-hub:3002")
             finally:
                 await client.close()
+
+
+class CallbackControlPlaneTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nonlocal_clients_can_only_attempt_authenticated_task_callbacks(self):
+        from mcp_completion.main import app
+
+        with patch.dict(
+            os.environ, {"MCP_TASK_ISOLATION_ENABLED": "true"}, clear=False
+        ):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app, client=("172.17.0.2", 10000)),
+                base_url="http://completion",
+            ) as c:
+                self.assertEqual((await c.get("/health")).status_code, 403)
+                self.assertEqual(
+                    (await c.post("/v2/mcp_eval/run_agent", json={})).status_code, 403
+                )
+                self.assertEqual(
+                    (
+                        await c.post(
+                            "/internal/task-bridge/unknown/list-tools", json={}
+                        )
+                    ).status_code,
+                    403,
+                )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 10000)),
+                base_url="http://completion",
+            ) as c:
+                self.assertEqual((await c.get("/health")).status_code, 200)

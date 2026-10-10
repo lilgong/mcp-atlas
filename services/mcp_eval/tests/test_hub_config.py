@@ -153,6 +153,7 @@ class PerTaskRelayTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             template = json.loads(sandbox.network_template.read_text())
+            self.assertEqual(sandbox.network_template.stat().st_mode & 0o777, 0o644)
             a = template["mcpServers"]["arxiv"]["env"]
             b = template["mcpServers"]["pubmed"]["env"]
             self.assertNotEqual(a["MCP_RELAY_URL"], b["MCP_RELAY_URL"])
@@ -161,3 +162,47 @@ class PerTaskRelayTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(
                 "private-fixture-token", sandbox.network_template.read_text()
             )
+
+
+class WorkerStartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scoped_worker_credentials_are_not_persisted_or_confused_with_relay(
+        self,
+    ):
+        from mcp_completion.hub_config import managed_task_startup_env, task_hub_servers
+
+        env = {
+            "MCP_TOOL_TRANSPORT": "hub",
+            "MCPHUB_TASK_ROUTING": "true",
+            "MCPHUB_TASK_SERVERS": "arxiv,pubmed",
+            "MCPHUB_CONFIG_URL": "http://hub",
+            "MCPHUB_TOKEN": "fixture",
+            "MCPHUB_TARGET": "atlas/official",
+        }
+        client = AsyncMock()
+        client.get.return_value = httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {"startupEnv": {"NCBI_API_KEY": "provider-fixture"}, "env": {}},
+            },
+        )
+        with patch.dict(os.environ, env, clear=True), patch(
+            "httpx.AsyncClient"
+        ) as factory:
+            factory.return_value.__aenter__.return_value = client
+            self.assertEqual(
+                await managed_task_startup_env(["pubmed"]),
+                {"NCBI_API_KEY": "provider-fixture"},
+            )
+            self.assertNotIn("NCBI_API_KEY", os.environ)
+            self.assertTrue(hub_manages_policy("pubmed"))
+            self.assertFalse(hub_manages_policy("filesystem"))
+            client.get.return_value = httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"startupEnv": {"MCPHUB_TOKEN": "never"}},
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "Invalid"):
+                await managed_task_startup_env(["pubmed"])

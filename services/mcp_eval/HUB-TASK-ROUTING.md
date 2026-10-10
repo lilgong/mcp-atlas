@@ -6,7 +6,7 @@ The ten isolated MCPs (filesystem, git, memory, mongodb, cli-mcp-server,
 desktop-commander, mcp-code-executor, mcp-server-code-runner, arxiv, pubmed)
 continue to execute in task containers owned by Atlas.
 
-For full Hub routing, configure task targets in Hub, and set these values in the
+For selected task Hub routing, configure task targets in Hub, and set these values in the
 **completion service's** environment before starting a new evaluation process:
 
 ```dotenv
@@ -14,8 +14,9 @@ HOST=0.0.0.0
 MCP_TOOL_TRANSPORT=hub
 MCPHUB_URL=http://host.docker.internal:3002
 MCPHUB_CONFIG_URL=http://127.0.0.1:3002
-MCPHUB_TOKEN=<existing system all-access operator Bearer Key>
+MCPHUB_TOKEN=<Atlas group calling Key>
 MCPHUB_TASK_ROUTING=true
+MCPHUB_TASK_SERVERS=arxiv,pubmed
 MCPHUB_TARGET=atlas/official
 MCPHUB_TASK_CALLBACK_URL=http://host.docker.internal:3500
 MCPHUB_MANAGE_RATE_LIMITS=true
@@ -27,7 +28,8 @@ The callback URL must reach that exact process from the Hub container.
 The completion service must bind a reachable interface (for host-gateway callbacks,
 use `HOST=0.0.0.0` on the existing port). It must not
 point at the shared agent environment on 2984. For multiple completion workers,
-each process needs its own reachable callback URL. No extra port or Docker socket
+each process needs its own reachable callback URL. Remote access on this completion port is restricted to authenticated task callbacks;
+evaluation and health APIs remain loopback-only. No extra port or Docker socket
 is added to Hub. The current bridge registry is process-local: do not load-balance
 its callbacks across unrelated completion workers.
 
@@ -55,3 +57,10 @@ separate relay environments even when they share one task-network container.
 
 Other benchmarks can implement the same tool-http-v1 registration and callback
 contract in MCPHub's target-connections documentation. Hub does not depend on Atlas.
+
+Task targets may explicitly publish `startupEnvKeys` from their parent MCP environment.
+For PubMed this is `NCBI_API_KEY`, `NCBI_EMAIL`, `NCBI_TOOL`; workers retrieve the
+scoped `startupEnv` at startup, without writing provider credentials to Atlas `.env`.
+The `atlas/official` task target's `callbackOrigins` permits the completion origin,
+for example `http://host.docker.internal:3500`. Shared and task calls both use
+Hub audit and scheduling; file ownership and fixture copies stay with Atlas.

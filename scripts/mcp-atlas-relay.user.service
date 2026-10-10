@@ -6,7 +6,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=%h/mcp-atlas
 Environment=MCP_RELAY_USAGE_LOG=%h/mcphub/data/relay/usage.jsonl
-ExecStart=%h/.local/bin/uv run --env-file .env python scripts/pubmed_relay_server.py
+ExecStart=%h/.local/bin/uv run --env-file .env.relay python scripts/pubmed_relay_server.py
 Restart=on-failure
 RestartSec=3
 UMask=0077
