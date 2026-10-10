@@ -12,8 +12,7 @@ For selected task Hub routing, configure task targets in Hub, and set these valu
 ```dotenv
 HOST=0.0.0.0
 MCP_TOOL_TRANSPORT=hub
-MCPHUB_URL=http://host.docker.internal:3002
-MCPHUB_CONFIG_URL=http://127.0.0.1:3002
+MCPHUB_URL=http://192.168.0.22:3002
 MCPHUB_TOKEN=<Atlas group calling Key>
 MCPHUB_TASK_ROUTING=true
 MCPHUB_TASK_SERVERS=arxiv,pubmed
@@ -33,9 +32,9 @@ evaluation and health APIs remain loopback-only. No extra port or Docker socket
 is added to Hub. The current bridge registry is process-local: do not load-balance
 its callbacks across unrelated completion workers.
 
-`MCPHUB_CONFIG_URL` is the Hub root reachable from the completion host. If omitted,
-the adapter uses `MCPHUB_URL`, which must then be reachable from that process too.
-The shared container uses `MCPHUB_URL`; these addresses may differ.
+`MCPHUB_URL` is the single Hub root used by both the completion service and the
+shared runtime. Use an address reachable from both, such as the Hub host's LAN IP.
+The shared runtime uses host networking, so a same-host loopback address also works.
 
 `MCPHUB_SERVERS` remains the list of selected **shared** MCPs in the shared agent
 environment. Do not put task-isolated MCPs in that list. Set `MCPHUB_TARGET` there

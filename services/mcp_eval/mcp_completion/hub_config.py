@@ -41,7 +41,7 @@ async def managed_task_relay(servers: list[str]) -> dict[str, str] | None:
     requested = set(servers) & {"arxiv", "pubmed"}
     if not requested:
         return None
-    root = (os.getenv("MCPHUB_CONFIG_URL") or os.getenv("MCPHUB_URL") or "").rstrip("/")
+    root = (os.getenv("MCPHUB_URL") or "").rstrip("/")
     token = os.getenv("MCPHUB_TOKEN", "")
     if not root or not token or any(char.isspace() for char in token):
         raise RuntimeError("Managed relay requires a Hub URL and operator Bearer Key")
@@ -111,7 +111,7 @@ async def managed_task_startup_env(servers: list[str]) -> dict[str, str]:
         "MCPHUB_TASK_ROUTING", "false"
     ).lower() not in {"true", "1", "yes"}:
         return {}
-    root = (os.getenv("MCPHUB_CONFIG_URL") or os.getenv("MCPHUB_URL") or "").rstrip("/")
+    root = (os.getenv("MCPHUB_URL") or "").rstrip("/")
     token = os.getenv("MCPHUB_TOKEN", "")
     if not root or not token:
         raise RuntimeError("Hub worker setup requires URL and Bearer Key")

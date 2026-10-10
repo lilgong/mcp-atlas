@@ -61,7 +61,7 @@ class HubConfigTests(unittest.IsolatedAsyncioTestCase):
         env = {
             "MCP_TOOL_TRANSPORT": "hub",
             "MCPHUB_MANAGE_RELAY": "true",
-            "MCPHUB_CONFIG_URL": "http://localhost:3002",
+            "MCPHUB_URL": "http://localhost:3002",
             "MCPHUB_TOKEN": "operator-synthetic",
         }
         values = {
@@ -174,7 +174,7 @@ class WorkerStartupTests(unittest.IsolatedAsyncioTestCase):
             "MCP_TOOL_TRANSPORT": "hub",
             "MCPHUB_TASK_ROUTING": "true",
             "MCPHUB_TASK_SERVERS": "arxiv,pubmed",
-            "MCPHUB_CONFIG_URL": "http://hub",
+            "MCPHUB_URL": "http://hub",
             "MCPHUB_TOKEN": "fixture",
             "MCPHUB_TARGET": "atlas/official",
         }

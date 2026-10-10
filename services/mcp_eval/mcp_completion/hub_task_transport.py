@@ -124,11 +124,7 @@ class HubTaskClient(MCPClient):
         self.upstream = upstream
         self.tools = frozenset(tools)
         self.server_for_tool = server_for_tool
-        self.root = _root(
-            "MCPHUB_CONFIG_URL"
-            if os.getenv("MCPHUB_CONFIG_URL", "").strip()
-            else "MCPHUB_URL"
-        )
+        self.root = _root("MCPHUB_URL")
         self.callback = _root("MCPHUB_TASK_CALLBACK_URL")
         self.target = os.getenv("MCPHUB_TARGET", "").strip()
         if not self.target:

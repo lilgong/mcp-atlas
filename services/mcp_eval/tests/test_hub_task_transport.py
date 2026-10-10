@@ -165,10 +165,9 @@ class HubTaskTransportTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "explicit MCPHUB_TARGET"):
                 HubTaskClient(FakeTask("x"), [], lambda name: "filesystem", task_id="x")
 
-    async def test_completion_can_use_a_separate_host_hub_address(self):
+    async def test_completion_uses_the_shared_hub_address(self):
         env = {
-            "MCPHUB_URL": "http://container-hub:3002",
-            "MCPHUB_CONFIG_URL": "http://host-hub:3002",
+            "MCPHUB_URL": "http://host-hub:3002",
             "MCPHUB_TASK_CALLBACK_URL": "http://completion",
             "MCPHUB_TARGET": "another/suite",
             "MCPHUB_TOKEN": "operator-fixture",
