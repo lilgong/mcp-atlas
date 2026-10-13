@@ -862,8 +862,17 @@ async def run_isolated(
     smoke_only: bool,
     retries: int = 0,
     input_path: Path | None = None,
+    *,
+    completion_owned: bool = False,
 ) -> list[Result]:
     """Validate tools and data through the production task-isolated routes."""
+
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub" and not completion_owned:
+        # Hub bindings must live inside the service receiving callbacks. A CLI
+        # process cannot register its local bindings against completion's URL.
+        return await run_completion_owned_probe(
+            base_url, timeout, concurrency, only, data_only, smoke_only, retries, input_path,
+        )
 
     async with httpx.AsyncClient() as client:
         shared_servers = await load_target_servers(client, base_url, timeout)
@@ -922,6 +931,39 @@ async def run_isolated(
                 except ApiError as exc:
                     slack_result.status = FAIL
                     slack_result.detail = str(exc)
+    _render_results(results)
+    return results
+
+
+async def run_completion_owned_probe(
+    base_url: str, timeout: float, concurrency: int, only: str | None,
+    data_only: bool, smoke_only: bool, retries: int, input_path: Path | None,
+) -> list[Result]:
+    port = int(os.getenv("PORT", "3000"))
+    if not 1 <= port <= 65535:
+        raise ValueError("Completion PORT must be between 1 and 65535")
+    url = f"http://127.0.0.1:{port}/v2/mcp_eval/runtime-probe"
+    payload = {"shared_url": base_url, "server": only, "timeout": timeout,
+               "concurrency": concurrency, "retries": retries,
+               "data_only": data_only, "smoke_only": smoke_only,
+               "input_path": str(input_path) if input_path else None}
+    # Include sandbox setup and every probe wave; individual calls retain their
+    # original timeout/retry budgets in the completion process.
+    request_timeout = 600 + 36 * timeout * (retries + 1) / max(1, concurrency)
+    async with httpx.AsyncClient(timeout=request_timeout, follow_redirects=False) as client:
+        response = await client.post(url, json=payload)
+        if response.status_code != 200:
+            raise ApiError(f"Completion-owned probe failed (HTTP {response.status_code}); no direct fallback")
+        body = response.json()
+    if not isinstance(body, dict) or body.get("schema_version") != 1 or not isinstance(body.get("results"), list):
+        raise ApiError("Invalid completion-owned probe response")
+    identity = body.get("runtime_identity", {})
+    for key, name in (("launch_id", "MCP_ATLAS_LAUNCH_ID"),
+                      ("transport_digest", "MCP_ATLAS_TRANSPORT_DIGEST")):
+        expected = os.getenv(name)
+        if expected and identity.get(key) != expected:
+            raise ApiError(f"Completion-owned probe identity mismatch for {key}")
+    results = [Result(**row) for row in body["results"]]
     _render_results(results)
     return results
 

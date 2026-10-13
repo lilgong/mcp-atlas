@@ -125,6 +125,9 @@ app = FastAPI(
 from .hub_task_transport import router as task_bridge_router
 
 app.include_router(task_bridge_router)
+from .runtime_probe import router as runtime_probe_router
+
+app.include_router(runtime_probe_router)
 
 
 @app.middleware("http")
@@ -174,11 +177,13 @@ SYNTHESIS_PROTOCOL_CAPABILITIES = {
         ],
     },
     "runtime": {
+        "probe_endpoint": "/v2/mcp_eval/runtime-probe",
         "tool_catalog_endpoint": "/v2/mcp_eval/tool-catalog",
         "features": [
             "fixture_identity",
             "generation_safety_policy",
             "routed_tool_catalog",
+            "completion_owned_probe",
             "tool_policy",
         ],
     },
