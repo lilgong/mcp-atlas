@@ -28,6 +28,8 @@ SOURCE_FILES = (
     "src/agent_environment/main.py",
     "src/agent_environment/mcp_client.py",
     "src/agent_environment/credential_pool.py",
+    "src/agent_environment/mcphub_transport.py",
+    "src/agent_environment/usage_audit.py",
     "src/agent_environment/mcp_router.py",
     "src/agent_environment/arxiv_mcp_compat.py",
     "src/agent_environment/egress_relay_client.py",

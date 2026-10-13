@@ -8,11 +8,9 @@ the query-string WeatherAPI key for a Bearer token.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,38 +31,9 @@ def _usage_key() -> str:
     return _yibu_key() or (os.getenv("WEATHER_API_KEY") or "").strip()
 
 
-def _usage_log(
-    key: str,
-    url: str,
-    status: int,
-    duration_ms: int,
-    error_name: str | None,
-) -> None:
-    try:
-        now = datetime.now(timezone.utc)
-        suffix = key[-8:] if key else "no-key"
-        directory = Path(
-            os.getenv("MCP_USAGE_LOG_DIR") or "mcp_usage_log"
-        ) / now.strftime("%Y-%m")
-        directory.mkdir(parents=True, exist_ok=True)
-        parsed = urlsplit(url)
-        path = directory / (
-            f"weatherapi_{suffix}_{now.strftime('%Y%m%d')}.jsonl"
-        )
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({
-                "ts": now.isoformat().replace("+00:00", "Z"),
-                "service": "weatherapi",
-                "key_suffix": suffix,
-                "host": parsed.hostname,
-                "path": parsed.path,
-                "status": status or 0,
-                "duration_ms": duration_ms,
-                "error": error_name,
-                "task_id": os.getenv("MCP_TASK_ID") or None,
-            }, ensure_ascii=False) + "\n")
-    except Exception as exc:  # usage accounting must not change MCP behavior
-        print(f"[mcp-usage-log] {exc}", file=sys.stderr)
+# uvx starts a separate environment; load the audit helper beside this preload.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from usage_audit import start_usage, usage_event
 
 
 def _rewrite_request(url: object, kwargs: dict) -> tuple[str, dict]:
@@ -111,6 +80,7 @@ def _install() -> None:
         is_weather_request = f"{original.scheme}://{original.netloc}" == OFFICIAL_ORIGIN
         if not is_weather_request:
             return await original_get(client, url, *args, **kwargs)
+        request_id = start_usage("weatherapi", key)
         started = time.monotonic()
         status = 0
         error_name = None
@@ -124,12 +94,10 @@ def _install() -> None:
             error_name = type(exc).__name__
             raise
         finally:
-            _usage_log(
-                key,
-                rewritten_url,
-                status,
-                int((time.monotonic() - started) * 1000),
-                error_name,
+            usage_event(
+                "weatherapi", key, "finished", request_id,
+                status=status, duration_ms=int((time.monotonic() - started) * 1000),
+                error=error_name,
             )
 
     yibu_get._mcp_atlas_weatherapi_yibu = True

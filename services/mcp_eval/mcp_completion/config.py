@@ -66,10 +66,9 @@ class Config:
                 f"Please set these environment variables or add them to your .env file."
             )
 
-        isolation_enabled = (
-            os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
-            not in {"0", "false", "no"}
-        )
+        isolation_enabled = os.getenv(
+            "MCP_TASK_ISOLATION_ENABLED", "true"
+        ).lower() not in {"0", "false", "no"}
         if isolation_enabled:
             validate_isolated_control_plane(
                 self.HOST,
@@ -88,7 +87,12 @@ def validate_isolated_control_plane(
     isolated_runtime_host: Optional[str] = None,
 ) -> None:
     """Keep host control APIs unreachable from networked task containers."""
-    if not _is_loopback_host(host):
+    callback_mode = (
+        os.getenv("MCP_TOOL_TRANSPORT", "direct").lower() == "hub"
+        and os.getenv("MCPHUB_TASK_ROUTING", "false").lower() in {"true", "1", "yes"}
+        and bool(os.getenv("MCPHUB_TASK_CALLBACK_URL", "").strip())
+    )
+    if not _is_loopback_host(host) and not callback_mode:
         raise ValueError(
             "HOST must be a loopback address when MCP task isolation is enabled; "
             "use 127.0.0.1 and an SSH tunnel for remote access"

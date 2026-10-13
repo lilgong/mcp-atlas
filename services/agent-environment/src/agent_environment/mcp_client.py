@@ -4,6 +4,7 @@ from fastmcp import Client
 from fastmcp.client.logging import LogMessage
 from fastmcp.mcp_config import MCPConfig
 from .mcp_router import RouterClient
+from .mcphub_transport import hub_server_configs
 from .logger import create_logger
 import json
 import random
@@ -18,6 +19,9 @@ AUTO_DETECT_OPTIONAL_VARS = frozenset({
     "MCP_TOOL_BASE_URL",
     "OSM_OVERPASS_URLS",
     "OXYLABS_SCRAPER_URL",
+    "NCBI_EMAIL",
+    "NCBI_API_KEY",
+    "NCBI_TOOL",
 })
 
 
@@ -57,6 +61,7 @@ class DirectMCPClient(Client):
         finally:
             await self.transport.close()
 
+
 # Load template to check for API key requirements
 template_path = Path(__file__).parent / "mcp_server_template.json"
 with open(template_path) as f:
@@ -66,6 +71,8 @@ with open(template_path) as f:
 config_path = Path(__file__).parent / "mcp_server_config.json"
 with open(config_path) as f:
     config = json.load(f)
+
+hub_configs = hub_server_configs(os.environ, set(template_config.get("mcpServers", {})))
 
 # Default servers that don't require API keys (used when ENABLED_SERVERS is empty)
 DEFAULT_SERVERS = [
@@ -102,7 +109,7 @@ if "mcpServers" in config:
         logger.info(f"Using explicit ENABLED_SERVERS: {', '.join(sorted(enabled_set))}")
     else:
         # Auto mode: use DEFAULT_SERVERS + auto-detect servers with API keys
-        enabled_set = set(DEFAULT_SERVERS)
+        enabled_set = set(DEFAULT_SERVERS) | set(hub_configs)
         logger.info(f"Using {len(DEFAULT_SERVERS)} default servers")
 
         # Auto-detect servers with all required API keys configured
@@ -158,6 +165,9 @@ if "mcpServers" in config:
     }
     logger.info(f"Total enabled: {len(enabled_set)} servers")
 
+for name in set(config.get("mcpServers", {})) & set(hub_configs):
+    config["mcpServers"][name] = hub_configs[name]
+
 # Process env randomization for API key load balancing. If "env" is a list, pick a random one.
 if "mcpServers" in config:
     for server_name, server_config in config["mcpServers"].items():
@@ -198,7 +208,7 @@ async def log_handler(message: LogMessage) -> None:
 def create_server_client(
     server_name: str, server_config: dict[str, Any]
 ) -> RouterClient:
-    if server_name in {"context7", "twelvedata"}:
+    if server_name in {"context7", "twelvedata"} and not server_config.get("atlas_hub_prefix"):
         from .credential_pool import Context7Pool, TwelveDataPool, configured_keys
         pool = Context7Pool if server_name == "context7" else TwelveDataPool
         keys = configured_keys(os.getenv(pool.key_env, ""), os.getenv(pool.key_env + "S", ""), pool.key_env + "S")
@@ -209,16 +219,39 @@ def create_server_client(
 
 def _create_direct_client(server_name: str, server_config: dict[str, Any]) -> RouterClient:
     """Create a direct, single-server client without FastMCP's composite proxy."""
-    parsed_config = MCPConfig.from_dict(
-        {"mcpServers": {server_name: server_config}}
-    )
+    parsed_config = MCPConfig.from_dict({"mcpServers": {server_name: server_config}})
     transport = parsed_config.mcpServers[server_name].to_transport()
-    return cast(
-        RouterClient,
-        DirectMCPClient(
-            transport,
-            roots=[],
-            log_handler=log_handler,
-            init_timeout=configured_client_init_timeout_seconds(),
-        ),
+    client_class = (
+        HubMCPClient if server_config.get("atlas_hub_prefix") else DirectMCPClient
     )
+    client = client_class(
+        transport,
+        roots=[],
+        log_handler=log_handler,
+        init_timeout=configured_client_init_timeout_seconds(),
+        **({"timeout": server_config.get("sse_read_timeout", 180)}
+           if server_config.get("atlas_hub_prefix") else {}),
+    )
+    if isinstance(client, HubMCPClient):
+        client.hub_prefix = server_config["atlas_hub_prefix"]
+    return cast(RouterClient, client)
+
+
+class HubMCPClient(DirectMCPClient):
+    """Remove Hub's server prefix so Atlas keeps its existing public names."""
+
+    hub_prefix: str
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        if any(not tool.name.startswith(self.hub_prefix) for tool in tools):
+            raise ValueError(
+                "Hub tool prefix mismatch; check MCPHUB_NAME_SEPARATOR and Hub aliases"
+            )
+        return [
+            tool.model_copy(update={"name": tool.name[len(self.hub_prefix) :]})
+            for tool in tools
+        ]
+
+    async def call_tool_mcp(self, name, arguments=None, **kwargs):
+        return await super().call_tool_mcp(self.hub_prefix + name, arguments, **kwargs)

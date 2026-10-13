@@ -22,6 +22,7 @@ from mcp.server.fastmcp import Context
 from mcp.shared.context import RequestContext
 
 from oxylabs_mcp.config import settings
+from agent_environment.usage_audit import start_usage, usage_event
 from oxylabs_mcp.exceptions import MCPServerError
 
 
@@ -162,6 +163,7 @@ class _OxylabsClientWrapper:
     async def scrape(self, payload: dict[str, typing.Any]) -> dict[str, typing.Any]:
         await self._ctx.info(f"Create job with params: {json.dumps(payload)}")
 
+        _mcp_request_id = start_usage("oxylabs", os.environ.get("OXYLABS_PASSWORD", ""))
         _mcp_started_at = _mcp_time.monotonic()
         _mcp_status = 0
         _mcp_error = None
@@ -172,11 +174,11 @@ class _OxylabsClientWrapper:
             _mcp_error = type(_mcp_exc).__name__
             raise
         finally:
-            _mcp_log_api_call(
-                settings.OXYLABS_SCRAPER_URL,
-                _mcp_status,
-                int((_mcp_time.monotonic() - _mcp_started_at) * 1000),
-                _mcp_error,
+            usage_event(
+                "oxylabs", os.environ.get("OXYLABS_PASSWORD", ""), "finished", _mcp_request_id,
+                status=_mcp_status,
+                duration_ms=int((_mcp_time.monotonic() - _mcp_started_at) * 1000),
+                error=_mcp_error,
             )
         response.raise_for_status()
         response_json: dict[str, typing.Any] = response.json()
@@ -286,36 +288,3 @@ def get_content(
 
     stripped_html = strip_html(str(content))
     return markdownify(stripped_html)  # type: ignore[no-any-return]
-
-
-# ── MCP API usage logging v2 (per-key request accounting) ───────────────────
-_MCP_USAGE_LOG_V2 = True
-def _mcp_log_api_call(url, status, duration_ms, error_name=None):
-    try:
-        import json as _json
-        import os as _os
-        import sys as _sys
-        from datetime import datetime as _dt, timezone as _tz
-        from urllib.parse import urlparse as _urlparse
-
-        parsed = _urlparse(str(url))
-        key = str(_os.environ.get("OXYLABS_PASSWORD", "") or "")
-        suffix = key[-8:] if key else "no-key"
-        now = _dt.now(_tz.utc)
-        out_dir = _os.path.join(
-            _os.environ.get("MCP_USAGE_LOG_DIR", "mcp_usage_log"),
-            now.strftime("%Y-%m"),
-        )
-        _os.makedirs(out_dir, exist_ok=True)
-        path = _os.path.join(out_dir, f"oxylabs_{suffix}_{now.strftime('%Y%m%d')}.jsonl")
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(_json.dumps({
-                "ts": now.isoformat().replace("+00:00", "Z"),
-                "service": "oxylabs", "key_suffix": suffix,
-                "host": parsed.hostname, "path": parsed.path,
-                "status": status or 0, "duration_ms": duration_ms,
-                "error": error_name,
-                "task_id": _os.environ.get("MCP_TASK_ID"),
-            }, ensure_ascii=False) + "\n")
-    except Exception as log_exc:
-        print(f"[mcp-usage-log] {log_exc}", file=_sys.stderr)

@@ -258,6 +258,7 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             task_data_source="/tmp/data",
         )
         sandbox.task_data_dir = Path("/tmp/data")
+        sandbox.network_template = Path("/tmp/task-network-template.json")
         with patch(
             "mcp_completion.task_sandbox._run",
             new=AsyncMock(return_value=("", "", 0)),
@@ -274,6 +275,7 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         command = run.await_args.args
         self.assertNotIn("--publish", command)
+        self.assertIn("/tmp/task-network-template.json:/agent-environment/src/agent_environment/mcp_server_template.json:ro", command)
         host_index = command.index("--host")
         self.assertEqual("127.0.0.1", command[host_index + 1])
         self.assertEqual("http://127.0.0.1:1984", sandbox.network_url)
@@ -337,8 +339,8 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "/agent-environment/src/agent_environment/arxiv_mcp_compat.py",
                     ],
                     "env": {
-                        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-                        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+                        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+                        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
                     },
                 },
                 template_config["mcpServers"]["arxiv"],

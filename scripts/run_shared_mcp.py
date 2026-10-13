@@ -74,6 +74,29 @@ def configured_shared_port() -> int:
     return port
 
 
+def configured_shared_hub_servers() -> str | None:
+    """Limit the shared container without filtering task routes in completion."""
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() != "hub":
+        return None
+    selected = {
+        name.strip()
+        for name in os.getenv("MCPHUB_SERVERS", "").split(",")
+        if name.strip()
+    }
+    if not selected:
+        raise ValueError("Hub mode requires MCPHUB_SERVERS")
+    allowlist = {
+        name.strip()
+        for name in os.getenv("ENABLED_SERVERS", "").split(",")
+        if name.strip()
+    }
+    if allowlist:
+        selected.intersection_update(allowlist)
+    if not selected:
+        raise ValueError("No Hub servers selected by ENABLED_SERVERS")
+    return ",".join(sorted(selected))
+
+
 def main() -> int:
     env_file = configured_env_file()
     if not env_file.is_file():
@@ -81,10 +104,11 @@ def main() -> int:
     load_dotenv(env_file, override=False)
     port = configured_shared_port()
     host = os.getenv("MCP_SHARED_HOST", "127.0.0.1")
-    isolation_enabled = (
-        os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
-        not in {"0", "false", "no"}
-    )
+    isolation_enabled = os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
     if isolation_enabled:
         validate_shared_bind_host(host)
     image = os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
@@ -100,8 +124,12 @@ def main() -> int:
     usage_log_dir.mkdir(parents=True, exist_ok=True)
     inspected = subprocess.run(
         [
-            "docker", "image", "inspect", image,
-            "--format", "{{json .Config.Labels}}\n{{json .Config.Volumes}}",
+            "docker",
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{json .Config.Labels}}\n{{json .Config.Volumes}}",
         ],
         check=True,
         capture_output=True,
@@ -116,9 +144,8 @@ def main() -> int:
         or labels.get("mcp-atlas.contains-fixture") != "false"
         or "/data" not in volumes
     ):
-        raise RuntimeError(
-            f"{image} is not a fixture-free MCP-Atlas runtime image"
-        )
+        raise RuntimeError(f"{image} is not a fixture-free MCP-Atlas runtime image")
+    shared_hub_servers = configured_shared_hub_servers()
     command = [
         "docker", "run", "--rm", "--network", "host",
         "--name", container_name,
@@ -130,11 +157,21 @@ def main() -> int:
         "--env", "MCP_USAGE_LOG_DIR=/mcp-usage-log",
         "--volume", f"{usage_log_dir}:/mcp-usage-log:rw",
         image,
-        "/agent-environment/.venv/bin/python", "-m", "uvicorn",
+        "/agent-environment/.venv/bin/python",
+        "-m",
+        "uvicorn",
         "agent_environment.main:app",
-        "--host", host,
-        "--port", str(port),
+        "--host",
+        host,
+        "--port",
+        str(port),
     ]
+    if shared_hub_servers is not None:
+        image_index = command.index(image)
+        command[image_index:image_index] = [
+            "--env", f"ENABLED_SERVERS={shared_hub_servers}",
+            "--env", f"MCPHUB_SERVERS={shared_hub_servers}",
+        ]
     # Some third-party MCP SDKs dump request headers on failures.  Proxy the
     # container output so credential values never reach terminal/runtime logs.
     secrets = secret_values(dict(os.environ))

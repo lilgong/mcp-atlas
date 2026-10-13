@@ -118,8 +118,8 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(
             "os.environ",
             {
-                "PUBMED_RELAY_URL": "http://relay.invalid:3985",
-                "PUBMED_RELAY_TOKEN": "test-token",
+                "MCP_RELAY_URL": "http://relay.invalid:3985",
+                "MCP_RELAY_TOKEN": "test-token",
             },
             clear=False,
         ):
@@ -224,7 +224,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(
                 "os.environ",
-                {"PUBMED_RELAY_URL": "", "PUBMED_RELAY_TOKEN": ""},
+                {"MCP_RELAY_URL": "", "MCP_RELAY_TOKEN": ""},
                 clear=False,
             ),
             patch.dict(

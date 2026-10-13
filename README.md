@@ -473,10 +473,10 @@ MONGODB_CONNECTION_STRING=
 relay 主机的 `.env` 配置：
 
 ```dotenv
-PUBMED_RELAY_TOKEN=<足够长的随机token>
-PUBMED_RELAY_BIND=0.0.0.0
-PUBMED_RELAY_PORT=3985
-PUBMED_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
+MCP_RELAY_TOKEN=<足够长的随机token>
+MCP_RELAY_BIND=0.0.0.0
+MCP_RELAY_PORT=3985
+MCP_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
 IPWO_PROXY_HOST=<IPWO proxy host>
 IPWO_PROXY_PORT=<IPWO proxy port>
 IPWO_PROXY_USERNAME=<IPWO username>
@@ -493,9 +493,9 @@ make run-egress-relay
 每台评测机器只配置：
 
 ```dotenv
-PUBMED_RELAY_URL=http://<relay内网IP>:3985
-PUBMED_RELAY_TOKEN=<与relay主机相同的token>
-PUBMED_RELAY_TIMEOUT_SECONDS=90
+MCP_RELAY_URL=http://<relay内网IP>:3985
+MCP_RELAY_TOKEN=<与relay主机相同的token>
+MCP_RELAY_TIMEOUT_SECONDS=90
 ```
 
 不要把 IPWO 凭证复制到评测机器，也不需要在评测机器启动 relay。data-syn 若同时
@@ -511,7 +511,7 @@ relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议�
 每 3 秒最多启动一次请求且最多保留 2 个在途请求；遇到 429 后降为 1 个在途请求，
 连续成功 3 次后恢复。OSM 各类上游全局每秒最多启动一次。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
 住宅代理的 `sid`。请求记录
-写入 `PUBMED_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
+写入 `MCP_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
 集中 relay 会跨机器统一 PubMed、Wikipedia、arXiv 和 OSM 的每次真实 HTTP 请求节奏。
@@ -1659,3 +1659,62 @@ docker run --rm hello-world
 | `services/mcp_eval/scripts/cleanup_task_sandboxes.py` | 清理同 owner 孤儿容器 |
 | `data_exports/` | 官方云端账号数据和 Mongo dump |
 | `docs/slack_free_method.md` | Slack 导入和可见窗口处理 |
+
+## 可选 MCPHub 模式
+
+默认继续直连，`MCP_TOOL_TRANSPORT=direct` 不访问 Hub。共享 MCP 可以复用本项目
+固定版本及兼容代码，打包到 Hub 后通过原有服务注册、凭证和 Bearer Keys 管理。
+
+```dotenv
+MCP_TOOL_TRANSPORT=hub
+MCPHUB_URL=http://127.0.0.1:3002
+MCPHUB_TOKEN=<Hub 中 atlas 用户组的调用 Key>
+MCPHUB_TARGET=atlas/official
+MCPHUB_SERVERS=airtable,alchemy,brave-search,calculator,clinicaltrialsgov-mcp-server,context7,ddg-search,e2b-server,exa,fetch,github,google-maps,google-workspace,lara-translate,met-museum,national-parks,notion,open-library,osm-mcp-server,oxylabs,slack,twelvedata,weather,weather-data,whois,wikipedia
+MCPHUB_NAME_SEPARATOR=-
+MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:mcphub
+MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub
+```
+
+只有 `MCPHUB_SERVERS` 中选定的共享服务转到 Hub，其余保持直连。工具名称保持一致。
+限速直接在 Hub 的每个 MCP 注册项设置，共享给所有调用方；有兼容 wrapper 的服务
+可以选择走 relay，实际 HTTP 请求限速由 relay 控制。Hub 的调用日志、调用统计和
+运行日志使用同一个网页入口；持久化日志不写入完整 key 或请求内容。
+
+10 个任务隔离 MCP 也可经由 Hub：另外开启 `MCPHUB_TASK_ROUTING=true`，在 Hub
+配置临时任务目标，并明确设置 `MCPHUB_TARGET` 和可从 Hub 到达的
+`MCPHUB_TASK_CALLBACK_URL`。隔离容器仍由 Atlas 启动和销毁，Hub 不接 Docker socket。
+目标路径缺失、未知、无权限或者租约过期时直接失败，不回退到其他工作区。
+共享服务列表仍不包含任务型 MCP，两类客户端的接入方式不同。
+
+完整配置与适用范围参见 [Hub 任务路由](services/mcp_eval/HUB-TASK-ROUTING.md)。
+main 分支保留直连实现；mcphub 分支可以选择 `direct` 或 `hub`。当前本机 `.env`
+使用 Hub 模式。26 个共享 MCP 从 Hub 获取工具 schema 和调用结果；
+arxiv/pubmed 通过 Hub 的任务转发调用，但仍在 Atlas 的隔离任务容器执行；其他 8 个本地 MCP
+保持本地任务路由。`MCPHUB_TASK_ROUTING=true`、`MCPHUB_TASK_SERVERS=arxiv,pubmed`
+明确选择需要经过 Hub 的任务 MCP。
+`MCPHUB_MANAGE_RELAY=true` 让 arxiv/pubmed 的任务容器读取 Hub 的 relay 配置。
+PubMed 的 NCBI 变量由 Hub 中的任务目标明确发布给启动中的任务容器，
+Atlas `.env` 不保存这些变量或其他 MCP 上游 Key。`MCP_USAGE_LOG_DIR` 从 Atlas `.env`
+移除，Hub 模式的共享容器不再挂载用量日志目录。工具调用统计由 Hub 记录，Atlas
+仅保留测评轨迹、模型 token 和任务运行日志。
+
+启动：
+
+```bash
+make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:mcphub
+make run-docker-host
+# 另一终端启动测评服务，然后按原来的命令运行测评
+make run-mcp-completion
+```
+
+共享服务仍监听 `.env` 的 `MCP_SHARED_PORT`（本机 2984）。启动脚本只在共享容器内
+将 `ENABLED_SERVERS` 设置为 Hub 的共享列表，不会在测评进程中禁用任务 MCP。
+请求自动携带 `Authorization: Bearer ${MCPHUB_TOKEN}` 和
+`X-MCPHub-Target: ${MCPHUB_TARGET}`。Atlas 工具名称保持原有的 `服务器_工具` 格式。
+选中的 Hub 共享 MCP 不再叠加 Atlas 外层限速，未转发的任务 MCP 继续使用原来的策略。
+
+Relay 服务端的 IP 池、监听和鉴权配置单独放在 `.env.relay`。启动使用
+`make run-egress-relay`，或 `uv run --env-file .env.relay python scripts/pubmed_relay_server.py`。
+这次配置迁移不重启正在运行的 relay。
+切回直连时，应从备份恢复上游 MCP 的 Key，并使用原直连 runtime 镜像。

@@ -12,6 +12,7 @@ from cacheout import Cache
 import json
 import hashlib
 import random
+import os
 
 CACHE_TTL_HOURS = 48
 
@@ -125,6 +126,8 @@ async def list_tools() -> list[mcp.types.Tool]:
 
 def should_cache_tool(tool_name: str) -> bool:
     """Check if tool should be cached based on server whitelist."""
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub":
+        return False
     server_name = tool_name.split("_", 1)[0]
     return server_name in CACHEABLE_SERVERS
 

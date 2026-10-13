@@ -100,14 +100,14 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert "duckduckgo-mcp-server[browser]==0.6.1" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
     assert shared["osm-mcp-server"]["env"] == {
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
         "OSM_OVERPASS_URLS": "${OSM_OVERPASS_URLS}",
-        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
     }
     assert shared["arxiv"]["args"][-1].endswith("arxiv_mcp_compat.py")
     assert shared["arxiv"]["env"] == {
-        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
     }
     assert shared["met-museum"]["args"] == [
         "/agent-environment/src/agent_environment/run_node_mcp.cjs",
@@ -128,8 +128,11 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
         "agent_environment.pubmed_mcp_compat",
     ]
     assert shared["pubmed"]["env"] == {
-        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "NCBI_API_KEY": "${NCBI_API_KEY}",
+        "NCBI_EMAIL": "${NCBI_EMAIL}",
+        "NCBI_TOOL": "${NCBI_TOOL}",
     }
     assert shared["twelvedata"]["args"] == [
         "run",
@@ -454,8 +457,8 @@ def test_python_mcp_servers_pin_their_sdk():
             "/agent-environment/src/agent_environment/arxiv_mcp_compat.py",
         ],
         "env": {
-            "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-            "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+            "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+            "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
         },
     }
     installer = (

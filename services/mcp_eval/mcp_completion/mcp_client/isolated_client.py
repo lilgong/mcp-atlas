@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..hub_config import hub_manages_policy
+
 import asyncio
 import contextlib
 import json
@@ -102,27 +104,21 @@ class ServerCallGate:
     def observe_rate_limit(self, rate_limited: bool) -> float:
         """Update adaptive cooldown and return the newly scheduled delay."""
         if not rate_limited:
-            self.consecutive_rate_limits = max(
-                0, self.consecutive_rate_limits - 1
-            )
+            self.consecutive_rate_limits = max(0, self.consecutive_rate_limits - 1)
             return 0.0
         if self.rate_limit_backoff <= 0:
             return 0.0
         self.consecutive_rate_limits += 1
         delay = min(
-            self.rate_limit_backoff
-            * (2 ** (self.consecutive_rate_limits - 1)),
+            self.rate_limit_backoff * (2 ** (self.consecutive_rate_limits - 1)),
             self.max_rate_limit_backoff or self.rate_limit_backoff,
         )
-        self.cooldown_until = max(
-            self.cooldown_until, time.monotonic() + delay
-        )
+        self.cooldown_until = max(self.cooldown_until, time.monotonic() + delay)
         return delay
 
 
 _SERVER_CALL_GATES = {
-    server: ServerCallGate(*policy)
-    for server, policy in SERVER_CALL_POLICIES.items()
+    server: ServerCallGate(*policy) for server, policy in SERVER_CALL_POLICIES.items()
 }
 
 # Atlas evaluation and data synthesis are separate processes, so their
@@ -136,7 +132,11 @@ _SHARED_SERVER_CALL_GATES = {
     "pubmed": SharedRateGate("pubmed", 1.2, 15.0, 60.0),
     "twelvedata": SharedRateGate("twelvedata", 8.0, 15.0, 60.0),
     "wikipedia": SharedRateGate(
-        "wikipedia", 6.0, 60.0, 60.0, completion_spacing=6.0,
+        "wikipedia",
+        6.0,
+        60.0,
+        60.0,
+        completion_spacing=6.0,
     ),
 }
 
@@ -183,9 +183,7 @@ def _is_rate_limited_tool_result(result: Any) -> bool:
         return False
 
     if bool(payload.get("isError") or payload.get("is_error")):
-        return _contains_rate_limit_marker(
-            json.dumps(payload, ensure_ascii=False)
-        )
+        return _contains_rate_limit_marker(json.dumps(payload, ensure_ascii=False))
 
     for item in payload.get("content", []):
         if not isinstance(item, dict) or not isinstance(item.get("text"), str):
@@ -208,7 +206,7 @@ def _is_rate_limited_tool_result(result: Any) -> bool:
 @contextlib.asynccontextmanager
 async def _server_call_slot(tool_name: str):
     server = server_for_tool(tool_name) or ""
-    if _relay_handles_server(server):
+    if hub_manages_policy(server) or _relay_handles_server(server):
         # The relay schedules individual upstream HTTP requests. Serializing the
         # entire multi-request MCP call here causes head-of-line blocking across
         # evaluation and synthesis processes without adding upstream safety.
@@ -232,7 +230,9 @@ async def _server_call_slot(tool_name: str):
 
 
 def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
-    if _relay_handles_server(server_for_tool(tool_name) or ""):
+    if hub_manages_policy(server_for_tool(tool_name) or "") or _relay_handles_server(
+        server_for_tool(tool_name) or ""
+    ):
         return None
     return _SERVER_CALL_GATES.get(server_for_tool(tool_name) or "")
 
@@ -241,8 +241,8 @@ def _relay_handles_server(server: str) -> bool:
     # The relay schedules each upstream HTTP request centrally. Without it,
     # Redis (or the local file backend) coordinates the whole MCP tool call.
     return server in {"arxiv", "osm-mcp-server", "pubmed", "wikipedia"} and bool(
-        (os.getenv("PUBMED_RELAY_URL") or "").strip()
-        and (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+        (os.getenv("MCP_RELAY_URL") or "").strip()
+        and (os.getenv("MCP_RELAY_TOKEN") or "").strip()
     )
 
 
@@ -257,12 +257,13 @@ class IsolatedMCPClient(MCPClient):
         enabled_tools: Optional[List[str]],
     ):
         self.task_id = task_id
+        self._hub_clients = []
         self.shared_url = shared_url.rstrip("/")
         self.requested_tools = list(dict.fromkeys(enabled_tools or []))
         self.allowed_tools: set[str] = set()
         self.blocked_tools: set[str] = set()
         self._route_tools: dict[ToolRoute, list[str]] = {}
-        self._clients: dict[ToolRoute, SandboxMCPClient] = {}
+        self._clients: dict[ToolRoute, MCPClient] = {}
         self._sandbox: Optional[TaskSandbox] = None
         self._semaphore_acquired = False
         self._entered = False
@@ -291,10 +292,13 @@ class IsolatedMCPClient(MCPClient):
                 tools=sorted(self.blocked_tools),
             )
 
-        isolation_enabled = (
-            os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower()
-            not in {"0", "false", "no"}
-        )
+        isolation_enabled = os.getenv(
+            "MCP_TASK_ISOLATION_ENABLED", "true"
+        ).lower() not in {"0", "false", "no"}
+        from ..hub_task_transport import task_hub_enabled
+
+        if task_hub_enabled() and not isolation_enabled:
+            raise RuntimeError("Hub task routing requires task isolation")
         try:
             if isolation_enabled:
                 await self._start_isolated_clients()
@@ -376,6 +380,35 @@ class IsolatedMCPClient(MCPClient):
                     container_name=self._sandbox.network_container_name,
                 )
 
+        from ..hub_task_transport import HubTaskClient, task_hub_enabled
+
+        if task_hub_enabled():
+            from ..hub_config import task_hub_servers
+
+            for route, tools in (
+                (ToolRoute.TASK_LOCAL, local_tools),
+                (ToolRoute.TASK_NETWORK, network_tools),
+            ):
+                selected = [
+                    tool
+                    for tool in tools
+                    if server_for_tool(tool) in task_hub_servers()
+                ]
+                if selected and len(selected) != len(tools):
+                    raise RuntimeError(
+                        "Configure all servers in a task route for Hub forwarding"
+                    )
+                if selected:
+                    hub = HubTaskClient(
+                        self._clients[route],
+                        tools,
+                        server_for_tool,
+                        task_id=self.task_id,
+                    )
+                    await hub.start()
+                    self._hub_clients.append(hub)
+                    self._clients[route] = hub
+
         if cloud_tools:
             self._clients[ToolRoute.CLOUD] = SandboxMCPClient(
                 self.shared_url,
@@ -395,6 +428,10 @@ class IsolatedMCPClient(MCPClient):
 
     async def close(self) -> None:
         try:
+            await asyncio.gather(
+                *(hub.close() for hub in self._hub_clients), return_exceptions=True
+            )
+            self._hub_clients.clear()
             if self._sandbox is not None:
                 await self._sandbox.close()
                 self._sandbox = None
@@ -432,9 +469,7 @@ class IsolatedMCPClient(MCPClient):
                 if route == ToolRoute.BLOCKED_CLOUD_WRITE
                 else "Tool is unavailable in the deterministic offline runtime"
             )
-            raise ToolPolicyError(
-                f"{reason}: {tool_name}"
-            )
+            raise ToolPolicyError(f"{reason}: {tool_name}")
         if tool_name not in self.allowed_tools:
             # Match the upstream MCP/FastMCP failure semantics.  Do not suggest
             # or normalize a nearby name: exact tool-name adherence is part of
@@ -480,9 +515,7 @@ class IsolatedMCPClient(MCPClient):
                     )
             except Exception as exc:
                 rate_limited = _contains_rate_limit_marker(exc)
-                shared_cooldown_seconds = call_slot.observe_rate_limit(
-                    rate_limited
-                )
+                shared_cooldown_seconds = call_slot.observe_rate_limit(rate_limited)
                 if call_gate is not None:
                     rate_limit_cooldown_seconds = call_gate.observe_rate_limit(
                         rate_limited
@@ -506,9 +539,7 @@ class IsolatedMCPClient(MCPClient):
             rate_limited = _is_rate_limited_tool_result(response)
             shared_cooldown_seconds = call_slot.observe_rate_limit(rate_limited)
             if call_gate is not None:
-                rate_limit_cooldown_seconds = call_gate.observe_rate_limit(
-                    rate_limited
-                )
+                rate_limit_cooldown_seconds = call_gate.observe_rate_limit(rate_limited)
             rate_limit_cooldown_seconds = max(
                 rate_limit_cooldown_seconds,
                 shared_cooldown_seconds,
