@@ -507,11 +507,13 @@ curl http://<relay内网IP>:3985/health
 
 relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议使用
 `IPWO_PROXY_COUNTRY=US`；relay 为 NCBI、arXiv、Nominatim、Overpass 和 OSRM 分别复用一条
-粘性出口，为无状态的 Wikipedia Action API 使用四条独立粘性出口 lane。arXiv 全局
-每 3 秒最多启动一次请求且最多保留 2 个在途请求；遇到 429 后降为 1 个在途请求，
-连续成功 3 次后恢复。OSM 各类上游全局每秒最多启动一次。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
-住宅代理的 `sid`。请求记录
-写入 `MCP_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
+粘性出口。逐上游请求间隔及并发由 Hub 管理的 relay limits 决定；不再保留 rollout
+独立的自适应 arXiv 并发策略。独立启动此脚本时，默认 arXiv 每 3 秒一次且并发 1、
+Wikipedia 每 300 毫秒一次且并发 1，部署时的持久化 limits 优先于默认值。
+排队、退避重试和上游传输共用请求总预算，默认 85 秒；取消或过期的请求退出 FIFO
+队列并释放容量。arXiv 异步请求使用可取消的原生 HTTP 客户端，不再遗留后台线程。
+各上游只在连接失败、限流、服务错误或 abuse 响应时更换动态住宅代理的 `sid`。请求记录
+写入 `MCP_RELAY_USAGE_LOG`（默认 `./data/relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
 
 集中 relay 会跨机器统一 PubMed、Wikipedia、arXiv 和 OSM 的每次真实 HTTP 请求节奏。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,15 @@ relay = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(relay)
 
 
+@pytest.fixture(autouse=True)
+def isolated_relay_audit(monkeypatch, tmp_path):
+    monkeypatch.setattr(relay, "LOG_PATH", tmp_path / "usage.jsonl")
+
+
 def test_ipwo_proxy_auth_failure_latches(monkeypatch):
     calls = []
 
-    def fake_fetch(url, allow_redirects, *, session_id=None):
+    def fake_fetch(url, allow_redirects, *, session_id=None, budget=None):
         calls.append((url, allow_redirects))
         return 407, {}, b"proxy authentication required", url
 
@@ -44,7 +50,7 @@ def test_ipwo_proxy_auth_failure_latches(monkeypatch):
 def test_ipwo_tunnel_auth_failure_latches(monkeypatch):
     calls = []
 
-    def fake_fetch(url, allow_redirects, *, session_id=None):
+    def fake_fetch(url, allow_redirects, *, session_id=None, budget=None):
         calls.append((url, allow_redirects))
         raise relay.RelayAccountError(
             "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
@@ -73,7 +79,7 @@ def test_ipwo_does_not_treat_target_403_as_proxy_account_failure(monkeypatch):
     monkeypatch.setattr(
         relay,
         "_fetch_once",
-        lambda _url, _allow_redirects, *, session_id=None: (
+        lambda _url, _allow_redirects, *, session_id=None, budget=None: (
             403,
             {},
             b"target rejection",
@@ -92,7 +98,7 @@ def test_transient_proxy_failure_is_retried(monkeypatch):
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi"
     calls = []
 
-    def fake_fetch(_url, _allow_redirects, *, session_id=None):
+    def fake_fetch(_url, _allow_redirects, *, session_id=None, budget=None):
         calls.append(_url)
         if len(calls) == 1:
             raise relay.RelayUpstreamError("TimeoutError")
@@ -163,7 +169,7 @@ def test_controller_reuses_sid_until_failure_then_rotates(monkeypatch):
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi"
     session_ids = []
 
-    def fake_fetch(_url, _allow_redirects, *, session_id=None):
+    def fake_fetch(_url, _allow_redirects, *, session_id=None, budget=None):
         session_ids.append(session_id)
         if len(session_ids) == 2:
             raise relay.RelayUpstreamError("TimeoutError")
@@ -189,7 +195,7 @@ def test_slow_upstream_request_does_not_block_another_request(monkeypatch):
     second_finished = threading.Event()
     calls = []
 
-    def fake_fetch(url, _allow_redirects, *, session_id=None):
+    def fake_fetch(url, _allow_redirects, *, session_id=None, budget=None):
         calls.append(url)
         if url.endswith("first"):
             first_started.set()
@@ -222,7 +228,7 @@ def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
     lock = threading.Lock()
     started = 0
 
-    def fake_fetch(url, _allow_redirects, *, session_id=None):
+    def fake_fetch(url, _allow_redirects, *, session_id=None, budget=None):
         nonlocal started
         with lock:
             started += 1
@@ -234,9 +240,8 @@ def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
         return 200, {}, b"ok", url
 
     monkeypatch.setattr(relay, "_fetch_once", fake_fetch)
-    controller = relay.Controller(
-        0, max_in_flight=2, adaptive_rate_limit=True,
-    )
+    controller = relay.Controller(0)
+    controller.max_concurrency = 2
     threads = [
         threading.Thread(
             target=controller.fetch,
@@ -256,26 +261,94 @@ def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
     assert third_started.is_set()
 
 
-def test_arxiv_controller_reduces_on_429_then_recovers():
-    controller = relay.Controller(
-        0, max_in_flight=2, adaptive_rate_limit=True,
-    )
+def test_expired_queue_does_not_call_upstream_or_leak_capacity(monkeypatch):
+    controller = relay.Controller(0)
+    controller.max_concurrency = 1
+    controller.active = 1
+    calls = []
+    monkeypatch.setattr(relay, "_fetch_once", lambda *a, **k: calls.append(a))
+    with pytest.raises(relay.RelayRequestExpired) as exc:
+        controller.fetch("https://test/queued", True, budget=relay.RequestBudget(0.02))
+    assert exc.value.phase == "queue"
+    assert not calls and not controller.pending and controller.active == 1
 
-    controller._wait_for_slot()
-    controller._finish_attempt(status=429)
-    assert controller.current_limit() == 1
-    for expected in (1, 1, 2):
-        controller._wait_for_slot()
-        controller._finish_attempt(status=200)
-        assert controller.current_limit() == expected
-    assert controller.current_limit() == 2
+
+def test_cancelled_request_does_not_retry_and_releases_capacity(monkeypatch):
+    controller = relay.Controller(0)
+    calls = []
+
+    def cancelled(*args, **kwargs):
+        calls.append(args)
+        raise relay.RelayRequestCancelled("Disconnected")
+
+    monkeypatch.setattr(relay, "_fetch_once", cancelled)
+    with pytest.raises(relay.RelayRequestCancelled):
+        controller.fetch("https://test/cancelled", True)
+    assert len(calls) == 1
+    assert controller.active == 0 and not controller.pending
+
+
+def test_retry_budget_expires_in_cooldown_without_second_upstream_call(monkeypatch):
+    controller = relay.Controller(0)
+    calls = []
+
+    def rate_limited(url, *args, **kwargs):
+        calls.append(url)
+        return 429, {"Retry-After": "60"}, b"limited", url
+
+    monkeypatch.setattr(relay, "_fetch_once", rate_limited)
+    with pytest.raises(relay.RelayRequestExpired) as exc:
+        controller.fetch("https://test/limited", True, budget=relay.RequestBudget(0.03))
+    assert exc.value.phase == "queue"
+    assert len(calls) == 1 and controller.active == 0 and not controller.pending
+
+
+def test_socket_watch_interrupts_expired_read_and_stops_thread():
+    interrupted = threading.Event()
+
+    class Socket:
+        def shutdown(self, how):
+            interrupted.set()
+
+    with relay._watch_socket(Socket(), relay.RequestBudget(0.01)):
+        assert interrupted.wait(1)
+
+
+def test_fifo_queue_admits_waiters_in_order(monkeypatch):
+    controller = relay.Controller(0)
+    controller.max_concurrency = 1
+    controller.active = 1
+    calls = []
+    monkeypatch.setattr(relay, "_fetch_once", lambda url, *a, **k: (
+        calls.append(url) or (200, {}, b"ok", url)))
+    threads = []
+    for index in range(3):
+        thread = threading.Thread(target=controller.fetch, args=(f"https://test/{index}", True))
+        threads.append(thread)
+        thread.start()
+        deadline = time.monotonic() + 1
+        while True:
+            with controller.slots:
+                queued = len(controller.pending)
+            if queued == index + 1:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+    with controller.slots:
+        controller.active = 0
+        controller.slots.notify_all()
+    for thread in threads:
+        thread.join(2)
+        assert not thread.is_alive()
+    assert calls == [f"https://test/{i}" for i in range(3)]
+    assert controller.active == 0 and not controller.pending
 
 
 def test_wikipedia_controller_pool_uses_independent_sticky_lanes(monkeypatch):
     url = "https://en.wikipedia.org/w/api.php"
     session_ids = []
 
-    def fake_fetch(_url, _allow_redirects, *, session_id=None):
+    def fake_fetch(_url, _allow_redirects, *, session_id=None, budget=None):
         session_ids.append(session_id)
         return 200, {}, b"ok", url
 
@@ -295,7 +368,7 @@ def test_wikipedia_controller_pool_uses_independent_sticky_lanes(monkeypatch):
 def test_controller_pool_latches_account_failure_across_lanes(monkeypatch):
     calls = 0
 
-    def fake_fetch(_url, _allow_redirects, *, session_id=None):
+    def fake_fetch(_url, _allow_redirects, *, session_id=None, budget=None):
         nonlocal calls
         calls += 1
         raise relay.RelayAccountError("IPWO_PROXY_AUTH_FAILED: rejected")
@@ -435,6 +508,7 @@ def test_each_http_attempt_is_logged_without_query_or_keys(monkeypatch, tmp_path
     relay.Controller(0).fetch(url, False)
     raw = relay.LOG_PATH.read_text()
     records = [__import__("json").loads(line) for line in raw.splitlines()]
+    records = [r for r in records if r["event"] in {"http_started", "http_finished"}]
     assert [item["event"] for item in records] == ["http_started", "http_finished"]
     assert records[0]["request_id"] == records[1]["request_id"]
     assert "do-not-log" not in raw and "private-query" not in raw and "private body" not in raw
