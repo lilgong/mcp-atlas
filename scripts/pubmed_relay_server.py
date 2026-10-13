@@ -4,8 +4,14 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hmac
+import http.client
 import json
+import math
+import select
+import socket
+from collections import deque
 import os
 import re
 import secrets
@@ -42,6 +48,7 @@ ALLOWED_TARGETS = {
     ),
 }
 TOKEN = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
+CONTROL_TOKEN = (os.getenv("MCPHUB_RELAY_CONTROL_TOKEN") or "").strip()
 IPWO_PROXY_HOST = (os.getenv("IPWO_PROXY_HOST") or "").strip()
 IPWO_PROXY_PORT = (os.getenv("IPWO_PROXY_PORT") or "").strip()
 IPWO_PROXY_USERNAME = (os.getenv("IPWO_PROXY_USERNAME") or "").strip()
@@ -50,12 +57,13 @@ IPWO_PROXY_COUNTRY = (os.getenv("IPWO_PROXY_COUNTRY") or "").strip().upper()
 BIND = (os.getenv("MCP_RELAY_BIND") or "127.0.0.1").strip()
 PORT = int(os.getenv("MCP_RELAY_PORT") or "3985")
 MIN_INTERVAL = float(os.getenv("MCP_RELAY_MIN_INTERVAL_SECONDS") or "1.0")
+REQUEST_TIMEOUT = float(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_SECONDS") or "85")
 UPSTREAM_TIMEOUT = float(os.getenv("MCP_RELAY_UPSTREAM_TIMEOUT_SECONDS") or "45")
 MAX_RESPONSE_BYTES = int(os.getenv("MCP_RELAY_MAX_RESPONSE_BYTES") or str(64 * 1024 * 1024))
-LOG_PATH = Path(os.getenv("MCP_RELAY_USAGE_LOG") or "/var/log/pubmed-relay/usage.jsonl")
+LOG_PATH = Path(os.getenv("MCP_RELAY_USAGE_LOG") or "./data/relay/usage.jsonl")
 WIKIPEDIA_LANES = 1
 LIMITS_PATH = LOG_PATH.parent / "limits.json"
-RELAY_USER_AGENT = os.getenv("MCP_RELAY_USER_AGENT") or "MCPAtlasRelay/1.0 (https://github.com/lilgong/mcp-atlas)"
+RELAY_USER_AGENT = os.getenv("MCP_RELAY_USER_AGENT") or "MCPHubRelay/1.0 (https://github.com/lilgong/mcphub)"
 CONFIG_LOCK = threading.Lock()
 
 
@@ -65,6 +73,37 @@ class RelayAccountError(RuntimeError):
 
 class RelayUpstreamError(RuntimeError):
     """A proxy or target connection failed without an HTTP response."""
+
+
+class RelayRequestExpired(RuntimeError):
+    """A request has exhausted its total queue/retry/network budget."""
+
+    def __init__(self, phase: str):
+        self.phase = phase
+        super().__init__(f"Relay {phase} deadline exceeded")
+
+
+class RelayRequestCancelled(RuntimeError):
+    """The downstream caller disconnected before this request completed."""
+
+
+class RequestBudget:
+    def __init__(self, seconds: float, disconnected=None):
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("timeout_seconds must be positive and finite")
+        self.deadline = time.monotonic() + seconds
+        self.disconnected = disconnected
+        self.queued_ms = 0.0
+        self.attempts = 0
+        self.request_id = uuid.uuid4().hex
+
+    def remaining(self, phase="queue") -> float:
+        if self.disconnected and self.disconnected():
+            raise RelayRequestCancelled("Relay client disconnected")
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise RelayRequestExpired(phase)
+        return remaining
 
 
 def _missing_ipwo_config() -> tuple[str, ...]:
@@ -127,11 +166,8 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 class Controller:
     def __init__(
-        self,
-        min_interval: float | None = None,
-        *,
-        max_in_flight: int | None = None,
-        adaptive_rate_limit: bool = False,
+        self, min_interval: float | None = None, *,
+        max_in_flight: int | None = None, adaptive_rate_limit: bool = False,
     ) -> None:
         if max_in_flight is not None and max_in_flight < 1:
             raise ValueError("max_in_flight must be positive")
@@ -142,79 +178,67 @@ class Controller:
         self.session_id = _new_ipwo_session_id()
         self.rotation_count = 0
         self.min_interval = MIN_INTERVAL if min_interval is None else min_interval
+        self.max_concurrency: int | None = None
         self.max_in_flight = max_in_flight
-        self.in_flight = 0
         self.adaptive_rate_limit = adaptive_rate_limit
         self.current_in_flight_limit = max_in_flight
         self.successes_since_rate_limit = 0
-        self.max_concurrency: int | None = None
         self.active = 0
         self.slots = threading.Condition(self.lock)
+        self.pending = deque()
 
     def current_account_error(self) -> str | None:
         with self.lock:
             return self.account_error
 
-    def _wait_for_slot(self) -> None:
-        """Pace starts and, when configured, cap concurrent upstream requests."""
-        while True:
-            with self.lock:
-                if self.account_error:
-                    raise RelayAccountError(self.account_error)
-                now = time.monotonic()
-                has_capacity = (
-                    self.current_in_flight_limit is None
-                    or self.in_flight < self.current_in_flight_limit
-                )
-                delay = max(
-                    self.last_started + self.min_interval - now,
-                    self.blocked_until - now,
-                    0.0,
-                )
-                if has_capacity and delay <= 0:
-                    self.last_started = now
-                    self.in_flight += 1
-                    return
-            time.sleep(delay if has_capacity else 0.05)
-
-    def _finish_attempt(
-        self,
-        *,
-        status: int | None = None,
-        abuse: bool = False,
-        cooldown: float = 0.0,
-        rotate: bool = False,
-        account_error: str | None = None,
-    ) -> None:
-        """Publish an attempt outcome before another waiting request can start."""
-        with self.lock:
-            if account_error and not self.account_error:
-                self.account_error = account_error
-            if rotate:
-                previous = self.session_id
-                while self.session_id == previous:
-                    self.session_id = _new_ipwo_session_id()
-                self.rotation_count += 1
-            if cooldown > 0:
-                self.blocked_until = max(
-                    self.blocked_until, time.monotonic() + cooldown,
-                )
-            if self.adaptive_rate_limit:
-                if status == 429:
-                    self.current_in_flight_limit = 1
-                    self.successes_since_rate_limit = 0
-                elif status is not None and status < 500 and not abuse:
-                    self.successes_since_rate_limit += 1
-                    if self.successes_since_rate_limit >= 3:
-                        self.current_in_flight_limit = self.max_in_flight
-                        self.successes_since_rate_limit = 0
-                else:
-                    self.successes_since_rate_limit = 0
-            self.in_flight = max(0, self.in_flight - 1)
+    def _wait_for_slot(self, budget: RequestBudget) -> None:
+        """FIFO admission for each HTTP attempt, with bounded cancellable waits."""
+        ticket = object()
+        started = time.monotonic()
+        with self.slots:
+            self.pending.append(ticket)
+            try:
+                while True:
+                    remaining = budget.remaining("queue")
+                    if self.account_error:
+                        raise RelayAccountError(self.account_error)
+                    now = time.monotonic()
+                    delay = max(self.last_started + self.min_interval - now,
+                                self.blocked_until - now, 0.0)
+                    capacity = all(
+                        limit is None or self.active < limit
+                        for limit in (self.max_concurrency, self.current_in_flight_limit)
+                    )
+                    if self.pending[0] is ticket and capacity and delay <= 0:
+                        self.pending.popleft()
+                        self.last_started = now
+                        self.active += 1
+                        self.slots.notify_all()
+                        return
+                    self.slots.wait(timeout=min(remaining, delay or 0.2, 0.2))
+            finally:
+                budget.queued_ms += (time.monotonic() - started) * 1000
+                if ticket in self.pending:
+                    self.pending.remove(ticket)
+                    self.slots.notify_all()
 
     def current_limit(self) -> int | None:
         with self.lock:
             return self.current_in_flight_limit
+
+    def _record_outcome(self, status: int | None, abuse: bool) -> None:
+        if not self.adaptive_rate_limit:
+            return
+        if status == 429:
+            self.current_in_flight_limit = 1
+            self.successes_since_rate_limit = 0
+        elif status is not None and status < 500 and not abuse:
+            self.successes_since_rate_limit += 1
+            if self.successes_since_rate_limit >= 3:
+                self.current_in_flight_limit = self.max_in_flight
+                self.successes_since_rate_limit = 0
+        else:
+            self.successes_since_rate_limit = 0
 
     def _set_cooldown(self, seconds: float) -> None:
         with self.lock:
@@ -243,95 +267,82 @@ class Controller:
         with self.lock:
             return self.rotation_count
 
-    def fetch(self, url: str, allow_redirects: bool, **kwargs):
-        admitted = time.monotonic()
-        with self.slots:
-            while self.max_concurrency is not None and self.active >= self.max_concurrency:
-                self.slots.wait()
-            self.active += 1
-        try:
-            concurrency_wait_ms = (time.monotonic() - admitted) * 1000
-            result = self._fetch(url, allow_redirects, **kwargs)
-            return (*result[:-1], result[-1] + concurrency_wait_ms)
-        finally:
-            with self.slots:
-                self.active -= 1
-                self.slots.notify_all()
+    def fetch(self, url: str, allow_redirects: bool, *, budget=None, **kwargs):
+        budget = budget or RequestBudget(REQUEST_TIMEOUT)
+        return self._fetch(url, allow_redirects, budget=budget, **kwargs)
 
     def _fetch(
         self, url: str, allow_redirects: bool, *, method: str = "GET",
         body: bytes | None = None, headers: dict[str, str] | None = None,
+        budget: RequestBudget,
     ) -> tuple[int, dict[str, str], bytes, str, int, float]:
-        started = time.monotonic()
-        queued_ms: float | None = None
-        final: tuple[int, dict[str, str], bytes, str] | None = None
+        final = None
+        parsed_target = urllib.parse.urlsplit(url)
+        metadata = {"parent_request_id": budget.request_id,
+                    "host": parsed_target.hostname, "path": parsed_target.path}
+        def cooldown(seconds):
+            self._set_cooldown(seconds)
+            _append_log({**metadata, "event": "cooldown", "seconds": seconds})
+
         for attempt in range(3):
-            self._wait_for_slot()
-            if queued_ms is None:
-                queued_ms = (time.monotonic() - started) * 1000
+            queued = time.monotonic()
+            _append_log({**metadata, "event": "request_queued", "attempt": attempt + 1})
+            self._wait_for_slot(budget)
+            budget.attempts = attempt + 1
+            status = None
+            abuse = False
             try:
-                request_options: dict[str, Any] = {
-                    "session_id": self._current_session_id(),
-                }
+                budget.remaining("upstream")
+                request_options = {"session_id": self._current_session_id(), "budget": budget}
                 if method != "GET" or body is not None or headers:
                     request_options.update(method=method, body=body, headers=headers)
                 request_id = uuid.uuid4().hex
-                parsed_target = urllib.parse.urlsplit(url)
-                _append_log({"event": "http_started", "request_id": request_id, "host": parsed_target.hostname, "path": parsed_target.path, "attempt": attempt + 1})
+                attempt_started = time.monotonic()
+                _append_log({**metadata, "event": "http_started", "request_id": request_id,
+                             "attempt": attempt + 1,
+                             "queued_ms": round((attempt_started - queued) * 1000, 1)})
                 try:
                     final = _fetch_once(url, allow_redirects, **request_options)
                 except Exception as exc:
-                    _append_log({"event": "http_finished", "request_id": request_id, "category": "network_error", "error_type": type(exc).__name__})
+                    category = ("client_cancelled" if isinstance(exc, RelayRequestCancelled)
+                                else f"{exc.phase}_timeout" if isinstance(exc, RelayRequestExpired)
+                                else "network_error")
+                    _append_log({**metadata, "event": "http_finished", "request_id": request_id,
+                                 "category": category, "error_type": type(exc).__name__,
+                                 "duration_ms": round((time.monotonic() - attempt_started) * 1000, 1)})
                     raise
-                _append_log({"event": "http_finished", "request_id": request_id, "status": final[0], "category": "rate_limit" if final[0] == 429 else "upstream_error" if final[0] >= 400 else "success", "retry_after_seconds": _retry_after(final[1])})
+                status, response_headers, _, _ = final
+                _append_log({**metadata, "event": "http_finished", "request_id": request_id,
+                             "status": status, "attempt": attempt + 1,
+                             "category": "rate_limit" if status == 429 else "upstream_error" if status >= 400 else "success",
+                             "duration_ms": round((time.monotonic() - attempt_started) * 1000, 1),
+                             "retry_after_seconds": _retry_after(response_headers)})
+                if status == 407:
+                    self._latch_account_error("IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential")
+                abuse = _is_abuse_response(final)
+                if not abuse and status != 429 and status < 500:
+                    return (*final, attempt + 1, budget.queued_ms)
+                if attempt == 2:
+                    if status == 429:
+                        cooldown(max(_retry_after(response_headers), 60.0))
+                    return (*final, attempt + 1, budget.queued_ms)
+                self._rotate_session()
+                cooldown(max(_retry_after(response_headers), 5.0 * (2**attempt)))
             except RelayAccountError as exc:
-                self._finish_attempt(account_error=str(exc))
-                raise
+                self._latch_account_error(str(exc))
             except RelayUpstreamError:
-                retry = attempt < 2
-                self._finish_attempt(
-                    cooldown=5.0 * (2**attempt) if retry else 0.0,
-                    rotate=retry,
-                )
                 if attempt == 2:
                     raise
-                continue
-            except BaseException:
-                self._finish_attempt()
-                raise
-            status, headers, _, _ = final
-            if status == 407:
-                message = "IPWO_PROXY_AUTH_FAILED: IPWO rejected the proxy credential"
-                self._finish_attempt(account_error=message)
-                raise RelayAccountError(message)
-            abuse = _is_abuse_response(final)
-            if abuse:
-                retry = attempt < 2
-                self._finish_attempt(
-                    status=status,
-                    abuse=True,
-                    cooldown=5.0 * (2**attempt) if retry else 0.0,
-                    rotate=retry,
-                )
-                if retry:
-                    continue
-                return (*final, attempt + 1, queued_ms)
-            if status != 429 and status < 500:
-                self._finish_attempt(status=status)
-                return (*final, attempt + 1, queued_ms)
-            retry = attempt < 2
-            retry_after = _retry_after(headers)
-            cooldown = (
-                max(retry_after, 5.0 * (2**attempt))
-                if retry else max(retry_after, 60.0) if status == 429 else 0.0
-            )
-            self._finish_attempt(
-                status=status,
-                cooldown=cooldown,
-                rotate=retry,
-            )
-        assert final is not None
-        return (*final, 3, queued_ms or 0.0)
+                self._rotate_session()
+                cooldown(5.0 * (2**attempt))
+            finally:
+                # Publish any cooldown before releasing capacity. A retry joins
+                # behind already queued requests rather than holding the slot.
+                with self.slots:
+                    self._record_outcome(status, abuse)
+                    self.active -= 1
+                    self.slots.notify_all()
+        raise AssertionError("unreachable")
 
 
 class ControllerPool:
@@ -367,6 +378,7 @@ class ControllerPool:
     def fetch(
         self, url: str, allow_redirects: bool, *, method: str = "GET",
         body: bytes | None = None, headers: dict[str, str] | None = None,
+        budget: RequestBudget | None = None,
     ) -> tuple[int, dict[str, str], bytes, str, int, float]:
         with self.lock:
             if self.account_error:
@@ -375,7 +387,7 @@ class ControllerPool:
             self.next_index = (self.next_index + 1) % len(self.controllers)
         try:
             return controller.fetch(
-                url, allow_redirects, method=method, body=body, headers=headers,
+                url, allow_redirects, method=method, body=body, headers=headers, budget=budget,
             )
         except RelayAccountError as exc:
             with self.lock:
@@ -494,6 +506,78 @@ def _proxy_tunnel_status(exc: Exception) -> int | None:
     return int(match.group(1)) if match else None
 
 
+@contextlib.contextmanager
+def _watch_socket(upstream_socket, budget: RequestBudget):
+    """Interrupt response reads on deadline/cancellation, including trickle bodies."""
+    if upstream_socket is None:
+        yield
+        return
+    finished = threading.Event()
+
+    def watch():
+        while not finished.wait(0.1):
+            try:
+                budget.remaining("upstream")
+            except (RelayRequestExpired, RelayRequestCancelled):
+                try:
+                    current = upstream_socket() if callable(upstream_socket) else upstream_socket
+                    if current is not None:
+                        current.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                return
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        watcher.join(0.3)
+
+
+class BudgetHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, *, budget: RequestBudget, **kwargs):
+        self.budget = budget
+        super().__init__(host, **kwargs)
+
+    def connect(self):
+        try:
+            with _watch_socket(lambda: self.sock, self.budget):
+                super().connect()
+            self.budget.remaining("upstream")
+        except Exception:
+            self.close()
+            self.budget.remaining("upstream")
+            raise
+
+    def getresponse(self):
+        with _watch_socket(lambda: self.sock, self.budget):
+            response = None
+            try:
+                response = super().getresponse()
+                self.budget.remaining("upstream")
+                return response
+            except Exception:
+                if response is not None:
+                    response.close()
+                self.close()
+                self.budget.remaining("upstream")
+                raise
+
+
+class BudgetHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, budget: RequestBudget):
+        super().__init__()
+        self.budget = budget
+
+    def https_open(self, request):
+        return self.do_open(
+            lambda host, **kwargs: BudgetHTTPSConnection(host, budget=self.budget, **kwargs),
+            request, context=self._context,
+        )
+
+
 def _fetch_once(
     url: str,
     allow_redirects: bool,
@@ -502,7 +586,10 @@ def _fetch_once(
     method: str = "GET",
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
+    budget: RequestBudget | None = None,
 ) -> tuple[int, dict[str, str], bytes, str]:
+    budget = budget or RequestBudget(REQUEST_TIMEOUT)
+    budget.remaining("upstream")
     # Proxy credentials stay in this relay and are never passed into task
     # containers. IPWO tunnels the target TLS connection normally.
     proxy_url = (
@@ -512,7 +599,8 @@ def _fetch_once(
         f"{IPWO_PROXY_HOST}:{IPWO_PROXY_PORT}"
     )
     handlers: list[Any] = [
-        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}),
+        BudgetHTTPSHandler(budget)
     ]
     handlers.append(SafeRedirect() if allow_redirects else NoRedirect())
     opener = urllib.request.build_opener(*handlers)
@@ -525,10 +613,11 @@ def _fetch_once(
         url, data=body or None, headers=forwarded, method=method,
     )
     try:
-        response = opener.open(request, timeout=UPSTREAM_TIMEOUT)
+        response = opener.open(request, timeout=min(UPSTREAM_TIMEOUT, budget.remaining("upstream")))
     except urllib.error.HTTPError as exc:
         response = exc
     except Exception as exc:
+        budget.remaining("upstream")
         tunnel_status = _proxy_tunnel_status(exc)
         if tunnel_status in {401, 407}:
             raise RelayAccountError(
@@ -547,11 +636,33 @@ def _fetch_once(
         # Proxy exceptions can embed the authenticated proxy URL. Preserve only
         # the exception type for retry/diagnostics so credentials never leak.
         raise RelayUpstreamError(type(exc).__name__) from None
-    with response:
-        body = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise ValueError("upstream response exceeds relay size limit")
-        return int(response.status), dict(response.headers.items()), body, response.geturl()
+    try:
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        with response, _watch_socket(getattr(raw, "_sock", None), budget):
+            chunks = []
+            size = 0
+            while True:
+                remaining = budget.remaining("upstream")
+                # HTTPResponse exposes its socket through the buffered reader.
+                raw = getattr(getattr(response, "fp", None), "raw", None)
+                upstream_socket = getattr(raw, "_sock", None)
+                if upstream_socket is not None:
+                    upstream_socket.settimeout(min(UPSTREAM_TIMEOUT, remaining))
+                chunk = response.read1(min(65536, MAX_RESPONSE_BYTES + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_RESPONSE_BYTES:
+                    raise ValueError("upstream response exceeds relay size limit")
+                chunks.append(chunk)
+            budget.remaining("upstream")
+            body = b"".join(chunks)
+            return int(response.status), dict(response.headers.items()), body, response.geturl()
+    except (RelayRequestCancelled, RelayRequestExpired):
+        raise
+    except (OSError, urllib.error.URLError) as exc:
+        budget.remaining("upstream")
+        raise RelayUpstreamError(type(exc).__name__) from None
 
 
 def _append_log(event: dict[str, Any]) -> None:
@@ -574,7 +685,7 @@ def _append_log(event: dict[str, Any]) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PubMedRelay/1.0"
+    server_version = "MCPHubRelay/1.0"
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -593,6 +704,15 @@ class Handler(BaseHTTPRequestHandler):
             # still working. This is not a relay/upstream failure and there is
             # no live connection on which a second error response could work.
             return False
+
+    def _client_disconnected(self) -> bool:
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+        except BlockingIOError:
+            return False
+        except OSError:
+            return True
 
     def _authorized(self) -> bool:
         return bool(TOKEN) and hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {TOKEN}")
@@ -614,10 +734,11 @@ class Handler(BaseHTTPRequestHandler):
                 None,
             )
             if account_error:
-                self._json(503, {"status": "blocked", "error": account_error})
+                self._json(503, {"status": "blocked", "error": account_error, "instance_id": os.getenv("MCPHUB_RELAY_INSTANCE_ID", "")})
             else:
                 self._json(200, {
                     "status": "ok",
+                    "instance_id": os.getenv("MCPHUB_RELAY_INSTANCE_ID", ""),
                     "egress_backend": "ipwo",
                     "min_interval_seconds": MIN_INTERVAL,
                     "ip_policy": "sticky_pool_until_failure",
@@ -658,6 +779,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": "Unable to persist relay limits"})
 
     def do_POST(self) -> None:
+        global TOKEN
+        if self.path == "/v1/token":
+            if not self._authorized() or not CONTROL_TOKEN or not hmac.compare_digest(
+                self.headers.get("X-MCPHub-Control", ""), CONTROL_TOKEN
+            ):
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 65536:
+                    raise ValueError("invalid request size")
+                token = json.loads(self.rfile.read(length)).get("token")
+                if not isinstance(token, str) or not token or len(token) > 16384 or any(c.isspace() for c in token):
+                    raise ValueError("invalid token")
+                _append_log({"event": "token_reset", "status": 200})
+                TOKEN = token
+                self._json(200, {"success": True})
+            except (ValueError, TypeError, AttributeError):
+                self._json(400, {"error": "Invalid token"})
+            except OSError:
+                self._json(500, {"error": "Unable to persist relay audit"})
+            return
         started = time.monotonic()
         if self.path != "/v1/fetch":
             self._json(404, {"error": "not found"})
@@ -672,6 +815,12 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > 65536:
                 raise ValueError("invalid request size")
             payload = json.loads(self.rfile.read(length))
+            seconds = payload.get("timeout_seconds", REQUEST_TIMEOUT)
+            if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                    or not math.isfinite(seconds) or seconds <= 0):
+                raise ValueError("Invalid request deadline")
+            budget = RequestBudget(min(float(seconds), REQUEST_TIMEOUT), self._client_disconnected)
+            request_id = budget.request_id
             url = str(payload["url"])
             method = str(payload.get("method") or "GET").upper()
             if method not in {"GET", "POST"}:
@@ -696,6 +845,7 @@ class Handler(BaseHTTPRequestHandler):
                 url = f"{url}{separator}{query}"
             status, headers, body, final_url, attempts, queued_ms = controller_for_url(url, target_group).fetch(
                 url, bool(payload.get("allow_redirects", False)),
+                budget=budget,
                 method=method,
                 body=request_body,
                 headers={str(key): str(value) for key, value in request_headers.items()},
@@ -713,6 +863,7 @@ class Handler(BaseHTTPRequestHandler):
                 "host": parsed.hostname,
                 "path": parsed.path,
                 "event": "http_completed",
+                "request_id": request_id,
                 "category": "rate_limit" if status == 429 else "upstream_error" if status >= 400 else "success",
                 "upstream_group": target_group,
                 "retry_after_seconds": _retry_after(headers),
@@ -724,6 +875,21 @@ class Handler(BaseHTTPRequestHandler):
                 "duration_ms": round((time.monotonic() - started) * 1000, 1),
                 "client_disconnected": not delivered,
             })
+        except (RelayRequestExpired, RelayRequestCancelled) as exc:
+            cancelled = isinstance(exc, RelayRequestCancelled)
+            status = 499 if cancelled else 504
+            category = "client_cancelled" if cancelled else f"{exc.phase}_timeout"
+            parsed = urllib.parse.urlsplit(url)
+            _append_log({
+                "event": "http_completed", "request_id": request_id,
+                "host": parsed.hostname, "path": parsed.path,
+                "upstream_group": target_group, "status": status, "category": category,
+                "attempts": budget.attempts, "queued_ms": round(budget.queued_ms, 1),
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "client_disconnected": cancelled,
+            })
+            if not cancelled:
+                self._json(status, {"code": category, "error": str(exc)})
         except RelayAccountError as exc:
             parsed = urllib.parse.urlsplit(url)
             _append_log({
