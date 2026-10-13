@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from typing import Any, Iterable
 
@@ -39,6 +40,44 @@ def _chunk_has_finish_reason(chunk: Any) -> bool:
     )
 
 
+def _normalize_reasoning_alias(response: Any) -> Any:
+    """Keep the provider's ``reasoning`` text in LiteLLM's canonical field.
+
+    The stream builder only combines ``reasoning_content``. Normalize each
+    delta before aggregation, retaining the original field and preferring an
+    existing canonical value so providers emitting both do not get duplicated.
+    """
+    def get(value: Any, name: str) -> Any:
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+    for choice in get(response, "choices") or []:
+        for field in ("delta", "message"):
+            message = get(choice, field)
+            if message is None:
+                continue
+            canonical = get(message, "reasoning_content")
+            alias = get(message, "reasoning")
+            if canonical in (None, "") and isinstance(alias, str) and alias:
+                if isinstance(message, dict):
+                    message["reasoning_content"] = alias
+                else:
+                    message.reasoning_content = alias
+    return response
+
+
+async def _normalize_raw_provider_chunks(stream: Any):
+    """Normalize aliases before LiteLLM can discard reasoning-only chunks."""
+    try:
+        async for chunk in stream:
+            yield _normalize_reasoning_alias(chunk)
+    finally:
+        close = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
 async def collect_litellm_response(
     response: Any,
     *,
@@ -53,9 +92,18 @@ async def collect_litellm_response(
     """
 
     if not hasattr(response, "__aiter__"):
-        return response
+        return _normalize_reasoning_alias(response)
 
-    chunks = [chunk async for chunk in response]
+    if isinstance(response, litellm.CustomStreamWrapper):
+        # The SDK filters deltas before yielding them to this collector. Its
+        # non-empty check recognizes reasoning_content, but not reasoning.
+        # fetch_stream also initializes lazily opened HTTP streams without
+        # issuing a second model request.
+        raw_stream = await response.fetch_stream()
+        if hasattr(raw_stream, "__aiter__"):
+            response.completion_stream = _normalize_raw_provider_chunks(raw_stream)
+
+    chunks = [_normalize_reasoning_alias(chunk) async for chunk in response]
     if not chunks:
         raise IncompleteModelStream("model stream returned no chunks")
     if not any(_chunk_has_finish_reason(chunk) for chunk in chunks):

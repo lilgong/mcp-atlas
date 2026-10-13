@@ -88,6 +88,8 @@ def _message_value(message: Any, field: str) -> Any:
 def _reasoning_and_content(response: Any) -> Tuple[Any, str]:
     message = _response_message(response)
     reasoning = _message_value(message, "reasoning_content")
+    if reasoning in (None, ""):
+        reasoning = _message_value(message, "reasoning")
     raw_content = _message_value(message, "content")
     content = "" if raw_content is None else str(raw_content)
     return reasoning, content
