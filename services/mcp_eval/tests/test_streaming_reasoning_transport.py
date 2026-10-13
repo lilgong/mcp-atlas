@@ -14,6 +14,14 @@ from mcp_completion.llm import create_completion
 from mcp_completion.schema import ToolCallOutputMessage, UserMessage
 
 
+@pytest.fixture(autouse=True)
+def isolate_reasoning_provider_state():
+    with patch("mcp_completion.llm.choose_key", return_value="offline-test"), patch(
+        "mcp_completion.llm.reserve_delay", return_value=0
+    ):
+        yield
+
+
 def sse(deltas, finish_reason="stop"):
     chunks = []
     for i, delta in enumerate(deltas):
