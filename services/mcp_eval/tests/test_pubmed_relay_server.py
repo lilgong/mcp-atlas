@@ -215,7 +215,7 @@ def test_slow_upstream_request_does_not_block_another_request(monkeypatch):
     assert calls == ["https://test/first", "https://test/second"]
 
 
-def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
+def test_arxiv_controller_obeys_configured_concurrency(monkeypatch):
     release = threading.Event()
     two_started = threading.Event()
     third_started = threading.Event()
@@ -234,9 +234,8 @@ def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
         return 200, {}, b"ok", url
 
     monkeypatch.setattr(relay, "_fetch_once", fake_fetch)
-    controller = relay.Controller(
-        0, max_in_flight=2, adaptive_rate_limit=True,
-    )
+    controller = relay.Controller(0)
+    controller.max_concurrency = 2
     threads = [
         threading.Thread(
             target=controller.fetch,
@@ -256,28 +255,16 @@ def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
     assert third_started.is_set()
 
 
-def test_arxiv_controller_reduces_on_429_then_recovers():
-    controller = relay.Controller(
-        0, max_in_flight=2, adaptive_rate_limit=True,
-    )
-
-    controller._wait_for_slot(relay.RequestBudget(10))
-    with controller.slots:
-        controller._record_outcome(429, False)
-        controller.active -= 1
-    assert controller.current_limit() == 1
-    for expected in (1, 1, 2):
-        controller._wait_for_slot(relay.RequestBudget(10))
-        with controller.slots:
-            controller._record_outcome(200, False)
-            controller.active -= 1
-        assert controller.current_limit() == expected
-    assert controller.current_limit() == 2
+def test_arxiv_controller_has_no_adaptive_concurrency_cap():
+    controller = relay.CONTROLLERS["arxiv"]
+    assert controller.min_interval == 3.0
+    assert controller.max_concurrency == relay.DEFAULT_LIMITS["arxiv"]["concurrency"]
+    assert not hasattr(controller, "adaptive_rate_limit")
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_arxiv_queue_removes_expired_or_cancelled_request(cancelled):
-    controller = relay.Controller(0, max_in_flight=2, adaptive_rate_limit=True)
+    controller = relay.Controller(0)
     controller.max_concurrency = 1
     controller._wait_for_slot(relay.RequestBudget(10))
     budget = relay.RequestBudget(0.02, disconnected=lambda: cancelled)
@@ -286,7 +273,7 @@ def test_arxiv_queue_removes_expired_or_cancelled_request(cancelled):
         controller._wait_for_slot(budget)
     assert not controller.pending
     assert controller.active == 1
-    assert controller.current_limit() == 2
+    assert controller.max_concurrency == 1
     with controller.slots:
         controller.active -= 1
     controller._wait_for_slot(relay.RequestBudget(10))

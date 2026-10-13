@@ -165,12 +165,7 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Controller:
-    def __init__(
-        self, min_interval: float | None = None, *,
-        max_in_flight: int | None = None, adaptive_rate_limit: bool = False,
-    ) -> None:
-        if max_in_flight is not None and max_in_flight < 1:
-            raise ValueError("max_in_flight must be positive")
+    def __init__(self, min_interval: float | None = None) -> None:
         self.lock = threading.Lock()
         self.last_started = 0.0
         self.blocked_until = 0.0
@@ -179,10 +174,6 @@ class Controller:
         self.rotation_count = 0
         self.min_interval = MIN_INTERVAL if min_interval is None else min_interval
         self.max_concurrency: int | None = None
-        self.max_in_flight = max_in_flight
-        self.adaptive_rate_limit = adaptive_rate_limit
-        self.current_in_flight_limit = max_in_flight
-        self.successes_since_rate_limit = 0
         self.active = 0
         self.slots = threading.Condition(self.lock)
         self.pending = deque()
@@ -205,10 +196,7 @@ class Controller:
                     now = time.monotonic()
                     delay = max(self.last_started + self.min_interval - now,
                                 self.blocked_until - now, 0.0)
-                    capacity = all(
-                        limit is None or self.active < limit
-                        for limit in (self.max_concurrency, self.current_in_flight_limit)
-                    )
+                    capacity = self.max_concurrency is None or self.active < self.max_concurrency
                     if self.pending[0] is ticket and capacity and delay <= 0:
                         self.pending.popleft()
                         self.last_started = now
@@ -221,24 +209,6 @@ class Controller:
                 if ticket in self.pending:
                     self.pending.remove(ticket)
                     self.slots.notify_all()
-
-    def current_limit(self) -> int | None:
-        with self.lock:
-            return self.current_in_flight_limit
-
-    def _record_outcome(self, status: int | None, abuse: bool) -> None:
-        if not self.adaptive_rate_limit:
-            return
-        if status == 429:
-            self.current_in_flight_limit = 1
-            self.successes_since_rate_limit = 0
-        elif status is not None and status < 500 and not abuse:
-            self.successes_since_rate_limit += 1
-            if self.successes_since_rate_limit >= 3:
-                self.current_in_flight_limit = self.max_in_flight
-                self.successes_since_rate_limit = 0
-        else:
-            self.successes_since_rate_limit = 0
 
     def _set_cooldown(self, seconds: float) -> None:
         with self.lock:
@@ -289,8 +259,6 @@ class Controller:
             _append_log({**metadata, "event": "request_queued", "attempt": attempt + 1})
             self._wait_for_slot(budget)
             budget.attempts = attempt + 1
-            status = None
-            abuse = False
             try:
                 budget.remaining("upstream")
                 request_options = {"session_id": self._current_session_id(), "budget": budget}
@@ -339,7 +307,6 @@ class Controller:
                 # Publish any cooldown before releasing capacity. A retry joins
                 # behind already queued requests rather than holding the slot.
                 with self.slots:
-                    self._record_outcome(status, abuse)
                     self.active -= 1
                     self.slots.notify_all()
         raise AssertionError("unreachable")
@@ -408,7 +375,6 @@ DEFAULT_LIMITS = {
     "osm-routing": {"minIntervalMs": 1000},
 }
 CONTROLLERS = {name: Controller(0) for name in DEFAULT_LIMITS}
-CONTROLLERS["arxiv"] = Controller(3.0, max_in_flight=2, adaptive_rate_limit=True)
 
 
 def apply_limits(values: dict, *, persist: bool = True) -> None:
