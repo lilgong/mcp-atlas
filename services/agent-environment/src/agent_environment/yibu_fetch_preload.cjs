@@ -4,9 +4,11 @@
 // loaded before the upstream package, so tool registration and schemas remain
 // entirely upstream-owned.
 const {
-  appendFileSync,
-  mkdirSync,
+  openSync, writeSync, fsyncSync, closeSync, mkdirSync,
 } = require("node:fs");
+
+const { createHash, randomUUID } = require("node:crypto");
+const { dirname } = require("node:path");
 
 const DEFAULT_MCP_TOOL_BASE_URL = "https://yibuapi.com";
 
@@ -90,33 +92,39 @@ function isUpstreamRequest(rawUrl, service) {
   return Boolean(rule) && new URL(String(rawUrl)).origin === rule.upstreamOrigin;
 }
 
-function logUsage(service, key, url, status, durationMs, errorName) {
+function logUsage(service, key, url, status, durationMs, errorName, event = "finished", requestId) {
+  const value = String(key || "").replace(/^Bearer\s+/i, "");
+  const fingerprint = createHash("sha256").update(value).digest("hex").slice(0, 16);
+  const now = new Date();
+  const root = process.env.MCP_USAGE_LOG_DIR || "mcp_usage_log";
+  const directory = `${root}/${now.toISOString().slice(0, 7)}`;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const record = {
+    ts: now.toISOString(), service, credential_id: fingerprint,
+    event, request_id: requestId,
+    status: status || 0, duration_ms: durationMs, error: errorName || null,
+    task_id: process.env.MCP_TASK_ID || null,
+  };
+  const line = Buffer.from(JSON.stringify(record) + "\n");
+  const day = now.toISOString().slice(0, 10).replace(/-/g, "");
+  const fd = openSync(`${directory}/${service}_${fingerprint}_${day}.jsonl`, "a", 0o600);
   try {
-    const value = String(key || "").replace(/^Bearer\s+/i, "");
-    const suffix = value ? value.slice(-8) : "no-key";
-    const now = new Date();
-    const month = now.toISOString().slice(0, 7);
-    const day = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const directory = `${process.env.MCP_USAGE_LOG_DIR || "mcp_usage_log"}/${month}`;
-    const parsed = new URL(url);
-    mkdirSync(directory, { recursive: true });
-    appendFileSync(
-      `${directory}/${service}_${suffix}_${day}.jsonl`,
-      JSON.stringify({
-        ts: now.toISOString(),
-        service,
-        key_suffix: suffix,
-        host: parsed.hostname,
-        path: parsed.pathname,
-        status: status || 0,
-        duration_ms: durationMs,
-        error: errorName || null,
-        task_id: process.env.MCP_TASK_ID || null,
-      }) + "\n",
-    );
-  } catch (error) {
-    process.stderr.write(`[mcp-usage-log] ${error?.message || error}\n`);
+    if (writeSync(fd, line) !== line.length) throw new Error("Incomplete usage audit write");
+    fsyncSync(fd);
+  } finally { closeSync(fd); }
+  for (const path of [directory, root, dirname(root)]) {
+    const fd = openSync(path, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
   }
+  if (process.env.MCP_USAGE_LOG_STDERR === "true") {
+    process.stderr.write(`[mcp-usage] ${JSON.stringify(record)}\n`);
+  }
+}
+
+function startUsage(service, key) {
+  const requestId = randomUUID();
+  logUsage(service, key, "", 0, 0, null, "started", requestId);
+  return requestId;
 }
 
 function installLaraNodeTransport(key) {
@@ -139,6 +147,7 @@ function installLaraNodeTransport(key) {
     const originalBaseUrl = this.baseUrl;
     const gateway = yibuBaseUrl();
     const requestPath = gatewayPath("/lara", path);
+    const requestId = startUsage("lara", key);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
@@ -161,7 +170,7 @@ function installLaraNodeTransport(key) {
       this.baseUrl = originalBaseUrl;
       logUsage(
         "lara", key, new URL(requestPath, gateway.origin).toString(), status,
-        Date.now() - startedAt, errorName,
+        Date.now() - startedAt, errorName, "finished", requestId,
       );
     }
   };
@@ -172,6 +181,7 @@ function installLaraNodeTransport(key) {
     const originalBaseUrl = this.baseUrl;
     const gateway = yibuBaseUrl();
     const requestPath = gatewayPath("/lara", path);
+    const requestId = startUsage("lara", key);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
@@ -195,7 +205,7 @@ function installLaraNodeTransport(key) {
       this.baseUrl = originalBaseUrl;
       logUsage(
         "lara", key, new URL(requestPath, gateway.origin).toString(), status,
-        Date.now() - startedAt, errorName,
+        Date.now() - startedAt, errorName, "finished", requestId,
       );
     }
   };
@@ -230,6 +240,7 @@ function install(service) {
     const requestInput = input instanceof Request
       ? new Request(rewrittenUrl, input)
       : rewrittenUrl;
+    const requestId = startUsage(service, key);
     const startedAt = Date.now();
     let status = 0;
     let errorName = null;
@@ -247,7 +258,7 @@ function install(service) {
         rewrittenUrl,
         status,
         Date.now() - startedAt,
-        errorName,
+        errorName, "finished", requestId,
       );
     }
   };
@@ -255,6 +266,8 @@ function install(service) {
 
 module.exports = {
   install,
+  logUsage,
+  startUsage,
   isUpstreamRequest,
   laraSessionToken,
   rewriteHeaders,

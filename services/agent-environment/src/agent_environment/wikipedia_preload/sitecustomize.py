@@ -20,16 +20,16 @@ DEFAULT_RATE_LIMIT_SECONDS = 60.0
 
 
 def _relay_settings() -> tuple[str, str, float] | None:
-    url = (os.getenv("WIKIPEDIA_RELAY_URL") or "").strip().rstrip("/")
-    token = (os.getenv("WIKIPEDIA_RELAY_TOKEN") or "").strip()
+    url = (os.getenv("MCP_RELAY_URL") or "").strip().rstrip("/")
+    token = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
     if not url and not token:
         return None
     if not url or not token:
         raise RuntimeError(
-            "WIKIPEDIA_RELAY_URL and WIKIPEDIA_RELAY_TOKEN must be set together"
+            "MCP_RELAY_URL and MCP_RELAY_TOKEN must be set together"
         )
     try:
-        timeout = float(os.getenv("WIKIPEDIA_RELAY_TIMEOUT_SECONDS") or "90")
+        timeout = float(os.getenv("MCP_RELAY_TIMEOUT_SECONDS") or "90")
     except ValueError:
         timeout = 90.0
     return url, token, timeout

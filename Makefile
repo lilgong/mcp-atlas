@@ -8,6 +8,7 @@ MCP_STATUS_HOST_PORT ?= 1985
 # Host-networked shared MCP port is read from MCP_SHARED_PORT in .env.
 TASK_MONGO_IMAGE ?=
 ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:latest
+RELAY_ENV_FILE ?= $(if $(wildcard .env.relay),.env.relay,.env)
 MONGO_FIXTURE_DUMP ?=
 MONGO_FIXTURE_DB ?=
 MONGO_FIXTURE_ID ?=
@@ -21,7 +22,7 @@ run-docker-host: # run shared MCP using MCP_SHARED_HOST/MCP_SHARED_PORT from .en
 	uv run --project services/mcp_eval python scripts/run_shared_mcp.py
 
 run-egress-relay: # run the authenticated MCP residential egress relay
-	uv run --env-file .env python scripts/pubmed_relay_server.py
+	uv run --env-file $(RELAY_ENV_FILE) python scripts/pubmed_relay_server.py
 
 build: # builds agent-environment; only tags :latest (VERSION is for the GHCR push target)
 	cd services/agent-environment && docker buildx build --platform linux/amd64 -t $(IMAGE_NAME) .

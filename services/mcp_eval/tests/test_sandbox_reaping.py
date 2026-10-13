@@ -24,6 +24,26 @@ class DockerTimestampTests(unittest.TestCase):
         self.assertIsNone(_parse_docker_timestamp("not-a-timestamp"))
 
 
+class CleanupDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_docker_rejection_is_logged_with_its_reason(self):
+        error = "volume is in use - [container-id]"
+        with patch.object(task_sandbox, "_run", AsyncMock(return_value=("", error, 1))), \
+             patch.object(task_sandbox, "write_runtime_event") as event, \
+             self.assertLogs(level="WARNING") as logs:
+            result = await task_sandbox._reap_one("docker", "volume", "rm", "-f", "volume-name")
+        self.assertFalse(result)
+        self.assertEqual(event.call_args.kwargs["error"], error)
+        self.assertEqual(event.call_args.kwargs["exit_code"], 1)
+        self.assertIn(error, logs.output[0])
+
+    async def test_failed_listing_cannot_report_a_clean_result(self):
+        with patch.object(task_sandbox, "_run", AsyncMock(return_value=("", "daemon unavailable", 1))), \
+             patch.object(task_sandbox, "write_runtime_event"), \
+             self.assertLogs(level="WARNING"):
+            result = await task_sandbox.reap_owned_task_sandboxes()
+        self.assertEqual(result["listing_failures"], 6)
+
+
 class OrphanSweepTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._saved = set(task_sandbox._LIVE_SANDBOX_NAMES)

@@ -25,8 +25,8 @@
         "/agent-environment/src/agent_environment/arxiv_mcp_compat.py"
       ],
       "env": {
-        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}"
       }
     },
     "brave-search": {
@@ -284,8 +284,9 @@
         "/agent-environment/src/agent_environment/osm_mcp_compat.py"
       ],
       "env": {
-        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "OSM_OVERPASS_URLS": "${OSM_OVERPASS_URLS}"
       }
     },
     "oxylabs": {
@@ -308,8 +309,11 @@
         "agent_environment.pubmed_mcp_compat"
       ],
       "env": {
-        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}"
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "NCBI_API_KEY": "${NCBI_API_KEY}",
+        "NCBI_EMAIL": "${NCBI_EMAIL}",
+        "NCBI_TOOL": "${NCBI_TOOL}"
       }
     },
     "slack": {
@@ -382,9 +386,9 @@
       ],
       "env": {
         "PYTHONPATH": "/agent-environment/src/agent_environment/wikipedia_preload",
-        "WIKIPEDIA_RELAY_URL": "${PUBMED_RELAY_URL}",
-        "WIKIPEDIA_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
-        "WIKIPEDIA_RELAY_TIMEOUT_SECONDS": "${PUBMED_RELAY_TIMEOUT_SECONDS}"
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}"
       }
     }
   }

@@ -398,3 +398,43 @@ def test_controller_forwards_post_body_and_headers(monkeypatch):
     assert captured["method"] == "POST"
     assert captured["body"] == b"data=query"
     assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+
+
+@pytest.fixture(autouse=True)
+def temporary_audit_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(relay, "LOG_PATH", tmp_path / "usage.jsonl")
+    monkeypatch.setattr(relay, "LIMITS_PATH", tmp_path / "limits.json")
+
+
+def test_live_limits_validate_and_persist(monkeypatch, tmp_path):
+    old = relay.current_limits()
+    values = {name: dict(value) for name, value in old.items()}
+    values["wikipedia"] = {"minIntervalMs": 500, "concurrency": 2}
+    try:
+        relay.apply_limits(values)
+        assert relay.current_limits()["wikipedia"] == values["wikipedia"]
+        assert __import__("json").loads(relay.LIMITS_PATH.read_text()) == values
+        invalid = dict(values)
+        invalid["wikipedia"] = {"minIntervalMs": -1}
+        with pytest.raises(ValueError):
+            relay.apply_limits(invalid)
+        assert relay.current_limits() == values
+    finally:
+        relay.apply_limits(old, persist=False)
+
+
+def test_ncbi_key_and_pmc_have_separate_http_policies():
+    assert relay.controller_for_url("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?api_key=test", "ncbi") is relay.CONTROLLERS["ncbi-key"]
+    assert relay.controller_for_url("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi", "ncbi") is relay.CONTROLLERS["ncbi"]
+    assert relay.controller_for_url("https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123", "ncbi") is relay.CONTROLLERS["ncbi-pmc"]
+
+
+def test_each_http_attempt_is_logged_without_query_or_keys(monkeypatch, tmp_path):
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?api_key=do-not-log&term=private-query"
+    monkeypatch.setattr(relay, "_fetch_once", lambda target, redirects, **kwargs: (200, {}, b"private body", target))
+    relay.Controller(0).fetch(url, False)
+    raw = relay.LOG_PATH.read_text()
+    records = [__import__("json").loads(line) for line in raw.splitlines()]
+    assert [item["event"] for item in records] == ["http_started", "http_finished"]
+    assert records[0]["request_id"] == records[1]["request_id"]
+    assert "do-not-log" not in raw and "private-query" not in raw and "private body" not in raw
