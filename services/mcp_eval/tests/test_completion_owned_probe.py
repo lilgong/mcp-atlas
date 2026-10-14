@@ -91,3 +91,22 @@ def test_disconnected_probe_cancels_and_waits_for_cleanup():
             assert exc.value.status_code == 499
             assert cleaned.is_set()
     asyncio.run(run())
+
+
+def test_git_initialization_failure_returns_structured_503_not_uncaught_500():
+    from mcp_completion.runtime_probe import runtime_probe, RuntimeProbeRequest
+    from mcp_completion.task_data import TaskDataError
+    from fastapi import HTTPException
+    from types import SimpleNamespace
+    async def run():
+        class Request:
+            client = SimpleNamespace(host="127.0.0.1")
+            async def body(self): return b'{}'
+            async def receive(self): await asyncio.Future()
+        with patch("mcp_server_probe.run_isolated", AsyncMock(side_effect=TaskDataError("Git operation failed: damaged cache"))):
+            with pytest.raises(HTTPException) as exc:
+                await runtime_probe(RuntimeProbeRequest(shared_url=config.MCP_SERVER_URL), Request())
+            assert exc.value.status_code == 503
+            assert exc.value.detail["code"] == "task_initialization_failed"
+            assert "damaged cache" in exc.value.detail["detail"]
+    asyncio.run(run())

@@ -39,6 +39,9 @@ async def runtime_probe(body: RuntimeProbeRequest, request: Request):
     if body.shared_url.rstrip("/") != config.MCP_SERVER_URL.rstrip("/"):
         raise HTTPException(409, "Probe gateway does not belong to this completion runtime")
     from mcp_server_probe import run_isolated
+    from .task_data import TaskDataError
+    from .task_sandbox import TaskSandboxError
+    from .runtime_log import _redact_string
 
     await request.body()
     write_runtime_event("service", "runtime_probe_started", server=body.server)
@@ -64,11 +67,15 @@ async def runtime_probe(body: RuntimeProbeRequest, request: Request):
                             results=[asdict(result) for result in results])
         return {"schema_version": 1, "runtime_identity": runtime_identity(),
                 "results": [asdict(result) for result in results]}
+    except (TaskDataError, TaskSandboxError) as exc:
+        detail = _redact_string(str(exc))
+        write_runtime_event("service", "runtime_probe_initialization_failed", server=body.server, detail=detail)
+        raise HTTPException(503, {"code": "task_initialization_failed", "detail": detail}) from None
     finally:
         # IsolatedMCPClient shields sandbox/lease teardown on cancellation.
         # Never abandon task containers when the CLI times out or exits.
         for task in (probe, watcher):
             if not task.done():
                 task.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, Exception):
                 await task
