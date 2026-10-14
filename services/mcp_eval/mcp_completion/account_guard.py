@@ -159,12 +159,29 @@ _STABLE_TOOL_ACCOUNT_MARKERS = (
 )
 
 
+# Only generic quota wording may be explained by a short time window.
+# Every explicit permanent marker comes from the same canonical list above.
+_TIME_WINDOW_OVERRIDABLE_ACCOUNT_MARKERS = frozenset({
+    "quota exceeded", "quota has been exceeded", "exceeded quota",
+})
+
+
 def is_time_based_quota_error(value: Any) -> bool:
-    """Time-window quota exhaustion is recoverable, not invalid credentials."""
+    """A time-window quota is recoverable unless a permanent failure is present."""
     text = str(value or "").casefold()
-    quota = any(marker in text for marker in ("quota exceeded", "quota has been exceeded", "ratelimitexceeded", "userratelimitexceeded"))
-    window = any(marker in text for marker in ("per minute", "per second", "per 100 seconds", "requests per minute", "units per minute"))
-    hard_failure = any(marker in text for marker in ("invalid credentials", "invalid api key", "invalid token", "expired token", "authentication failed", "bad credentials", "unauthorized", "insufficient balance", "insufficient funds", "payment required", "daily", "monthly"))
+    quota = any(marker in text for marker in (
+        *_TIME_WINDOW_OVERRIDABLE_ACCOUNT_MARKERS,
+        "ratelimitexceeded", "userratelimitexceeded",
+    ))
+    window = any(marker in text for marker in (
+        "per minute", "per second", "per 100 seconds",
+        "requests per minute", "units per minute",
+    ))
+    hard_failure = any(
+        marker in text
+        for marker in _FATAL_ACCOUNT_MARKERS
+        if marker not in _TIME_WINDOW_OVERRIDABLE_ACCOUNT_MARKERS
+    ) or any(marker in text for marker in ("daily", "monthly", "per day", "per month"))
     return quota and window and not hard_failure
 
 

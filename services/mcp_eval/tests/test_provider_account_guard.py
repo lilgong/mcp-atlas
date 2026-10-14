@@ -1,6 +1,7 @@
 import pytest
 
 from mcp_completion.account_guard import (
+    _FATAL_ACCOUNT_MARKERS,
     FatalAccountError,
     credential_envs_for_mcp_server,
     describe_fatal_account_error,
@@ -309,3 +310,16 @@ def test_gmail_minute_quota_is_a_rate_limited_tool_result():
     result["isError"] = False
     result["content"][0]["text"] = "An email discussing quota exceeded per minute"
     assert not _is_rate_limited_tool_result(result)
+
+
+@pytest.mark.parametrize("marker", [
+    marker for marker in _FATAL_ACCOUNT_MARKERS
+    if marker not in {"quota exceeded", "quota has been exceeded", "exceeded quota"}
+])
+def test_all_permanent_markers_override_time_window_quota(marker):
+    from mcp_completion.account_guard import is_time_based_quota_error
+    text = f"Error fetching emails: Quota exceeded: Units per minute per user; {marker}"
+    result = {"isError": True, "content": [{"type": "text", "text": text}]}
+    assert not is_time_based_quota_error(text)
+    assert is_fatal_account_error(text)
+    assert is_fatal_mcp_account_error("google-workspace", result)
