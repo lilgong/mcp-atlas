@@ -20,7 +20,7 @@ router = APIRouter()
 class RuntimeProbeRequest(BaseModel):
     shared_url: str
     server: str | None = None
-    timeout: float = Field(default=60, gt=0, le=600)
+    timeout: float = Field(default=120, gt=0, le=600)
     concurrency: int = Field(default=5, ge=1, le=100)
     retries: int = Field(default=2, ge=0, le=10)
     data_only: bool = False

@@ -119,3 +119,17 @@ def test_git_smoke_uses_current_fixture_manifest(tmp_path):
     original = TEST_CALLS["git"]
     assert fixture_smoke_calls(str(tmp_path))["git"][1]["repo_path"] == "/data/repos/tsoa"
     assert TEST_CALLS["git"] == original
+
+
+def test_probe_request_default_timeout_is_120_and_override_is_preserved():
+    from mcp_completion.runtime_probe import RuntimeProbeRequest
+    assert RuntimeProbeRequest(shared_url=config.MCP_SERVER_URL).timeout == 120
+    assert RuntimeProbeRequest(shared_url=config.MCP_SERVER_URL, timeout=30).timeout == 30
+
+
+def test_probe_script_default_timeout_is_120(monkeypatch):
+    import sys
+    from mcp_server_probe import _parse_cli
+    monkeypatch.setattr(sys, "argv", ["test_server_v2.py"])
+    _, args = _parse_cli("offline test", default_concurrency=5)
+    assert args.timeout == 120
