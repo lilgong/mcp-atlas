@@ -110,3 +110,12 @@ def test_git_initialization_failure_returns_structured_503_not_uncaught_500():
             assert exc.value.detail["code"] == "task_initialization_failed"
             assert "damaged cache" in exc.value.detail["detail"]
     asyncio.run(run())
+
+
+def test_git_smoke_uses_current_fixture_manifest(tmp_path):
+    from mcp_server_probe import fixture_smoke_calls, TEST_CALLS
+    (tmp_path / "repos").mkdir()
+    (tmp_path / "repos/git_submodule_info.csv").write_text("https://github.com/jewbell/tsoa.git," + "a" * 40 + ",/data/repos/tsoa\n")
+    original = TEST_CALLS["git"]
+    assert fixture_smoke_calls(str(tmp_path))["git"][1]["repo_path"] == "/data/repos/tsoa"
+    assert TEST_CALLS["git"] == original

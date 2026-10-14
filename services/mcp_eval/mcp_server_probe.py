@@ -736,6 +736,7 @@ async def _run_checks(
     smokes: list[str],
     concurrency: int,
     timeout: float,
+    smoke_calls: dict | None = None,
 ) -> list[Result]:
     sem = asyncio.Semaphore(concurrency)
 
@@ -745,10 +746,22 @@ async def _run_checks(
 
     tasks = [guard(run_probe, call, name, timeout) for name in probes]
     tasks += [
-        guard(run_smoke, call, name, *TEST_CALLS[name])
+        guard(run_smoke, call, name, *(smoke_calls or TEST_CALLS)[name])
         for name in smokes
     ]
     return list(await asyncio.gather(*tasks))
+
+
+def fixture_smoke_calls(data_dir: str) -> dict:
+    """Select a real pinned Git path; never assume the official fixture."""
+    from mcp_completion.task_data import _load_repo_specs, TaskDataError
+    specs = _load_repo_specs(Path(data_dir) / "repos/git_submodule_info.csv")
+    if not specs:
+        raise TaskDataError("Git probe requires a nonempty pinned repository manifest")
+    calls = dict(TEST_CALLS)
+    tool, args = calls["git"]
+    calls["git"] = (tool, {**args, "repo_path": "/data/repos/" + specs[0].name})
+    return calls
 
 
 def _render_results(results: list[Result]) -> None:
@@ -913,6 +926,7 @@ async def run_isolated(
             smokes=smokes,
             concurrency=concurrency,
             timeout=timeout,
+            smoke_calls=fixture_smoke_calls(os.environ["MCP_TASK_DATA_DIR"]) if "git" in smokes else None,
         )
         if "slack" in probes:
             selected_input = input_path or resolve_completion_input(None)
