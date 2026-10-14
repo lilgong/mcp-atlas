@@ -284,3 +284,28 @@ def test_fatal_account_description_names_source_and_env_without_key_value():
     assert "source=mcp" in description
     assert "name=brave-search" in description
     assert "credential_env=BRAVE_API_KEY" in description
+
+
+@pytest.mark.parametrize("window", ["Units per minute per user", "Requests per second"])
+def test_time_window_quota_does_not_stop_account(window):
+    from mcp_completion.account_guard import is_time_based_quota_error
+    text = f"Error fetching emails: Quota exceeded for quota metric 'Total Query Cost' and limit '{window}' of service 'gmail.googleapis.com'"
+    result = {"isError": True, "content": [{"type": "text", "text": text}]}
+    assert is_time_based_quota_error(text)
+    assert not is_fatal_account_error(text)
+    assert not is_fatal_mcp_account_error("google-workspace", result)
+
+
+@pytest.mark.parametrize("text", ["Quota exceeded: monthly quota", "Quota exceeded: daily credits exhausted", "Quota exceeded per minute; invalid credentials", "Quota exceeded per minute; invalid token"])
+def test_permanent_quota_or_credentials_remain_fatal(text):
+    assert is_fatal_account_error(text)
+
+
+def test_gmail_minute_quota_is_a_rate_limited_tool_result():
+    from mcp_completion.mcp_client.isolated_client import _is_rate_limited_tool_result
+    result = {"isError": True, "content": [{"type": "text", "text": "Error fetching emails: Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user' of service 'gmail.googleapis.com'"}]}
+    assert _is_rate_limited_tool_result(result)
+    assert not is_fatal_mcp_account_error("google-workspace", result)
+    result["isError"] = False
+    result["content"][0]["text"] = "An email discussing quota exceeded per minute"
+    assert not _is_rate_limited_tool_result(result)

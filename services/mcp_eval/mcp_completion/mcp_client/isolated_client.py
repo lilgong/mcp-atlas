@@ -20,6 +20,7 @@ from ..account_guard import (
     FatalAccountError,
     credential_envs_for_mcp_server,
     is_fatal_mcp_account_error,
+    is_time_based_quota_error,
 )
 from ..schema import CallToolResponse, ToolDefinition
 from ..shared_rate_gate import RateLease, SharedRateGate
@@ -153,6 +154,7 @@ class ServerCallSlot:
 
 
 _RATE_LIMIT_MARKERS = (
+    "gmail_rate_limit",
     "http 429",
     "429 too many requests",
     "status code: 429",
@@ -166,7 +168,7 @@ _RATE_LIMIT_MARKERS = (
 
 def _contains_rate_limit_marker(value: Any) -> bool:
     text = str(value or "").casefold()
-    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+    return is_time_based_quota_error(text) or any(marker in text for marker in _RATE_LIMIT_MARKERS)
 
 
 def _is_rate_limited_tool_result(result: Any) -> bool:
