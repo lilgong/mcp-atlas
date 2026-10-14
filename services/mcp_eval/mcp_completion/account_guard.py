@@ -159,10 +159,19 @@ _STABLE_TOOL_ACCOUNT_MARKERS = (
 )
 
 
+def is_time_based_quota_error(value: Any) -> bool:
+    """Time-window quota exhaustion is recoverable, not invalid credentials."""
+    text = str(value or "").casefold()
+    quota = any(marker in text for marker in ("quota exceeded", "quota has been exceeded", "ratelimitexceeded", "userratelimitexceeded"))
+    window = any(marker in text for marker in ("per minute", "per second", "per 100 seconds", "requests per minute", "units per minute"))
+    hard_failure = any(marker in text for marker in ("invalid credentials", "invalid api key", "invalid token", "expired token", "authentication failed", "bad credentials", "unauthorized", "insufficient balance", "insufficient funds", "payment required", "daily", "monthly"))
+    return quota and window and not hard_failure
+
+
 def is_fatal_account_error(value: Any) -> bool:
     """Return whether an actual error describes unusable credentials/funds."""
     text = str(value or "").casefold()
-    return any(marker in text for marker in _FATAL_ACCOUNT_MARKERS)
+    return not is_time_based_quota_error(text) and any(marker in text for marker in _FATAL_ACCOUNT_MARKERS)
 
 
 def is_fatal_tool_result(result: Any) -> bool:
