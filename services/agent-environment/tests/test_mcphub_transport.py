@@ -165,6 +165,19 @@ def test_invalid_target_is_rejected_instead_of_truncated(target):
         hub_server_configs({**ENV, "MCPHUB_TARGET": target}, {"brave-search"})
 
 
+def test_hub_timeout_covers_queue_and_execution():
+    config = hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": "420"}, {"brave-search"})["brave-search"]
+    assert config["sse_read_timeout"] == 420
+    client = create_server_client("brave-search", config)
+    assert client.transport.sse_read_timeout.total_seconds() == 420
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "invalid"])
+def test_invalid_hub_timeout_fails_closed(value):
+    with pytest.raises(ValueError):
+        hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": value}, {"brave-search"})
+
+
 @pytest.mark.parametrize("server,key_name", [("context7", "CONTEXT7_API_KEYS"), ("twelvedata", "TWELVE_DATA_API_KEYS")])
 def test_hub_does_not_apply_atlas_upstream_key_pool(server, key_name, monkeypatch):
     from agent_environment import mcp_client
