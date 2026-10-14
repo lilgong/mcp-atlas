@@ -154,7 +154,7 @@ RESULT_COLUMNS = (
 # Bump this whenever the judge prompt, output contract, or score aggregation
 # semantics change.  Resume is safe only when both the judged input and this
 # policy identity are unchanged.
-SCORING_POLICY_VERSION = "coverage-judge-v2"
+SCORING_POLICY_VERSION = "coverage-judge-v3-consistency"
 SCORING_FINGERPRINT_COLUMN = "scoring_fingerprint"
 SCORING_MODEL_COLUMN = "scoring_evaluator_model"
 SCORING_POLICY_COLUMN = "scoring_policy_version"
@@ -680,6 +680,18 @@ class CoverageEvaluator:
 
     def _get_single_claim_evaluation_prompt(self, claim: str, response: str) -> str:
         """Generate prompt for evaluating a single claim"""
+        from datetime import datetime, timezone
+        # Pure derived context: only explicitly labelled Unix-sized timestamps,
+        # never arbitrary IDs, model prose dates or a new external lookup.
+        conversions = []
+        for value in dict.fromkeys(re.findall(
+            r"\btimestamp\s*[:=]?\s*`?(\d{10}(?:\.\d+)?)(?!\d)", str(response), re.I
+        )):
+            try:
+                conversions.append(f"{value} -> {datetime.fromtimestamp(float(value), timezone.utc).isoformat()}")
+            except (ValueError, OverflowError, OSError):
+                continue
+        computed_context = '\n'.join(conversions) or 'No explicitly labelled Unix timestamp found.'
         output_format = """{
 "claim_text": "str type",
 "confidence_level": "float type",
@@ -693,6 +705,15 @@ SCORING CRITERIA:
 - partially_fulfilled: Claim is partially addressed. The response covers some but not all key details.
 - not_fulfilled: Claim is not addressed. The response does not include any key details.
 NUMERICAL COMPARISON GUIDELINES:
+- A response is not fully fulfilled if it gives contradictory values for the SAME fact,
+  even if one matches the claim. A correct Unix timestamp next to an incorrect explicitly
+  UTC calendar date is a contradiction, not extra harmless context. Check equivalent
+  representations; do not merely assume they are consistent. If conversion is unresolved,
+  do not assert it was verified. A clearly superseded intermediate guess is not a final
+  contradiction. Do not penalize unrelated extra detail solely for being extra.
+- Dates, timestamps, identifiers and category/counting definitions are not approximate
+  measurements: do not apply the 5% tolerance to them. Respect reasonable rounding of
+  time fractions and genuine timezone equivalence.
 - For numerical values, use reasonable approximation thresholds:
   * Exact match NOT required for decimals
   * Values within 5% of the claimed number are considered matching
@@ -707,6 +728,8 @@ CLAIM TO EVALUATE:
 {claim}
 MODEL RESPONSE TO ANALYZE:
 {response}
+CODE-COMPUTED UTC CONVERSIONS (derived context, not a new source):
+{computed_context}
 INSTRUCTIONS:
 1. Determine if the core requirement of the claim is met in the response
 2. Check if all key components from the claim appear substantively in the response
