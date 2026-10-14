@@ -994,7 +994,7 @@ def _parse_cli(description: str, *, default_concurrency: int):
         default=None,
         help="MCP 服务地址（否则读取 .env 的 MCP_SERVER_URL；必须显式含端口）",
     )
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument(
         "--concurrency",
         type=int,
