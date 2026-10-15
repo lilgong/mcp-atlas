@@ -163,3 +163,16 @@ def test_target_routes_without_reporting_labels_and_direct_mode_ignores_it():
 def test_invalid_target_is_rejected_instead_of_truncated(target):
     with pytest.raises(ValueError, match="MCPHUB_TARGET"):
         hub_server_configs({**ENV, "MCPHUB_TARGET": target}, {"brave-search"})
+
+
+def test_hub_timeout_covers_queue_and_execution():
+    config = hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": "420"}, {"brave-search"})["brave-search"]
+    assert config["sse_read_timeout"] == 420
+    client = create_server_client("brave-search", config)
+    assert client.transport.sse_read_timeout.total_seconds() == 420
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "invalid"])
+def test_invalid_hub_timeout_fails_closed(value):
+    with pytest.raises(ValueError):
+        hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": value}, {"brave-search"})

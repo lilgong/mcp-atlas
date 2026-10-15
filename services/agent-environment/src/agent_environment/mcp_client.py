@@ -212,6 +212,7 @@ def create_server_client(
         roots=[],
         log_handler=log_handler,
         init_timeout=configured_client_init_timeout_seconds(),
+        **({"timeout": server_config.get("sse_read_timeout", 180.0)} if server_config.get("atlas_hub_prefix") else {}),
     )
     if isinstance(client, HubMCPClient):
         client.hub_prefix = server_config["atlas_hub_prefix"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
 
@@ -54,6 +55,9 @@ def hub_server_configs(
         raise ValueError(
             "MCPHUB_SERVERS must select known shared servers, excluding task-isolated servers"
         )
+    timeout = float(environment.get("TOOL_CALL_TIMEOUT") or "180")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("TOOL_CALL_TIMEOUT must be positive and finite")
     separator = environment.get("MCPHUB_NAME_SEPARATOR") or "-"
     headers = {"Authorization": f"Bearer {token}"}
     target = (environment.get("MCPHUB_TARGET") or "").strip()
@@ -65,6 +69,7 @@ def hub_server_configs(
         name: {
             "url": f"{base}/mcp/{quote(name, safe='')}",
             "transport": "streamable-http",
+            "sse_read_timeout": timeout,
             "headers": dict(headers),
             "atlas_hub_prefix": f"{name}{separator}",
         }
