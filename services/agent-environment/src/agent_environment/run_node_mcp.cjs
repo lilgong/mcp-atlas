@@ -59,6 +59,11 @@ async function main() {
   if (process.env.MCP_YIBU_SERVICE) {
     require("./yibu_fetch_preload.cjs");
   }
+  if (parseSource(source).name === "metmuseum-mcp") {
+    await require("./met_museum_compat.cjs").installMetCompatibility(
+      resolve(NODE_MODULES, "metmuseum-mcp"),
+    );
+  }
   process.argv = [process.argv[0], entrypoint, ...serverArgs];
   await import(pathToFileURL(entrypoint).href);
 }
