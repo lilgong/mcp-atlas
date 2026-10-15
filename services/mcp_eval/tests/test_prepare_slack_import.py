@@ -15,6 +15,33 @@ from prepare_slack_import import (
 
 
 class PrepareSlackImportTests(unittest.TestCase):
+    def test_reviewed_marketing_claim_survives_derivation(self):
+        import ast
+        from decimal import Decimal
+        origin = Path(__file__).resolve().parents[1] / "MCP-Atlas-origin.csv"
+        with origin.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 500)
+        task = "688a441c1a0d2e5c93853e93"
+        row = next(value for value in rows if value["TASK"] == task)
+        claims = ast.literal_eval(row["GTFA_CLAIMS"])
+        difference = Decimal(65540) - Decimal(39261)
+        self.assertEqual(difference, 26279)
+        self.assertEqual(round(difference / Decimal(39261) * 100, 2), Decimal("66.93"))
+        self.assertIn("$26,279", claims[2])
+        self.assertNotIn("$27,279", row["GTFA_CLAIMS"])
+        with tempfile.TemporaryDirectory() as raw:
+            derived = Path(raw) / "MCP-Atlas.csv"
+            for _ in range(2):
+                fix_claims(origin, derived, {}, 161, 259, apply=True)
+                with derived.open(newline="", encoding="utf-8") as handle:
+                    converted = list(csv.DictReader(handle))
+                self.assertEqual(len(converted), len(rows))
+                actual = next(value for value in converted if value["TASK"] == task)
+                self.assertEqual(actual["GTFA_CLAIMS"], row["GTFA_CLAIMS"])
+                self.assertEqual(actual["PROMPT"], row["PROMPT"])
+                self.assertEqual(actual["TRAJECTORY"], row["TRAJECTORY"])
+
     def test_detects_actual_slack_tool_calls_not_slackr_source_text(self):
         actual = json.dumps([
             {
