@@ -1706,3 +1706,10 @@ Relay 服务端的 IP 池、监听和鉴权配置单独放在 `.env.relay`。启
 `make run-egress-relay`，或 `uv run --env-file .env.relay python scripts/pubmed_relay_server.py`。
 这次配置迁移不重启正在运行的 relay。
 切回直连时，应从备份恢复上游 MCP 的 Key，并使用原直连 runtime 镜像。
+
+
+Met Museum 直连兼容修复：保持 `metmuseum-mcp@1.0.0` 及原工具 schema，启动器加载
+`met_museum_compat.cjs`，将搜索转到 Met v1.1 分页 API，并保持原分页结果结构。
+`make build-atlas-runtime` 会把适配文件打入运行镜像；已运行的旧容器不会自动更新。
+工具详情与部门接口保留原实现。测试：
+`node --test services/agent-environment/tests/test_met_museum_compat.cjs`（先安装 Node MCP 依赖）。
