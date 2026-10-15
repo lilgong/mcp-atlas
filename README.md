@@ -180,17 +180,17 @@ Wikipedia、arXiv 和 OSM 的逐请求 relay 适配位于 runtime 镜像内，�
 
 ### 4.1 任务 CSV
 
-官方原版已经提交在：
+已审核的评测基准提交在：
 
 ```text
 services/mcp_eval/MCP-Atlas-origin.csv
 ```
 
 它有 500 条任务，五列为 `TASK`、`ENABLED_TOOLS`、`PROMPT`、
-`GTFA_CLAIMS`、`TRAJECTORY`。官方原版的 SHA256 是：
+`GTFA_CLAIMS`、`TRAJECTORY`。当前已审核基准的 SHA256 是：
 
 ```text
-065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad
+267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d
 ```
 
 clone 后检查：
@@ -214,9 +214,10 @@ raise SystemExit(1 if missing else 0)
 cd ../..
 ```
 
-不要直接修改这个文件。比较不同机器上的结果时，应使用相同 CSV SHA256。
+这是已审核的评测基准；固定答案错误和工具目录修正直接提交在此文件，
+同时更新修正记录、完整性哈希和回归测试。比较不同机器上的结果时，应使用相同 CSV SHA256。
 免费 Slack 需要的日期对齐版由 §6.4 的脚本派生为 Git 忽略的 `MCP-Atlas.csv`，
-不会覆盖官方原版。
+生成脚本不会覆盖此基准。
 
 ### 4.2 复制 `.env`
 
@@ -600,12 +601,14 @@ data_exports/slack_mcp_eval_export.zip
 ```
 
 官方消息日期为 2025-12-01 至 2025-12-10。付费 Slack 能保留这段历史时，
-可以直接导入官方 zip，并把输入显式指向官方 `MCP-Atlas-origin.csv`。
+可以导入官方 zip；当前 `MCP-Atlas-origin.csv` 为含固定修正的基准，
+其中 Slack 日期与导出之间的历史偏移仍需通过脚本对齐。
 
 免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息、绑定消息日期的题面
-与 claims，并重算依赖消息年份的简单算术。脚本还会把旧版工具名迁移到当前 runtime，并移除 runtime 已经整服下线、
-没有等价后继的工具名。脚本始终读取官方文件并生成派生文件，不会修改 Git 中的官方
-CSV 或官方轨迹；题面只在日期能由 Slack 导出消息安全验证时才会在派生 CSV 中改写：
+与 claims，并重算依赖消息年份的简单算术。固定的答案和工具目录修正已保存于
+`MCP-Atlas-origin.csv`，详见 [修正记录](services/mcp_eval/BENCHMARK_CORRECTIONS.md)。
+脚本只处理日期派生，不再改写工具目录；不会修改源导出、基准 CSV 或参考轨迹。
+题面只在日期能由 Slack 导出消息安全验证时才会在派生 CSV 中改写：
 
 评测所用 Slack API token 的账号必须使用固定 **UTC+0** 时区；Slack 界面选择
 **Monrovia**，不要选择有夏令时的 London。Slack 的日期搜索按账号个人时区解释，
@@ -648,7 +651,7 @@ https://<你的-workspace>.slack.com/services/import
 MCP_COMPLETION_INPUT=MCP-Atlas.csv
 ```
 
-付费 Slack 或严格跑官方原版时保持：
+使用基准日期（未做本地日期平移）时设置：
 
 ```dotenv
 MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv
