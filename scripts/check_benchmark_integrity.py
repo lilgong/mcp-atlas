@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the tracked MCP-Atlas baseline, including reviewed claim corrections."""
+"""Verify the tracked MCP-Atlas baseline, including reviewed claim and tool-catalog corrections."""
 
 from __future__ import annotations
 
@@ -12,10 +12,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK_PATH = "services/mcp_eval/MCP-Atlas-origin.csv"
-# Reviewed correction: task 688a441c1a0d2e5c93853e93, 65540 - 39261 = 26279.
+# Reviewed corrections: marketing budget arithmetic and static runtime tool catalog.
+# Details: services/mcp_eval/BENCHMARK_CORRECTIONS.md.
 # Original upstream SHA256: 065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad
 BASELINE_SHA256 = (
-    "4850307c5597d22f2e3cc8e83b047500e519a1554a04f6ecaa96629daa8f9d22"
+    "267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d"
 )
 
 
@@ -68,7 +69,7 @@ def main() -> int:
             f"expected: {BASELINE_SHA256}\n"
             f"actual:   {actual}\n"
             "Keep local Slack date shifts in the ignored MCP-Atlas.csv; "
-            "Reviewed claim corrections must update the baseline hash and regression tests.",
+            "Reviewed baseline corrections must update the baseline hash and regression tests.",
             file=sys.stderr,
         )
         return 1

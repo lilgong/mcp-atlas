@@ -1,13 +1,21 @@
+import copy
 import csv
 import datetime as dt
 import json
+import os
+import time
+from decimal import Decimal
 import tempfile
 import unittest
 from pathlib import Path
 
 from prepare_slack_import import (
-    adapt_enabled_tools,
     fix_claims,
+    read_export,
+    message_files,
+    derive_legacy_offset,
+    shift_message,
+    shift_export,
     repair_year_arithmetic,
     shift_bound_dates,
     trajectory_uses_slack,
@@ -30,13 +38,20 @@ class PrepareSlackImportTests(unittest.TestCase):
         self.assertEqual(round(difference / Decimal(39261) * 100, 2), Decimal("66.93"))
         self.assertIn("$26,279", claims[2])
         self.assertNotIn("$27,279", row["GTFA_CLAIMS"])
+        source = Path(__file__).resolve().parents[3] / "data_exports/slack_mcp_eval_export.zip"
+        messages = message_files(read_export(source))
+        self.assertEqual(derive_legacy_offset(origin, messages), 161)
         with tempfile.TemporaryDirectory() as raw:
             derived = Path(raw) / "MCP-Atlas.csv"
             for _ in range(2):
-                fix_claims(origin, derived, {}, 161, 259, apply=True)
+                fix_claims(origin, derived, messages, 161, 259, apply=True)
                 with derived.open(newline="", encoding="utf-8") as handle:
                     converted = list(csv.DictReader(handle))
                 self.assertEqual(len(converted), len(rows))
+                for source_row, converted_row in zip(rows, converted):
+                    self.assertEqual(source_row["TASK"], converted_row["TASK"])
+                    for field in source_row.keys() - {"PROMPT", "GTFA_CLAIMS"}:
+                        self.assertEqual(source_row[field], converted_row[field])
                 actual = next(value for value in converted if value["TASK"] == task)
                 self.assertEqual(actual["GTFA_CLAIMS"], row["GTFA_CLAIMS"])
                 self.assertEqual(actual["PROMPT"], row["PROMPT"])
@@ -138,7 +153,7 @@ class PrepareSlackImportTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(row)
 
-            changes, _, _ = fix_claims(
+            changes = fix_claims(
                 origin, output, msg_files, legacy=161, new_shift_days=259, apply=True
             )
             with output.open(newline="", encoding="utf-8") as handle:
@@ -151,60 +166,90 @@ class PrepareSlackImportTests(unittest.TestCase):
             derived["GTFA_CLAIMS"],
         )
 
-    def test_adapts_runtime_tool_catalog_without_touching_other_fields(self):
-        rows = [
-            {
-                "TASK": "task-1",
-                "PROMPT": "unchanged",
-                "ENABLED_TOOLS": json.dumps(
-                    [
-                        "clinicaltrialsgov-mcp-server_clinicaltrials_list_studies",
-                        "rijksmuseum-server_search_artwork",
-                        "brave-search_brave_web_search",
-                    ]
-                ),
-            }
-        ]
+    def test_reviewed_baseline_already_has_runtime_tool_catalog(self):
+        from mcp_completion.tool_policy import OFFICIAL_RETIRED_SERVERS
 
-        renamed, removed = adapt_enabled_tools(rows)
+        origin = Path(__file__).resolve().parents[1] / "MCP-Atlas-origin.csv"
+        with origin.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        tools = [item if isinstance(item, str) else item["name"]
+                 for row in rows for item in json.loads(row["ENABLED_TOOLS"])]
+        self.assertIn("clinicaltrialsgov-mcp-server_clinicaltrials_search_studies", tools)
+        self.assertNotIn("clinicaltrialsgov-mcp-server_clinicaltrials_list_studies", tools)
+        retired = tuple(f"{name}_" for name in OFFICIAL_RETIRED_SERVERS)
+        self.assertFalse(any(name.startswith(retired) for name in tools))
 
-        self.assertEqual(
-            json.loads(rows[0]["ENABLED_TOOLS"]),
-            [
-                "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies",
-                "brave-search_brave_web_search",
+    def test_derivation_never_rewrites_tool_catalog(self):
+        row = {
+            "TASK": "custom-baseline", "PROMPT": "unchanged",
+            "GTFA_CLAIMS": "unchanged", "TRAJECTORY": "[]",
+            "ENABLED_TOOLS": json.dumps([
+                {"name": "clinicaltrialsgov-mcp-server_clinicaltrials_list_studies",
+                 "requiredParams": ["query"]},
+                "rijksmuseum-server_search_artwork",
+            ]),
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            origin, output = Path(raw) / "origin.csv", Path(raw) / "derived.csv"
+            with origin.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(row))
+                writer.writeheader()
+                writer.writerow(row)
+            self.assertEqual(fix_claims(origin, output, {}, 161, 259, True), [])
+            with output.open(newline="", encoding="utf-8") as handle:
+                self.assertEqual(next(csv.DictReader(handle)), row)
+
+    def test_shifts_attachment_and_thread_timestamps_exactly(self):
+        message = {
+            "ts": "1764952736.421649", "thread_ts": "1764952735.999999",
+            "latest_reply": "1764952737.000001",
+            "edited": {"ts": "1764952738.123456"},
+            "replies": [{"user": "unchanged", "ts": "1764952737.000001"}],
+            "files": [{"created": 1764623085, "timestamp": 1764623085,
+                       "updated": 1764630515, "update_notification": 1764623086,
+                       "size": 123}],
+            "text": "Keep 2025-12-05 and every other part of the message.",
+        }
+        for days in (-306, 0, 306):
+            with self.subTest(days=days):
+                shifted = copy.deepcopy(message)
+                seconds = days * 86400
+                shift_message(shifted, seconds)
+                for key in ("ts", "thread_ts", "latest_reply"):
+                    self.assertEqual(Decimal(shifted[key]) - Decimal(message[key]), seconds)
+                self.assertEqual(Decimal(shifted["edited"]["ts"]) - Decimal(message["edited"]["ts"]), seconds)
+                self.assertEqual(Decimal(shifted["replies"][0]["ts"]) - Decimal(message["replies"][0]["ts"]), seconds)
+                for key in ("created", "timestamp", "updated", "update_notification"):
+                    self.assertEqual(shifted["files"][0][key] - message["files"][0][key], seconds)
+                self.assertEqual(shifted["files"][0]["size"], 123)
+                self.assertEqual(shifted["text"], message["text"])
+                self.assertEqual(shifted["replies"][0]["user"], "unchanged")
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "requires process timezone support")
+    def test_export_uses_utc_at_midnight_and_dst_boundaries(self):
+        source = {
+            "channel/2025-03-09.json": [
+                {"ts": str(int(dt.datetime(2025, 3, 9, 0, 0, tzinfo=dt.timezone.utc).timestamp())) + ".000001"},
+                {"ts": str(int(dt.datetime(2025, 3, 9, 23, 59, 59, tzinfo=dt.timezone.utc).timestamp())) + ".999999"},
             ],
-        )
-        self.assertEqual("unchanged", rows[0]["PROMPT"])
-        self.assertEqual(1, len(renamed))
-        self.assertEqual([("task-1", "rijksmuseum-server_search_artwork")], removed)
-
-    def test_preserves_dict_tool_metadata_when_renaming(self):
-        rows = [
-            {
-                "TASK": "task-2",
-                "ENABLED_TOOLS": json.dumps(
-                    [
-                        {
-                            "name": "clinicaltrialsgov-mcp-server_clinicaltrials_list_studies",
-                            "requiredParams": ["query"],
-                        }
-                    ]
-                ),
-            }
-        ]
-
-        adapt_enabled_tools(rows)
-
-        self.assertEqual(
-            json.loads(rows[0]["ENABLED_TOOLS"]),
-            [
-                {
-                    "name": "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies",
-                    "requiredParams": ["query"],
-                }
-            ],
-        )
+        }
+        previous = os.environ.get("TZ")
+        results = []
+        try:
+            for zone in ("UTC", "Asia/Shanghai", "America/New_York"):
+                os.environ["TZ"] = zone
+                time.tzset()
+                result = shift_export(copy.deepcopy(source), 86400)
+                self.assertEqual(list(result), ["channel/2025-03-10.json"])
+                results.append(result)
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[0], results[2])
+        finally:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
 
 
 if __name__ == "__main__":
