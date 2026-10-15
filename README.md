@@ -404,6 +404,21 @@ LOG_LEVEL=INFO
 
 也可以使用绝对路径。运行用户必须对这些目录有写权限。
 
+若要集中统计模型调用和 token 用量，可将 `.env` 的 `TOKEN_LOG_DIR` 和
+`EVAL_TOKEN_LOG_DIR` 都设为同一个绝对目录，例如
+`/home/lny/api_usage_log/mcp-atlas`。修改后重启 completion 服务和评分进程。
+原始日志按月份归档；运行以下命令可生成或更新每月的 `summary.md`：
+
+```bash
+python3 scripts/summarize_api_usage.py --root /home/lny/api_usage_log/mcp-atlas
+# 只更新指定月份
+python3 scripts/summarize_api_usage.py --root /home/lny/api_usage_log/mcp-atlas --month 2026-10
+```
+
+汇总中的调用次数是已写入 token 日志的模型响应记录数，不包含失败请求或
+没有 token 日志的响应；汇总是运行脚本时的快照。详细请求、工具和容器日志
+仍由 `MCP_RUNTIME_LOG_DIR` 管理。
+
 ### 5.7 MCP server 选择和凭证
 
 默认：
