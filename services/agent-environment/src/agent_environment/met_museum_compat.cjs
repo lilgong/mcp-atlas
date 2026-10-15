@@ -25,10 +25,9 @@ async function installMetCompatibility(packageRoot) {
       url.searchParams.set('offset', String((page - 1) * pageSize));
       const fetchPage = async () => {
         const result = await this.apiClient.fetchJson(url.toString());
-        if (!Number.isInteger(result.total) || result.total < 0 ||
-            (result.objectIDs != null && (!Array.isArray(result.objectIDs) ||
-              !result.objectIDs.every(Number.isInteger))) ||
-            (result.total > 0 && result.objectIDs == null)) {
+        // Out-of-range pages legitimately return objectIDs=null. Validate the
+        // total first so callers can clamp the page before validating its IDs.
+        if (!Number.isInteger(result.total) || result.total < 0) {
           throw new MetMuseumApiError('The Met Museum API returned an unexpected search response. Please try again later.', undefined, true);
         }
         return result;
@@ -43,6 +42,11 @@ async function installMetCompatibility(packageRoot) {
       if (safePage !== page) {
         url.searchParams.set('offset', String((safePage - 1) * pageSize));
         result = await fetchPage();
+      }
+      if ((result.objectIDs != null && (!Array.isArray(result.objectIDs) ||
+            !result.objectIDs.every(Number.isInteger))) ||
+          (result.total > 0 && result.objectIDs == null)) {
+        throw new MetMuseumApiError('The Met Museum API returned an unexpected search response. Please try again later.', undefined, true);
       }
       const structuredContent = { total: result.total, page: safePage, pageSize,
         totalPages: Math.ceil(result.total / pageSize), objectIDs: result.objectIDs || [] };
