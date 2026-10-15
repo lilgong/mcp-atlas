@@ -75,9 +75,11 @@ uv run prepare_slack_import.py --fix-claims
 
 1. 读 `data_exports/slack_mcp_eval_export.zip`
 2. 自动算平移量：让**最新一条消息落到今天前 3 天**（吃满 90 天窗口）
-3. 平移所有 `ts` / `edited.ts` / `files[].created|timestamp`，并把按日期命名的 JSON 改名到新日期
+3. 按 UTC 整天平移消息 `ts`、`edited.ts`、线程 `thread_ts` / `latest_reply` / `replies[].ts`，
+   以及附件 `created` / `timestamp` / `updated` / `update_notification`；保留微秒精度，
+   并把按日期命名的 JSON 改名到新 UTC 日期
 4. 产出 → **`data_exports/slack_mcp_eval_export_<MMDD>.zip`**
-5. `--fix-claims`：从官方 `MCP-Atlas-origin.csv` 派生 Git 忽略的
+5. `--fix-claims`：从已审核的 `MCP-Atlas-origin.csv` 派生 Git 忽略的
    `MCP-Atlas.csv`，同步修正绑定 Slack 日期的题面、claims 和年份算术
 6. 打印**下次到期日**
 
@@ -89,9 +91,10 @@ uv run prepare_slack_import.py --fix-claims
 | `--days-ago N` | 让最新消息落到 N 天前（默认 3） |
 | `--src` / `--out` / `--csv` | 覆盖默认路径 |
 
-### 原版只读，每次全新派生（幂等）
+### 脚本只读输入，每次全新派生（幂等）
 
-两个输入都是**官方原版、只读、永不修改**，每次运行都从它们重新派生出目标文件：
+源 zip 保持官方原版；origin 保存已审核的固定答案和工具目录修正。
+脚本对两个输入都只读，每次从它们重新派生目标文件：
 
 ```
 data_exports/slack_mcp_eval_export.zip → ..._<MMDD>.zip             （平移时间戳）
@@ -101,19 +104,22 @@ services/mcp_eval/MCP-Atlas-origin.csv → MCP-Atlas.csv（平移题面/claim �
 **不在上一轮结果上叠加**，所以同一天用相同参数重复运行是幂等的，不会二次平移。
 偏移量也始终是官方那次的 **+161 天**（脚本用微秒指纹从原版推导，不写死）。
 
-> Git 中的 `MCP-Atlas-origin.csv` 是这条链的只读基准，SHA256 应为
-> `065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad`。
-> 不要手改它；文件缺失或 hash 不符时先恢复 Git 文件。
+Git 中的 `MCP-Atlas-origin.csv` 是已审核的基准。固定答案和工具目录修正直接
+提交在 origin，并同步更新 [修正记录](../services/mcp_eval/BENCHMARK_CORRECTIONS.md)、
+`scripts/check_benchmark_integrity.py` 的哈希及回归测试；不放在日期转换脚本中反复修正。
+当前基准 SHA256：
+`267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d`。
 
-### 官方原版和免费 Slack 对齐版不会混在一起
+### 已审核基准和免费 Slack 对齐版不会混在一起
 
-- `MCP-Atlas-origin.csv`：Git 跟踪的官方原版，严格官方复测使用。
+- `MCP-Atlas-origin.csv`：Git 跟踪的已审核基准，包含修正记录列出的固定变更。
 - `MCP-Atlas.csv`：本机生成、Git 忽略的免费 Slack 对齐版。
-- 对齐版与官方原版相比改 2 个 `PROMPT` 和 3 个 `GTFA_CLAIMS` 单元格；
-  `TASK`、`TRAJECTORY` 保持不变，`ENABLED_TOOLS` 仅做当前 runtime 兼容适配。
+- 对齐版与已审核基准相比改 2 个 `PROMPT` 和 3 个 `GTFA_CLAIMS` 单元格；
+  `TASK`、`TRAJECTORY` 和 `ENABLED_TOOLS` 均保持不变。
 - 免费 Slack 运行时在 `.env` 设置
   `MCP_COMPLETION_INPUT=MCP-Atlas.csv`。
-- 严格官方原版运行时设置 `MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv`。
+- 使用基准日期运行时设置 `MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv`。
+  此文件已含审核修正，不应声称与未修改的上游原版字节一致。
 - 跨机器比较免费 Slack 结果时，两台机器要在同一天用相同 `--days-ago`
   参数生成，并记录对齐版 SHA256。
 
@@ -350,7 +356,7 @@ uv run test_server_v2.py --data-only --base-url http://localhost:1984
 
 ---
 
-## 6. 切回官方原版
+## 6. 切回未做本地日期平移的基准
 
 ```bash
 # .env
@@ -358,7 +364,8 @@ MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv
 ```
 
 不需要复制或还原文件。平移产生的 `MCP-Atlas.csv` 和
-`slack_mcp_eval_export_<MMDD>.zip` 都是新文件；官方 CSV 和原始 zip 从不修改。
+`slack_mcp_eval_export_<MMDD>.zip` 都是新文件；脚本不修改基准 CSV 和原始 zip。
+此设置不会自动对齐 Slack 导出与 claims 之间的历史偏移，也不代表未修改的上游原版。
 
 ---
 
@@ -370,6 +377,6 @@ MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv
 | `data_exports/slack_mcp_eval_export_<MMDD>.zip` | 脚本产出，用它导入 |
 | `services/mcp_eval/prepare_slack_import.py` | 平移 + 修 claims |
 | `services/mcp_eval/test_server_v2.py` | 按任务隔离正式路由验证数据是否真的导入 |
-| `services/mcp_eval/MCP-Atlas-origin.csv` | Git 跟踪的官方原版评测集（只读） |
+| `services/mcp_eval/MCP-Atlas-origin.csv` | Git 跟踪的已审核基准（脚本只读） |
 | `services/mcp_eval/MCP-Atlas.csv` | 免费 Slack 对齐版（脚本生成、Git 忽略） |
 | `data_exports/README.md` | 官方的 5 个有状态服务数据设置说明 |
