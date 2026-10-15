@@ -22,6 +22,13 @@ cp env.template .env
 ```
 Edit .env file with your API keys `LLM_API_KEY`. Could be an openai api key or LiteLLM key. The default `LLM_BASE_URL` is for openai, but modify it if you're using LiteLLM.
 
+For a multi-worker deployment, set the same `REDIS_URL` on every completion
+process. Redis coordinates only the existing whole-tool rate gates; it does
+not replace the per-task MCP containers. A standalone run may leave it empty
+and keeps the local file-lock behavior. When a centralized relay is configured,
+PubMed, Wikipedia, arXiv, and OSM delegate per-request pacing to that relay and
+do not also hold a whole-tool Redis lease.
+
 3. Start the MCP server:
 Follow the root README to build `mcp-atlas-runtime:<version>`, prepare
 `MCP_TASK_DATA_DIR`, and start the shared service. It should expose HTTP POST

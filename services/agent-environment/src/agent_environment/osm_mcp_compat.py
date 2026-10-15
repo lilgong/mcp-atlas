@@ -170,6 +170,7 @@ def install_overpass_redirect() -> None:
         )
     configured = (
         os.getenv("OSM_OVERPASS_URLS")
+        or os.getenv("SYN_OSM_OVERPASS_URLS")
         or (
             f"{UPSTREAM_OVERPASS_URL},{SECONDARY_OVERPASS_URL},"
             f"{FALLBACK_OVERPASS_URL}"

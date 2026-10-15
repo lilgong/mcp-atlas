@@ -1,5 +1,6 @@
 import os
 import unittest
+import pytest
 from unittest.mock import AsyncMock, patch
 
 from litellm.types.utils import ModelResponse
@@ -8,8 +9,18 @@ from mcp_completion.llm import ThinkingContractViolation, create_completion
 from mcp_completion.schema import UserMessage
 
 
+@pytest.fixture(autouse=True)
+def isolate_offline_provider_state():
+    # Request-shape tests stub the provider; never consult production key pools
+    # or pacing state before reaching that stub.
+    with patch('mcp_completion.llm.choose_key', return_value='offline-test'), patch(
+        'mcp_completion.llm.reserve_delay', return_value=0
+    ):
+        yield
+
+
 class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
-    async def _call(self, extra_body, *, streaming=False):
+    async def _call(self, extra_body, prompt_cache_key=None, *, streaming=False):
         provider_response = {
             "choices": [
                 {
@@ -35,6 +46,7 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
                 messages=[UserMessage(role="user", content="test")],
                 tools=[],
                 extra_body=extra_body,
+                prompt_cache_key=prompt_cache_key,
                 task_id="extra-body-test",
             )
         return completion.await_args.kwargs
@@ -69,6 +81,11 @@ class ExtraBodyPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["custom_llm_provider"], "openai")
         self.assertEqual(kwargs["max_retries"], 0)
         self.assertEqual(kwargs["extra_body"], {"vendor_option": "kept"})
+
+    async def test_prompt_cache_key_is_forwarded_to_litellm(self):
+        kwargs = await self._call({}, prompt_cache_key="synthesis-case-1")
+
+        self.assertEqual(kwargs["prompt_cache_key"], "synthesis-case-1")
 
     async def test_completion_requests_lossless_streaming(self):
         kwargs = await self._call({}, streaming=True)

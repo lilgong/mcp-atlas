@@ -15,7 +15,14 @@ from pathlib import Path
 logger = create_logger(__name__)
 
 CLIENT_INIT_TIMEOUT_SECONDS = 45.0
-AUTO_DETECT_OPTIONAL_VARS = frozenset({"MCP_TOOL_BASE_URL", "NCBI_API_KEY", "NCBI_EMAIL", "NCBI_TOOL", "OSM_OVERPASS_URLS"})
+AUTO_DETECT_OPTIONAL_VARS = frozenset({
+    "MCP_TOOL_BASE_URL",
+    "OSM_OVERPASS_URLS",
+    "OXYLABS_SCRAPER_URL",
+    "NCBI_EMAIL",
+    "NCBI_API_KEY",
+    "NCBI_TOOL",
+})
 
 
 def configured_client_init_timeout_seconds() -> float:
@@ -201,6 +208,16 @@ async def log_handler(message: LogMessage) -> None:
 def create_server_client(
     server_name: str, server_config: dict[str, Any]
 ) -> RouterClient:
+    if server_name in {"context7", "twelvedata"} and not server_config.get("atlas_hub_prefix"):
+        from .credential_pool import Context7Pool, TwelveDataPool, configured_keys
+        pool = Context7Pool if server_name == "context7" else TwelveDataPool
+        keys = configured_keys(os.getenv(pool.key_env, ""), os.getenv(pool.key_env + "S", ""), pool.key_env + "S")
+        if len(keys) > 1:
+            return cast(RouterClient, pool(server_config, keys, _create_direct_client))
+    return _create_direct_client(server_name, server_config)
+
+
+def _create_direct_client(server_name: str, server_config: dict[str, Any]) -> RouterClient:
     """Create a direct, single-server client without FastMCP's composite proxy."""
     parsed_config = MCPConfig.from_dict({"mcpServers": {server_name: server_config}})
     transport = parsed_config.mcpServers[server_name].to_transport()

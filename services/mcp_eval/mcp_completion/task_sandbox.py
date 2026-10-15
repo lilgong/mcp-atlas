@@ -19,7 +19,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
-import httpx
 from dotenv import load_dotenv
 
 from .docker_http import docker_post_json
@@ -50,6 +49,18 @@ def _requires_git_repositories(local_servers: Iterable[str]) -> bool:
 def _safe_fragment(value: str, limit: int = 30) -> str:
     value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-.").lower()
     return (value or "task")[:limit]
+
+
+def _launch_labels() -> tuple[str, ...]:
+    """Label task resources with the runtime launch that owns them.
+
+    The synthesis pipeline shuts a launch down by this label, so a sandbox that
+    outlives its completion service is still removed with the gateway.
+    """
+    launch_id = (os.getenv("MCP_ATLAS_LAUNCH_ID") or "").strip()
+    if not launch_id:
+        return ()
+    return ("--label", f"mcp-atlas.launch-id={_safe_fragment(launch_id, 50)}")
 
 
 def _owner_label() -> str:
@@ -265,7 +276,7 @@ class TaskSandbox:
             task_id=task_id,
             local_servers=set(local_servers),
             network_servers=set(network_servers),
-            agent_image=os.getenv("MCP_TASK_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
+            agent_image=os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
             mongo_image=(os.getenv("MCP_TASK_MONGO_IMAGE") or "").strip(),
             startup_timeout=float(os.getenv("MCP_TASK_SANDBOX_STARTUP_TIMEOUT", "180")),
             memory_limit=os.getenv("MCP_TASK_SANDBOX_MEMORY", "3g"),
@@ -300,6 +311,17 @@ class TaskSandbox:
         return next(
             (
                 container.url
+                for container in self.containers
+                if container.kind == "network"
+            ),
+            None,
+        )
+
+    @property
+    def network_container_name(self) -> Optional[str]:
+        return next(
+            (
+                container.name
                 for container in self.containers
                 if container.kind == "network"
             ),
@@ -420,6 +442,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             name,
         )
         self.task_network = name
@@ -469,6 +492,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             self.mongo_socket_volume,
         )
         await _run(
@@ -514,6 +538,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             "--security-opt",
             "no-new-privileges:true",
             "--cap-drop",
@@ -673,6 +698,7 @@ class TaskSandbox:
             f"mcp-atlas.owner={self.owner}",
             "--label",
             f"mcp-atlas.task-id={_safe_fragment(self.task_id, 50)}",
+            *_launch_labels(),
             "--security-opt",
             "no-new-privileges:true",
             "--cap-drop",
@@ -717,18 +743,11 @@ class TaskSandbox:
                         f"{self.mongo_socket_volume}:/run/mcp-atlas-mongo",
                     ]
                 )
-        # task-network services are reached over a loopback-published random
-        # port.  task-local services use docker-exec HTTP, so they need outbound
-        # networking but must not publish a host port.
-        if kind == "network":
-            command.extend(["--publish", "127.0.0.1::1984"])
-            if self.network_template:
-                command.extend(
-                    [
-                        "--volume",
-                        f"{self.network_template}:/agent-environment/src/agent_environment/mcp_server_template.json:ro",
-                    ]
-                )
+        if kind == "network" and self.network_template is not None:
+            command.extend([
+                "--volume",
+                f"{self.network_template}:/agent-environment/src/agent_environment/mcp_server_template.json:ro",
+            ])
         for key, value in sorted(extra_env.items()):
             command.extend(["--env", f"{key}={value}"])
         command.append(self.agent_image)
@@ -761,7 +780,7 @@ class TaskSandbox:
                     "uvicorn",
                     "agent_environment.main:app",
                     "--host",
-                    "0.0.0.0",
+                    "127.0.0.1",
                     "--port",
                     "1984",
                 ]
@@ -796,71 +815,40 @@ class TaskSandbox:
             credential_env_names=sorted(extra_env),
             network=network,
         )
-        if kind == "local":
-            container.url = "http://127.0.0.1:1984"
-        else:
-            container.url = await self._container_url(name)
+        container.url = "http://127.0.0.1:1984"
         await self._wait_for_agent(container)
-
-    async def _container_url(self, name: str) -> str:
-        deadline = time.monotonic() + 30
-        last = ""
-        while time.monotonic() < deadline:
-            stdout, stderr, code = await _run(
-                "docker",
-                "port",
-                name,
-                "1984/tcp",
-                timeout=10,
-                check=False,
-            )
-            if code == 0 and stdout:
-                endpoint = stdout.splitlines()[0].strip()
-                port = endpoint.rsplit(":", 1)[-1]
-                if port.isdigit():
-                    return f"http://127.0.0.1:{port}"
-            last = stderr or stdout
-            await asyncio.sleep(0.25)
-        raise TaskSandboxError(f"No published port for {name}: {last}")
 
     async def _wait_for_agent(self, container: ManagedContainer) -> None:
         assert container.url
         deadline = time.monotonic() + self.startup_timeout
         last_error = ""
-        async with httpx.AsyncClient(timeout=15) as client:
-            while time.monotonic() < deadline:
-                try:
-                    if container.kind == "local":
-                        status, body = await docker_post_json(
-                            container.name,
-                            "/list-tools",
-                            {},
-                            timeout=15,
+        while time.monotonic() < deadline:
+            try:
+                status, body = await docker_post_json(
+                    container.name,
+                    "/list-tools",
+                    {},
+                    timeout=15,
+                )
+                tools = json.loads(body) if status == 200 else None
+                if status == 200:
+                    if tools:
+                        write_runtime_event(
+                            "sandbox",
+                            "task_container_ready",
+                            task_id=self.task_id,
+                            kind=container.kind,
+                            container=container.name,
+                            tool_count=len(tools),
+                            url=container.url,
                         )
-                        tools = json.loads(body) if status == 200 else None
-                    else:
-                        response = await client.post(f"{container.url}/list-tools")
-                        status = response.status_code
-                        body = response.text
-                        tools = response.json() if status == 200 else None
-                    if status == 200:
-                        if tools:
-                            write_runtime_event(
-                                "sandbox",
-                                "task_container_ready",
-                                task_id=self.task_id,
-                                kind=container.kind,
-                                container=container.name,
-                                tool_count=len(tools),
-                                url=container.url,
-                            )
-                            return
-                        last_error = "list-tools returned no tools"
-                    else:
-                        last_error = f"HTTP {status}: {body[:300]}"
-                except Exception as exc:
-                    last_error = str(exc)
-                await asyncio.sleep(1)
+                        return
+                    last_error = "list-tools returned no tools"
+                else:
+                    last_error = f"HTTP {status}: {body[:300]}"
+            except Exception as exc:
+                last_error = str(exc)
+            await asyncio.sleep(1)
 
         raise TaskSandboxError(
             f"Task container {container.name} was not ready: {last_error}"

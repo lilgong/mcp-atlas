@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import fnmatch
 import functools
+import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +14,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
+from contextlib import contextmanager
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -245,18 +249,81 @@ def _load_repo_specs(manifest: Path) -> list[RepoSpec]:
             if len(row) != 3:
                 raise TaskDataError(f"invalid Git fixture row: {row!r}")
             url, sha, evaluation_path = (value.strip() for value in row)
-            specs.append(RepoSpec(url, sha, Path(evaluation_path).name))
+            name = Path(evaluation_path).name
+            parsed = urlsplit(url)
+            if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name)
+                    or not re.fullmatch(r"[0-9a-fA-F]{40,64}", sha)
+                    or not url or parsed.password or (parsed.scheme in {"http", "https"} and
+                                                      (parsed.username or parsed.query or parsed.fragment))):
+                raise TaskDataError("invalid or credential-bearing pinned Git repository specification")
+            specs.append(RepoSpec(url, sha, name))
     return specs
 
 
 def _run_git(*args: str) -> None:
-    subprocess.run(
-        ["git", *args],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    from .runtime_log import _redact_string
+    try:
+        subprocess.run(["git", *args], check=True, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True, timeout=120)
+    except subprocess.CalledProcessError as exc:
+        detail = re.sub(r"(https?://)[^\s/@]+(?::[^\s/@]+)?@", r"\1<redacted>@", exc.stderr or "")
+        raise TaskDataError(f"Git operation failed (exit {exc.returncode}): "
+                            + _redact_string(detail)[-1200:]) from None
+    except subprocess.TimeoutExpired:
+        raise TaskDataError("Git operation timed out after 120 seconds") from None
+
+
+def git_cache_path(cache_root: Path, spec: RepoSpec) -> Path:
+    # A repository name is not a source identity. Never key by credentials.
+    return cache_root / f"{spec.name}-{hashlib.sha256(spec.url.encode()).hexdigest()}" / "repo.git"
+
+
+@contextmanager
+def _repository_cache_lock(parent: Path):
+    parent.mkdir(parents=True, exist_ok=True)
+    with (parent / "cache.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _valid_git_cache(path: Path, url: str) -> bool:
+    if path.is_symlink() or not path.is_dir():
+        return False
+    try:
+        bare = subprocess.run(["git", f"--git-dir={path}", "rev-parse", "--is-bare-repository"],
+                              capture_output=True, text=True, timeout=10)
+        origin = subprocess.run(["git", f"--git-dir={path}", "remote", "get-url", "origin"],
+                                capture_output=True, text=True, timeout=10)
+        return bare.returncode == 0 and bare.stdout.strip() == "true" and origin.returncode == 0 and origin.stdout.strip() == url
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _ensure_git_cache(bare_repo: Path, spec: RepoSpec) -> None:
+    if bare_repo.exists() or bare_repo.is_symlink():
+        if not _valid_git_cache(bare_repo, spec.url):
+            quarantine = bare_repo.parent / "quarantine"
+            quarantine.mkdir(exist_ok=True)
+            bare_repo.rename(quarantine / ("invalid-" + uuid.uuid4().hex))
+    if not bare_repo.exists():
+        # Incomplete clones are never visible as reusable cache entries.
+        with tempfile.TemporaryDirectory(prefix="clone-", dir=bare_repo.parent) as staging:
+            candidate = Path(staging) / "repo.git"
+            _run_git("clone", "--bare", spec.url, str(candidate))
+            if not _valid_git_cache(candidate, spec.url):
+                raise TaskDataError("Git clone did not produce a valid source-matched bare repository")
+            if not _commit_exists(candidate, spec.sha):
+                _run_git(f"--git-dir={candidate}", "fetch", "--prune", "origin")
+            if not _commit_exists(candidate, spec.sha):
+                raise TaskDataError(f"pinned Git commit {spec.sha} is unavailable for {spec.name}")
+            candidate.rename(bare_repo)
+    if not _commit_exists(bare_repo, spec.sha):
+        _run_git(f"--git-dir={bare_repo}", "fetch", "--prune", "origin")
+    if not _commit_exists(bare_repo, spec.sha):
+        raise TaskDataError(f"pinned Git commit {spec.sha} is unavailable for {spec.name}")
 
 
 def _commit_exists(bare_repo: Path, sha: str) -> bool:
@@ -308,22 +375,10 @@ def materialize_git_repositories(data_dir: Path, cache_root: Path) -> list[str]:
                 _set_origin_url(destination, spec.url)
                 created.append(os.fspath(destination))
                 continue
-            bare_repo = cache_root / f"{spec.name}.git"
-            if not bare_repo.exists():
-                _run_git("clone", "--bare", spec.url, str(bare_repo))
-            if not _commit_exists(bare_repo, spec.sha):
-                _run_git(f"--git-dir={bare_repo}", "fetch", "--prune", "origin")
-            if not _commit_exists(bare_repo, spec.sha):
-                raise TaskDataError(
-                    f"pinned commit {spec.sha} is unavailable for {spec.url}"
-                )
-            _run_git(
-                "clone",
-                "--no-hardlinks",
-                "--no-checkout",
-                str(bare_repo),
-                str(destination),
-            )
+            bare_repo = git_cache_path(cache_root, spec)
+            with _repository_cache_lock(bare_repo.parent):
+                _ensure_git_cache(bare_repo, spec)
+                _run_git("clone", "--no-hardlinks", "--no-checkout", str(bare_repo), str(destination))
             _run_git("-C", str(destination), "checkout", "--detach", spec.sha)
             _set_origin_url(destination, spec.url)
             created.append(os.fspath(destination))

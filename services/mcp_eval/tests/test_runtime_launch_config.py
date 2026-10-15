@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from run_shared_mcp import (  # noqa: E402
+    configured_env_file,
     configured_shared_port,
     configured_shared_hub_servers,
     validate_shared_bind_host,
@@ -45,6 +46,19 @@ class RuntimeLaunchConfigTests(unittest.TestCase):
             os.environ["MCP_TOOL_TRANSPORT"] = "direct"
             self.assertIsNone(configured_shared_hub_servers())
 
+    def test_isolated_run_runtime_host_must_match_exactly(self):
+        validate_isolated_control_plane(
+            "127.0.0.1",
+            "http://mcp-atlas-runtime-run-1:2984",
+            "mcp-atlas-runtime-run-1",
+        )
+        with self.assertRaisesRegex(ValueError, "MCP_SERVER_URL"):
+            validate_isolated_control_plane(
+                "127.0.0.1",
+                "http://other-runtime:2984",
+                "mcp-atlas-runtime-run-1",
+            )
+
     def test_shared_port_prefers_explicit_env(self):
         with patch.dict(
             os.environ,
@@ -66,6 +80,10 @@ class RuntimeLaunchConfigTests(unittest.TestCase):
             clear=False,
         ):
             self.assertEqual(3984, configured_shared_port())
+
+    def test_orchestrator_can_select_ephemeral_env_file(self):
+        with patch.dict(os.environ, {"MCP_ATLAS_RUNTIME_ENV_FILE": "/tmp/atlas-runtime.env"}):
+            self.assertEqual(Path("/tmp/atlas-runtime.env"), configured_env_file())
 
 
 if __name__ == "__main__":

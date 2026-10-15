@@ -105,7 +105,7 @@ async def task_bridge(binding_id: str, operation: str, request: Request) -> Any:
     result = await _while_connected(
         request,
         binding_id,
-        lambda: client.call_tool(body["tool_name"], body["tool_args"]),
+        lambda: client.call_tool(body["tool_name"], body["tool_args"], use_cache=False),
     )
     return result.model_dump(by_alias=True)
 
@@ -287,12 +287,12 @@ class HubTaskClient(MCPClient):
             if tool.get("name") in self.tools
         ]
 
-    async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
+    async def call_tool(self, tool_name: str, args: Any, *, use_cache: bool = True) -> CallToolResponse:
         if tool_name not in self.tools or not isinstance(args, dict):
             raise RuntimeError("Unknown task tool or invalid arguments")
         body = await self._request(
             self.server_for_tool(tool_name),
             "call-tool",
-            {"tool_name": tool_name, "tool_args": args},
+            {"tool_name": tool_name, "tool_args": args, "use_cache": False},
         )
         return CallToolResponse(**body)

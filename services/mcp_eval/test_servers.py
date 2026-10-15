@@ -163,8 +163,10 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
         {"repo_path": "/data/repos/mcp-server-calculator"},
     ),
     "memory": (
-        "memory_search_nodes",
-        {"query": "test"},
+        # Read the mounted graph itself.  A magic search token made healthy
+        # synthetic fixtures look broken when they simply did not contain it.
+        "memory_read_graph",
+        {},
     ),
     "met-museum": (
         "met-museum_get-museum-object",
@@ -257,8 +259,10 @@ TEST_CALLS: dict[str, tuple[str, dict]] = {
         {"q": "Yellowstone", "stateCode": "WY"},
     ),
     "notion": (
-        "notion_API-get-users",
-        {},
+        # Search fixture content rather than the workspace user directory.
+        # Integration tokens commonly (and correctly) lack user-list access.
+        "notion_API-post-search",
+        {"query": "", "page_size": 1},
     ),
     "oxylabs": (
         "oxylabs_google_search_scraper",

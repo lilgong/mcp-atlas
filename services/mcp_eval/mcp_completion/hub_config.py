@@ -127,9 +127,11 @@ async def managed_task_startup_env(servers: list[str]) -> dict[str, str]:
                 raise RuntimeError("Hub task setup is unavailable or access was denied")
             body = response.json()
             values = body.get("data", {}).get("startupEnv")
+            allowed = {"NCBI_API_KEY", "NCBI_EMAIL", "NCBI_TOOL"} if server == "pubmed" else set()
             if (
                 body.get("success") is not True
                 or not isinstance(values, dict)
+                or set(values) - allowed
                 or any(
                     not isinstance(k, str)
                     or not isinstance(v, str)

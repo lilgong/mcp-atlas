@@ -15,6 +15,8 @@ class MCPClient(ABC):
         pass
 
     @abstractmethod
-    async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
+    async def call_tool(
+        self, tool_name: str, args: Any, *, use_cache: bool = True,
+    ) -> CallToolResponse:
         """Call a tool with given arguments."""
         pass

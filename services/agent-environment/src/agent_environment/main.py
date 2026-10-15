@@ -12,6 +12,7 @@ from cacheout import Cache
 import json
 import hashlib
 import random
+import os
 
 CACHE_TTL_HOURS = 48
 
@@ -125,6 +126,8 @@ async def list_tools() -> list[mcp.types.Tool]:
 
 def should_cache_tool(tool_name: str) -> bool:
     """Check if tool should be cached based on server whitelist."""
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub":
+        return False
     server_name = tool_name.split("_", 1)[0]
     return server_name in CACHEABLE_SERVERS
 
@@ -244,6 +247,8 @@ async def health() -> dict[str, Any]:
         status = "health_and_client_connection_degraded"
     else:
         status = "health_and_client_connection_ok"
+    from .runtime_identity import runtime_identity
+
     return {
         "status": status,
         "ready": router.started,
@@ -256,4 +261,5 @@ async def health() -> dict[str, Any]:
             for detail in details
             if detail["last_error"] is not None
         },
+        "runtime_identity": runtime_identity(),
     }

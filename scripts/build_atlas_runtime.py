@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "services/agent-environment"
 RUNTIME = ROOT / "services/atlas-runtime"
-DEFAULT_IMAGE = "mcp-atlas-runtime:latest"
+DEFAULT_IMAGE = "mcp-atlas-runtime:rollout"
 
 SOURCE_FILES = (
     "README.md",
@@ -27,6 +27,7 @@ SOURCE_FILES = (
     "src/agent_environment/logger.py",
     "src/agent_environment/main.py",
     "src/agent_environment/mcp_client.py",
+    "src/agent_environment/credential_pool.py",
     "src/agent_environment/mcphub_transport.py",
     "src/agent_environment/usage_audit.py",
     "src/agent_environment/mcp_router.py",
@@ -35,6 +36,7 @@ SOURCE_FILES = (
     "src/agent_environment/osm_mcp_compat.py",
     "src/agent_environment/oxylabs_mcp_compat.py",
     "src/agent_environment/pubmed_mcp_compat.py",
+    "src/agent_environment/runtime_identity.py",
     "src/agent_environment/twelvedata_mcp_compat.py",
     "src/agent_environment/run_node_mcp.cjs",
     "src/agent_environment/met_museum_compat.cjs",

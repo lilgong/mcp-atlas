@@ -23,7 +23,7 @@ from ..account_guard import (
     is_time_based_quota_error,
 )
 from ..schema import CallToolResponse, ToolDefinition
-from ..shared_rate_gate import SharedRateGate, SharedRateLease
+from ..shared_rate_gate import RateLease, SharedRateGate
 from ..task_sandbox import TaskSandbox
 from ..tool_policy import (
     TASK_MONGODB_DATABASE,
@@ -130,6 +130,7 @@ _SHARED_SERVER_CALL_GATES = {
     "brave-search": SharedRateGate("brave-search", 1.5, 2.0, 10.0),
     "e2b-server": SharedRateGate("e2b-server", 15.0, 60.0, 240.0),
     "osm-mcp-server": SharedRateGate("osm-mcp-server", 1.0),
+    "pubmed": SharedRateGate("pubmed", 1.2, 15.0, 60.0),
     "twelvedata": SharedRateGate("twelvedata", 8.0, 15.0, 60.0),
     "wikipedia": SharedRateGate(
         "wikipedia",
@@ -144,7 +145,7 @@ _SHARED_SERVER_CALL_GATES = {
 @dataclass
 class ServerCallSlot:
     queued_ms: int
-    shared_lease: SharedRateLease | None = None
+    shared_lease: RateLease | None = None
 
     def observe_rate_limit(self, rate_limited: bool) -> float:
         if self.shared_lease is None:
@@ -159,6 +160,7 @@ _RATE_LIMIT_MARKERS = (
     "status code: 429",
     "status_code=429",
     "rate limit exceeded",
+    "rate limiting this ip",
     "too many requests",
     "blocked this public egress ip",
 )
@@ -238,6 +240,8 @@ def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
 
 
 def _relay_handles_server(server: str) -> bool:
+    # The relay schedules each upstream HTTP request centrally. Without it,
+    # Redis (or the local file backend) coordinates the whole MCP tool call.
     return server in {"arxiv", "osm-mcp-server", "pubmed", "wikipedia"} and bool(
         (os.getenv("MCP_RELAY_URL") or "").strip()
         and (os.getenv("MCP_RELAY_TOKEN") or "").strip()
@@ -375,6 +379,7 @@ class IsolatedMCPClient(MCPClient):
                 self._clients[ToolRoute.TASK_NETWORK] = SandboxMCPClient(
                     self._sandbox.network_url,
                     enabled_tools=network_tools,
+                    container_name=self._sandbox.network_container_name,
                 )
 
         from ..hub_task_transport import HubTaskClient, task_hub_enabled
@@ -451,8 +456,12 @@ class IsolatedMCPClient(MCPClient):
                     by_name.setdefault(tool.name, tool)
         return list(by_name.values())
 
-    async def call_tool(self, tool_name: str, args: Any) -> CallToolResponse:
-        if tool_name in self.blocked_tools or route_for_tool(tool_name) in {
+    async def call_tool(
+        self, tool_name: str, args: Any, *, use_cache: bool = True,
+    ) -> CallToolResponse:
+        if tool_name in self.blocked_tools or route_for_tool(
+            tool_name
+        ) in {
             ToolRoute.BLOCKED_CLOUD_WRITE,
             ToolRoute.BLOCKED_UNSUPPORTED,
         }:
@@ -500,7 +509,12 @@ class IsolatedMCPClient(MCPClient):
                 rate_limit_queued_ms=rate_limit_queued_ms,
             )
             try:
-                response = await client.call_tool(tool_name, args)
+                if use_cache:
+                    response = await client.call_tool(tool_name, args)
+                else:
+                    response = await client.call_tool(
+                        tool_name, args, use_cache=False,
+                    )
             except Exception as exc:
                 rate_limited = _contains_rate_limit_marker(exc)
                 shared_cooldown_seconds = call_slot.observe_rate_limit(rate_limited)

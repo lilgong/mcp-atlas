@@ -22,9 +22,17 @@ class RuntimeRouterStagingTests(unittest.TestCase):
                 / "agent_environment"
                 / "mcp_router.py"
             )
+            identity = (
+                context
+                / "src"
+                / "agent_environment"
+                / "runtime_identity.py"
+            )
             dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
             self.assertTrue(router.is_file())
+            self.assertTrue(identity.is_file())
             self.assertIn("mcp_router.py", dockerfile)
+            self.assertIn("runtime_identity.py", dockerfile)
 
 
 if __name__ == "__main__":

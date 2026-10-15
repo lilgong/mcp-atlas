@@ -176,3 +176,21 @@ def test_hub_timeout_covers_queue_and_execution():
 def test_invalid_hub_timeout_fails_closed(value):
     with pytest.raises(ValueError):
         hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": value}, {"brave-search"})
+
+
+@pytest.mark.parametrize("server,key_name", [("context7", "CONTEXT7_API_KEYS"), ("twelvedata", "TWELVE_DATA_API_KEYS")])
+def test_hub_does_not_apply_atlas_upstream_key_pool(server, key_name, monkeypatch):
+    from agent_environment import mcp_client
+    monkeypatch.setenv(key_name, '["old-key-1", "old-key-2"]')
+    config = {"atlas_hub_prefix": server + "-"}
+    marker = object()
+    with patch.object(mcp_client, "_create_direct_client", return_value=marker) as create:
+        assert create_server_client(server, config) is marker
+        create.assert_called_once_with(server, config)
+
+
+def test_hub_calls_never_use_local_tool_result_cache(monkeypatch):
+    from agent_environment.main import should_cache_tool
+    monkeypatch.setenv("MCP_TOOL_TRANSPORT", "hub")
+    assert should_cache_tool("brave-search_brave_web_search") is False
+    assert should_cache_tool("wikipedia_search") is False

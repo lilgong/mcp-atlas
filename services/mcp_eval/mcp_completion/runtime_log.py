@@ -19,6 +19,10 @@ def _configured_secrets() -> tuple[str, ...]:
     for name, value in os.environ.items():
         if value and len(value) >= 8 and any(marker in name.upper() for marker in _SECRET_ENV_MARKERS):
             values.append(value)
+            if name.endswith("API_KEYS"):
+                pool = json.loads(value) if value.strip().startswith("[") else value.split(",")
+                if isinstance(pool, list):
+                    values.extend(k for k in pool if isinstance(k, str) and len(k) >= 8)
     return tuple(sorted(set(values), key=len, reverse=True))
 
 
