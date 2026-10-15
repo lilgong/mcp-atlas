@@ -56,5 +56,8 @@ push can update rollout (not mcphub):
 git push origin HEAD:rollout
 ```
 
-Both upstream mcphub and rollout heads are in this integration's ancestry at
-creation. Fetch/review any later upstream movement before publishing.
+The initial integration merge contains mcphub ancestry and equivalent rollout
+patches, but cherry-picked equivalents alone do NOT include origin/rollout's
+commit ancestry. A subsequent explicit merge of origin/rollout 4e6fc3d resolves
+this, preserving the same source tree and allowing non-force publication.
+Fetch/review any later upstream movement before publishing.
