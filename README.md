@@ -1659,3 +1659,10 @@ docker run --rm hello-world
 | `services/mcp_eval/scripts/cleanup_task_sandboxes.py` | 清理同 owner 孤儿容器 |
 | `data_exports/` | 官方云端账号数据和 Mongo dump |
 | `docs/slack_free_method.md` | Slack 导入和可见窗口处理 |
+
+
+Met Museum 直连兼容修复：保持 `metmuseum-mcp@1.0.0` 及原工具 schema，启动器加载
+`met_museum_compat.cjs`，将搜索转到 Met v1.1 分页 API，并保持原分页结果结构。
+`make build-atlas-runtime` 会把适配文件打入运行镜像；已运行的旧容器不会自动更新。
+工具详情与部门接口保留原实现。测试：
+`node --test services/agent-environment/tests/test_met_museum_compat.cjs`（先安装 Node MCP 依赖）。
