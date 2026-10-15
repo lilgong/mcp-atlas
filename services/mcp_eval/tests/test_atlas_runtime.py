@@ -257,6 +257,11 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(any(path.startswith("data/") for path in paths))
             self.assertIn("package.json", paths)
             self.assertIn("package-lock.json", paths)
+            self.assertIn("src/agent_environment/met_museum_compat.cjs", paths)
+            self.assertIn(
+                "src/agent_environment/met_museum_compat.cjs",
+                (context / "Dockerfile").read_text(),
+            )
             self.assertIn(
                 "src/agent_environment/yibu_fetch_preload.cjs", paths
             )
