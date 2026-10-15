@@ -48,3 +48,31 @@ test('installation is idempotent and preserves upstream failures without retryin
   assert.equal(result.content[0].text, 'Rate limited');
   assert.equal(calls, 1);
 });
+
+
+test('out-of-range null IDs clamp to last page before ID validation', async () => {
+  const { SearchMuseumObjectsTool } = await import(pathToFileURL(packageRoot + '/dist/tools/SearchMuseumObjectsTool.js').href);
+  await installMetCompatibility(packageRoot);
+  const urls=[];
+  const tool=new SearchMuseumObjectsTool({async fetchJson(raw) {
+    const url=new URL(raw);urls.push(url);
+    return Number(url.searchParams.get('offset')) >= 124
+      ? {total:124,objectIDs:null} : {total:124,objectIDs:[121,122,123,124]};
+  }});
+  const result=await tool.execute({q:'Cello',page:99,pageSize:5});
+  assert.equal(result.isError,false);
+  assert.deepEqual(result.structuredContent,{total:124,page:25,pageSize:5,totalPages:25,objectIDs:[121,122,123,124]});
+  assert.deepEqual(urls.map(u=>u.searchParams.get('offset')),['490','120']);
+  assert(urls.every(u=>u.searchParams.get('q')==='Cello' && u.searchParams.get('limit')==='5'));
+});
+
+for (const objectIDs of [null, 'bad', [1,'bad']]) {
+  test(`invalid IDs on the clamped page remain errors: ${JSON.stringify(objectIDs)}`, async () => {
+    const { SearchMuseumObjectsTool } = await import(pathToFileURL(packageRoot + '/dist/tools/SearchMuseumObjectsTool.js').href);
+    await installMetCompatibility(packageRoot);
+    let calls=0;
+    const tool=new SearchMuseumObjectsTool({async fetchJson() { return {total:124,objectIDs:++calls===1?null:objectIDs}; }});
+    const result=await tool.execute({q:'Cello',page:99,pageSize:5});
+    assert.equal(result.isError,true);assert.equal(calls,2);
+  });
+}
