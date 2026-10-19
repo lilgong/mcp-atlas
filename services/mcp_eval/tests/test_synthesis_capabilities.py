@@ -23,6 +23,7 @@ def test_synthesis_capabilities_are_explicit_and_non_secret():
         "prompt_cache_key",
         "structured_failure",
         "usage_telemetry",
+        "joint_author_evidence_labels_v1",
     }
     assert set(result["runtime"]["features"]) >= {
         "fixture_identity",

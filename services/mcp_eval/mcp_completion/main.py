@@ -174,6 +174,7 @@ SYNTHESIS_PROTOCOL_CAPABILITIES = {
             "prompt_cache_key",
             "structured_failure",
             "usage_telemetry",
+            "joint_author_evidence_labels_v1",
         ],
     },
     "runtime": {

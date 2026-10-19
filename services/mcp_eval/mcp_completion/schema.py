@@ -122,6 +122,7 @@ class SynthesisControl(BaseModel):
     max_repeat_per_tool: int = Field(8, alias="maxRepeatPerTool", ge=1)
     per_result_max_chars: int = Field(6000, alias="perResultMaxChars", ge=1)
     context_max_chars: int = Field(180_000, alias="contextMaxChars", ge=1)
+    authoring_mode: Optional[Literal["joint-author-v3"]] = Field(None, alias="authoringMode")
     no_retry_timeout_servers: List[str] = Field(
         default_factory=list, alias="noRetryTimeoutServers",
     )

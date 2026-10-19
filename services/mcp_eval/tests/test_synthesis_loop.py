@@ -76,6 +76,29 @@ async def _run(client, responses, max_tool_calls=20, max_turns=30, control=None)
 
 
 class SynthesisLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_joint_author_labels_are_visible_but_original_receipts_unchanged(self):
+        client = FakeClient([FakeTool("wiki_search")], results={"wiki_search": "actual evidence"})
+        outputs, seen = await _run(client, [
+            _assistant([("wiki_search", {"q": "a"})]),
+            _assistant([], text='{"schema_version":1}'),
+        ], max_tool_calls=2, control=SynthesisControl(authoringMode="joint-author-v3"))
+        visible = seen[1][-2].content[0].text
+        self.assertIn("[Evidence E1; source_event_id=c0; tool=wiki_search]", visible)
+        self.assertIn("actual evidence", visible)
+        self.assertIn("joint question-and-claims JSON packet", seen[1][-1].content)
+        self.assertNotIn("final evidence summary", seen[1][-1].content)
+        stored = [item.data for item in outputs if item.data.get("role") == "tool"][0]
+        self.assertEqual(stored["content"], "actual evidence")
+
+    async def test_parallel_calls_receive_unique_sequential_labels(self):
+        client = FakeClient([FakeTool("a_x"), FakeTool("b_x")])
+        _, seen = await _run(client, [_assistant([("a_x", {}), ("b_x", {})]),
+                                    _assistant([], text="packet")],
+                            control=SynthesisControl(authoringMode="joint-author-v3"))
+        results = [m for m in seen[1] if m.role == "tool"]
+        self.assertIn("[Evidence E1;", results[0].content[0].text)
+        self.assertIn("[Evidence E2;", results[1].content[0].text)
+
     async def test_budget_status_precedes_every_turn_and_results_are_bounded_for_the_model(self):
         client = FakeClient([FakeTool("wiki_search")], results={"wiki_search": "x" * 9000})
         outputs, seen = await _run(client, [

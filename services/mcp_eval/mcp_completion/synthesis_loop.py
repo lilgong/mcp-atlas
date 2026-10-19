@@ -36,9 +36,14 @@ logger = logging.getLogger(__name__)
 TIMEOUT_RE = re.compile(r"\b504\b|timed?[ -]?out|TimeoutError", re.IGNORECASE)
 
 
-def budget_status(remaining_calls: int, remaining_turns: int) -> str:
+def budget_status(remaining_calls: int, remaining_turns: int, authoring_mode: str | None = None) -> str:
     """Tell the model the usable budget while reserving room to finish."""
     if remaining_calls <= 1 or remaining_turns <= 1:
+        if authoring_mode == "joint-author-v3":
+            return ("BUDGET STATUS: finish now with the joint question-and-claims JSON packet "
+                    "specified in your author instructions, citing the E-number evidence labels. "
+                    "Do not return an evidence summary or call more tools. If insufficient, "
+                    "return the specified impossible packet; do not pad claims.")
         return (
             "BUDGET STATUS: return the final evidence summary now. "
             "Do not call any more tools."
@@ -221,7 +226,7 @@ async def run_synthesis_eval(
             aborted = "max_tool_calls_reached"
             break
         conversation.append(UserMessage(
-            role="user", content=budget_status(remaining, max_turns - turns + 1),
+            role="user", content=budget_status(remaining, max_turns - turns + 1, control.authoring_mode),
         ))
         if _estimated_request_chars(conversation, transformed_tools) > control.context_max_chars:
             aborted = "context_budget_exhausted"
@@ -267,7 +272,8 @@ async def run_synthesis_eval(
             break
         calls_seen += len(selected)
         warnings: list[str] = []
-        for call in selected:
+        first_evidence_number = calls_seen - len(selected) + 1
+        for evidence_number, call in enumerate(selected, first_evidence_number):
             name = str(call.function.get("name") or "")
             calls_by_tool[name] += 1
             warning = repeat_tool_warning(name, calls_by_tool[name], control.max_repeat_per_tool)
@@ -310,13 +316,15 @@ async def run_synthesis_eval(
             stored = ToolCallOutputMessage(role="tool", tool_call_id=call.id, content=content)
             stored_dump = stored.model_dump()
             yield output_factory("message", stored_dump)
+            visible = model_visible_text(str(stored_dump["content"]), control.per_result_max_chars)
+            if control.authoring_mode == "joint-author-v3":
+                visible = (f"[Evidence E{evidence_number}; source_event_id={call.id}; tool={name}]\n"
+                           "The label identifies this observation, NOT proof that its content is correct.\n" + visible)
             conversation.append(ToolCallOutputMessage(
                 role="tool", tool_call_id=call.id,
                 content=[TextContent(
                     type="text",
-                    text=model_visible_text(
-                        str(stored_dump["content"]), control.per_result_max_chars,
-                    ),
+                    text=visible,
                 )],
             ))
         if warnings:
