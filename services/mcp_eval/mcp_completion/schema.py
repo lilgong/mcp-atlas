@@ -2,7 +2,7 @@
 
 from litellm.types.utils import Message as MessageType
 from typing import Dict, List, Literal, Optional, Union, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ToolCallSchema(BaseModel):
@@ -150,6 +150,17 @@ class RunAgentAPIRequestBody(BaseModel):
     include_telemetry: bool = Field(False, alias="includeTelemetry")
     prompt_cache_key: Optional[str] = Field(None, alias="promptCacheKey", min_length=1)
     synthesis_control: Optional[SynthesisControl] = Field(None, alias="synthesisControl")
+    author_session_id: Optional[str] = Field(None, alias="authorSessionId", pattern=r"^[a-f0-9]{64}$")
+    author_session_action: Optional[Literal["start", "resume"]] = Field(None, alias="authorSessionAction")
+
+    @model_validator(mode="after")
+    def validate_author_session(self):
+        if bool(self.author_session_id) != bool(self.author_session_action):
+            raise ValueError("author session ID and action must be supplied together")
+        if self.author_session_id and (not self.task_id or self.synthesis_control is None
+                or self.synthesis_control.authoring_mode != "joint-author-v3"):
+            raise ValueError("author sessions require a joint-author synthesis request")
+        return self
 
     class Config:
         populate_by_name = True

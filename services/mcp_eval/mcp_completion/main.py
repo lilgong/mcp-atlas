@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from .author_sessions import AUTHOR_SESSIONS
     isolation_enabled = os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower() not in {
         "0",
         "false",
@@ -77,9 +78,14 @@ async def lifespan(_app: FastAPI):
         task_isolation_enabled=isolation_enabled,
         task_agent_image=os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE),
     )
+    author_sweeper = asyncio.create_task(AUTHOR_SESSIONS.sweep())
     try:
         yield
     finally:
+        author_sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await author_sweeper
+        await AUTHOR_SESSIONS.close_all()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
@@ -175,6 +181,7 @@ SYNTHESIS_PROTOCOL_CAPABILITIES = {
             "structured_failure",
             "usage_telemetry",
             "joint_author_evidence_labels_v1",
+            "joint_author_sessions_v1",
         ],
     },
     "runtime": {
@@ -510,6 +517,13 @@ async def run_agent(
                 ),
             },
         )
+
+
+@app.post("/v2/mcp_eval/author-session/{session_id}/close")
+async def close_author_session(session_id: str):
+    from .author_sessions import AUTHOR_SESSIONS
+    await AUTHOR_SESSIONS.close(session_id)
+    return {"closed": True}
 
 
 @app.post("/v2/mcp_eval/cancel/{evaluation_id}")

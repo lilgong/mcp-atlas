@@ -359,6 +359,37 @@ async def handle_run_mcp_eval(
         AgentOutput: Generator that yields either successful messages or errors during MCP eval execution
     """
     task_id = body.task_id or f"request-{uuid.uuid4().hex[:14]}"
+    if body.author_session_id:
+        from .author_sessions import AUTHOR_SESSIONS
+        from .synthesis_loop import run_synthesis_eval
+        entry = await AUTHOR_SESSIONS.begin(body, lambda: IsolatedMCPClient(
+            task_id=task_id, shared_url=config.MCP_SERVER_URL, enabled_tools=body.enabled_tools))
+        try:
+            # Return old messages for immutable evidence reconstruction, but
+            # only this request's telemetry (otherwise costs are double-counted).
+            for output in entry.outputs:
+                yield AgentOutput(output["type"], output["data"])
+            messages = entry.initial_messages
+            calls = min(body.max_tool_calls, 6 if body.author_session_action == "resume" else 16)
+            async for output in run_synthesis_eval(
+                entry.client, body.model, messages, body.max_turns, calls,
+                entry.control, extra_body=body.extra_body,
+                retry_thinking_contract_violations=body.retry_thinking_contract_violations,
+                task_id=task_id, include_telemetry=body.include_telemetry,
+                prompt_cache_key=body.prompt_cache_key, output_factory=AgentOutput,
+                session_state=entry.state,
+            ):
+                if output.type == "message":
+                    entry.outputs.append({"type": output.type, "data": output.data})
+                yield output
+                if output.type == "error":
+                    await AUTHOR_SESSIONS.discard(body.author_session_id)
+            if body.author_session_id in AUTHOR_SESSIONS.entries:
+                AUTHOR_SESSIONS.idle(entry)
+        except BaseException:
+            await AUTHOR_SESSIONS.discard(body.author_session_id)
+            raise
+        return
     mcp_client = IsolatedMCPClient(
         task_id=task_id,
         shared_url=config.MCP_SERVER_URL,

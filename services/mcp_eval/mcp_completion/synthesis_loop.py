@@ -197,6 +197,7 @@ async def run_synthesis_eval(
     include_telemetry: bool = False,
     prompt_cache_key: Optional[str] = None,
     output_factory: Any = _Output,
+    session_state: Optional[dict] = None,
 ) -> AsyncGenerator[Any, None]:
     tools = await mcp_client.list_tools()
     tool_rows = [tool.model_dump() for tool in tools]
@@ -208,12 +209,14 @@ async def run_synthesis_eval(
     servers_by_tool = {
         str(row["name"]): str(row["server"]) for row in tool_rows if row.get("server")
     }
-    conversation: List[Any] = list(messages)
+    state = session_state if session_state is not None else {}
+    conversation: List[Any] = state.setdefault("conversation", list(messages))
+    evidence_offset = state.get("evidence_count", 0)
     calls_seen = 0
     turns = 0
-    calls_by_tool: Counter[str] = Counter()
-    warning_tier: dict[str, int] = {}
-    timed_out_servers: set[str] = set()
+    calls_by_tool: Counter[str] = state.setdefault("calls_by_tool", Counter())
+    warning_tier: dict[str, int] = state.setdefault("warning_tier", {})
+    timed_out_servers: set[str] = state.setdefault("timed_out_servers", set())
     aborted: str | None = None
     total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
     usage_seen = False
@@ -272,8 +275,9 @@ async def run_synthesis_eval(
             break
         calls_seen += len(selected)
         warnings: list[str] = []
-        first_evidence_number = calls_seen - len(selected) + 1
+        first_evidence_number = evidence_offset + calls_seen - len(selected) + 1
         for evidence_number, call in enumerate(selected, first_evidence_number):
+            state["evidence_count"] = evidence_number
             name = str(call.function.get("name") or "")
             calls_by_tool[name] += 1
             warning = repeat_tool_warning(name, calls_by_tool[name], control.max_repeat_per_tool)
