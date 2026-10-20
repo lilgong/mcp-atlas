@@ -35,6 +35,30 @@ def test_context_keeps_original_rules_and_distinguishes_translation_from_quotati
     assert "explicitly asks for all matches" in text
 
 
+def test_real_prompt_has_one_task_contract_without_conflicting_all_details_rule():
+    import ast
+    import re
+    path = Path(__file__).resolve().parents[1] / "mcp_evals_scores.py"
+    tree = ast.parse(path.read_text())
+    method = next(m for cls in tree.body if isinstance(cls, ast.ClassDef)
+                  for m in cls.body if isinstance(m, ast.FunctionDef)
+                  and m.name == "_get_single_claim_evaluation_prompt")
+    namespace = {"re": re}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
+    base = type("Base", (), {method.name: namespace[method.name]})
+    default = base()._get_single_claim_evaluation_prompt("M3.9 (event ID XYZ)", "M3.9")
+    assert "Check if all key components from the claim" in default
+    rubric = adapter().task_context_evaluator_type(base, "Give the largest magnitude.")()
+    text = rubric._get_single_claim_evaluation_prompt("M3.9 (event ID XYZ)", "M3.9")
+    assert "Check if all key components from the claim" not in text
+    assert "The response covers all key details" not in text
+    assert "A reference claim is an answer exemplar" in text
+    assert "Do not demand an unasked event ID" in text
+    assert "a volunteered wrong value" in text
+    assert "do not apply the 5% tolerance" in text
+    assert "not a requirement" not in default  # Ordinary evaluator remains its own policy.
+
+
 @pytest.mark.parametrize("joint", [False, True])
 def test_only_joint_author_uses_context_and_never_posthoc_changes_scores(monkeypatch, capsys, tmp_path, joint):
     module = adapter()

@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 
-TASK_CONTEXT_POLICY = "joint-task-context-v1"
+TASK_CONTEXT_POLICY = "joint-task-contract-v2"
 
 
 def task_context_evaluator_type(base, task_prompt: str):
@@ -26,6 +26,33 @@ def task_context_evaluator_type(base, task_prompt: str):
     the evaluator shared by ordinary MCP-Atlas benchmark runs.
     """
     class TaskContextEvaluator(base):
+        claim_criteria_override = (
+            "SCORING CRITERIA (task-grounded answer obligations):\n"
+            "- fulfilled: The response correctly and completely establishes this claim's "
+            "task-required fact or necessary clue resolution/operand. Missing incidental "
+            "reference metadata or equivalent wording is NOT partial coverage.\n"
+            "- partially_fulfilled: Some substantive required part of that fact is missing "
+            "or contradicted, not merely phrased differently.\n"
+            "- not_fulfilled: The required fact is absent or wrong.\n"
+            "A reference claim is an answer exemplar, NOT an additional user instruction. "
+            "Use the visible task to distinguish what is asked from identifying context. "
+            "Do not demand an unasked event ID, timestamp, example location, source title "
+            "or verbatim translation just because the reference includes it. Necessary "
+            "intermediate facts still count; do not waive a real missing answer or change "
+            "the subject, scope, unit, relation, date or numerical result."
+        )
+        claim_instructions_override = (
+            "1. Identify this claim's substantive fact under the visible task.\n"
+            "2. Compare the response to that fact, not to the reference string or its "
+            "incidental evidence annotations. State the actual missing/incorrect fact "
+            "before awarding partial/not_fulfilled.\n"
+            "3. For translations check all source content and required code/identifiers, "
+            "but accept faithful terminology, grammar and spelling variants. Quoted "
+            "reference wording does not make a translation task an exact-string task.\n"
+            "4. Apply the numerical and contradiction rules; a volunteered wrong value "
+            "for the same fact is not excused as metadata.\n"
+            "5. Return the specified JSON with coverage_outcome, justification and confidence."
+        )
         def _get_single_claim_evaluation_prompt(self, claim: str, response: str) -> str:
             return super()._get_single_claim_evaluation_prompt(claim, response) + (
                 "\nTASK-CONTEXT INTERPRETATION (grading instructions):\n"

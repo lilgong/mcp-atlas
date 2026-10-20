@@ -692,6 +692,19 @@ class CoverageEvaluator:
             except (ValueError, OverflowError, OSError):
                 continue
         computed_context = '\n'.join(conversions) or 'No explicitly labelled Unix timestamp found.'
+        criteria = getattr(self, "claim_criteria_override", None) or """SCORING CRITERIA:
+- fulfilled: Claim is completely and accurately addressed. The response covers all key details.
+- partially_fulfilled: Claim is partially addressed. The response covers some but not all key details.
+- not_fulfilled: Claim is not addressed. The response does not include any key details."""
+        instructions = getattr(self, "claim_instructions_override", None) or """1. Determine if the core requirement of the claim is met in the response
+2. Check if all key components from the claim appear substantively in the response
+   - For numerical values, apply the flexible matching guidelines above
+   - Focus on whether the same magnitude and meaning are conveyed
+3. Assign the appropriate coverage_outcome
+4. Provide specific justification referencing what was/wasn't covered
+   - When numbers differ slightly, note if they're within acceptable range
+5. Provide a confidence level (0.0-1.0) for your assessment
+Be rigorous but fair in your assessment. Focus on whether the response conveys the same information as the claim, not on exact numerical precision unless precision is critical to the claim's meaning."""
         output_format = """{
 "claim_text": "str type",
 "confidence_level": "float type",
@@ -700,10 +713,7 @@ class CoverageEvaluator:
 }"""
 
         return f"""You are evaluating how well a model's response addresses a specific expert-defined claim.
-SCORING CRITERIA:
-- fulfilled: Claim is completely and accurately addressed. The response covers all key details.
-- partially_fulfilled: Claim is partially addressed. The response covers some but not all key details.
-- not_fulfilled: Claim is not addressed. The response does not include any key details.
+{criteria}
 NUMERICAL COMPARISON GUIDELINES:
 - A response is not fully fulfilled if it gives contradictory values for the SAME fact,
   even if one matches the claim. A correct Unix timestamp next to an incorrect explicitly
@@ -731,15 +741,7 @@ MODEL RESPONSE TO ANALYZE:
 CODE-COMPUTED UTC CONVERSIONS (derived context, not a new source):
 {computed_context}
 INSTRUCTIONS:
-1. Determine if the core requirement of the claim is met in the response
-2. Check if all key components from the claim appear substantively in the response
-   - For numerical values, apply the flexible matching guidelines above
-   - Focus on whether the same magnitude and meaning are conveyed
-3. Assign the appropriate coverage_outcome
-4. Provide specific justification referencing what was/wasn't covered
-   - When numbers differ slightly, note if they're within acceptable range
-5. Provide a confidence level (0.0-1.0) for your assessment
-Be rigorous but fair in your assessment. Focus on whether the response conveys the same information as the claim, not on exact numerical precision unless precision is critical to the claim's meaning.
+{instructions}
 FINAL OUTPUT FORMAT
 - Output only one JSON
 - Must be parseable by json.loads()
