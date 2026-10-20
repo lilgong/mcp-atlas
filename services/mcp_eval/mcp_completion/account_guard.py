@@ -131,6 +131,7 @@ _FATAL_ACCOUNT_MARKERS = (
     "credit balance exhausted",
     "no credits remaining",
     "insufficient_quota",
+    "token quota is not enough",
     "quota exhausted",
     "payment required",
     "402 payment required",
