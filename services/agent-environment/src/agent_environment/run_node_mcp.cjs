@@ -65,7 +65,11 @@ async function main() {
     );
   }
   process.argv = [process.argv[0], entrypoint, ...serverArgs];
-  await import(pathToFileURL(entrypoint).href);
+  if (parseSource(source).name === "@modelcontextprotocol/server-google-maps") {
+    await require("./google_maps_compat.cjs").runGoogleMaps(entrypoint);
+  } else {
+    await import(pathToFileURL(entrypoint).href);
+  }
 }
 
 module.exports = { parseSource, resolveEntrypoint };
