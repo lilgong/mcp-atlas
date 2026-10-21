@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,24 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
     FIXTURE_V2_VECTOR_SHA256 = (
         "857ee1508a17cca148ee326d72141926e9b2abfe0797a3f70a5a9d4efce51182"
     )
+
+    def test_runtime_copies_every_staged_node_compat_module(self):
+        with tempfile.TemporaryDirectory() as raw:
+            context = Path(raw)
+            stage_build_context(context)
+            dockerfile = (context / "Dockerfile").read_text()
+            instructions = dockerfile.replace("\\\n", " ").splitlines()
+            copied = set()
+            for line in instructions:
+                tokens = shlex.split(line, comments=True)
+                if tokens and tokens[0] == "COPY" and not tokens[1].startswith("--"):
+                    copied.update(tokens[1:-1])
+            modules = list(context.glob("src/agent_environment/*.cjs"))
+            self.assertTrue(modules)
+            for module in modules:
+                relative = module.relative_to(context).as_posix()
+                with self.subTest(module=relative):
+                    self.assertIn(relative, copied)
 
     def test_repo_capable_local_servers_materialize_fixture_repositories(self):
         for server in (
