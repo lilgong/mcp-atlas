@@ -13,7 +13,7 @@ const distance = (meters = 0, text) => ({ value: meters,
 function duration(raw = '0s', text) {
   if (!/^\d+(?:\.\d+)?s$/.test(raw)) throw new Error('Invalid Google Routes duration');
   const seconds = Math.round(Number(raw.slice(0, -1)));
-  return { value: seconds, text: text || `${Math.max(1, Math.round(seconds / 60))} mins` };
+  return { value: seconds, text: text || `${seconds === 0 ? 0 : Math.max(1, Math.round(seconds / 60))} mins` };
 }
 function waypoint(value) {
   if (value.startsWith('place_id:')) return { placeId: value.slice(9) };
@@ -68,7 +68,7 @@ function createLegacyFetch(fetchImpl = globalThis.fetch) {
       }
       const r = await request('https://places.googleapis.com/v1/places:searchText', body,
         'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.types');
-      result = r.failure || { status: 'OK', results: (r.data.places || []).map(place) };
+      result = r.failure || { status: r.data.places?.length ? 'OK' : 'ZERO_RESULTS', results: (r.data.places || []).map(place) };
     } else if (url.pathname === endpoints[1]) {
       const id = params.get('place_id').replace(/^places\//, '');
       const r = await request(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}`, null,
@@ -89,7 +89,7 @@ function createLegacyFetch(fetchImpl = globalThis.fetch) {
         const r = await request('https://routes.googleapis.com/directions/v2:computeRoutes',
           { origin: waypoint(params.get('origin')), destination: waypoint(params.get('destination')), travelMode: mode },
           'routes.description,routes.distanceMeters,routes.duration,routes.localizedValues,routes.legs.distanceMeters,routes.legs.duration,routes.legs.localizedValues,routes.legs.steps.distanceMeters,routes.legs.steps.staticDuration,routes.legs.steps.navigationInstruction,routes.legs.steps.travelMode,routes.legs.steps.localizedValues');
-        result = r.failure || { status: 'OK', routes: (r.data.routes || []).map((v) => ({ summary: v.description || '',
+        result = r.failure || { status: r.data.routes?.length ? 'OK' : 'ZERO_RESULTS', routes: (r.data.routes || []).map((v) => ({ summary: v.description || '',
           legs: (v.legs || []).map((leg) => ({ distance: distance(leg.distanceMeters, leg.localizedValues?.distance?.text),
             duration: duration(leg.duration, leg.localizedValues?.duration?.text),
             steps: (leg.steps || []).map((s) => ({ html_instructions: s.navigationInstruction?.instructions || '',
