@@ -70,7 +70,6 @@ COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/pubmed_mcp_compat.py \
      src/agent_environment/twelvedata_mcp_compat.py \
      src/agent_environment/run_node_mcp.cjs \
-     src/agent_environment/google_maps_compat.cjs \
      src/agent_environment/met_museum_compat.cjs \
      src/agent_environment/google_maps_compat.cjs \
      src/agent_environment/yibu_fetch_preload.cjs \
