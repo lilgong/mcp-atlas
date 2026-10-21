@@ -19,6 +19,28 @@ from pathlib import Path
 TASK_CONTEXT_POLICY = "joint-task-contract-v2"
 
 
+def usage_accounting(rows, *, model, input_price, cached_price, output_price):
+    """Per-request quoted cost; unknown cache is estimated, never erased hits."""
+    from mcp_completion.llm import _normalized_usage
+    inputs = outputs = cached = unknown = 0
+    cost = 0.0
+    for row in rows:
+        usage = _normalized_usage(row.get("usage") or row)
+        if usage is None:
+            continue
+        i, o, c = usage['input_tokens'], usage['output_tokens'], usage['cached_tokens']
+        inputs += i
+        outputs += o
+        cached += c
+        unknown += usage['cache_unknown_input_tokens']
+        long = model in {'gpt-5.4', 'gpt-6.1-sol'} and i >= 272_000
+        ip = input_price * (2 if long else 1)
+        cp = cached_price * (2 if long and model == 'gpt-6.1-sol' else 1)
+        op = output_price * (1.5 if long else 1)
+        cost += ((i - c) * ip + c * cp + o * op) / 1_000_000
+    return inputs, outputs, cached, unknown, cost
+
+
 def task_context_evaluator_type(base, task_prompt: str):
     """Scope grading to the actual task, without altering scores after the judge.
 
@@ -144,9 +166,9 @@ def main() -> None:
                     usage_rows.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        input_tokens = sum(int(row.get("prompt_tokens") or 0) for row in usage_rows)
-        output_tokens = sum(int(row.get("completion_tokens") or 0) for row in usage_rows)
-        cost = (input_tokens * args.input_price + output_tokens * args.output_price) / 1_000_000
+        input_tokens, output_tokens, cached_tokens, unknown_input, cost = usage_accounting(
+            usage_rows, model=args.model, input_price=args.input_price,
+            cached_price=args.cached_input_price, output_price=args.output_price)
         scored["per_claim"] = [
             {**item, "claim_id": str(claim.get("id") or "")}
             for claim, item in zip(claims, scored["per_claim"], strict=True)
@@ -156,10 +178,17 @@ def main() -> None:
         print(json.dumps({
             "status": "success", "payload": scored,
             "metrics": {
-                "input_tokens": input_tokens, "cached_tokens": 0,
+                "input_tokens": input_tokens, "cached_tokens": cached_tokens,
                 "output_tokens": output_tokens, "cost_usd": cost,
-                "prompt_cache": {"status": "unknown", "cached_tokens": None},
+                "prompt_cache": {
+                    "status": "unknown" if unknown_input else "hit" if cached_tokens else "miss",
+                    "cached_tokens": None if unknown_input else cached_tokens,
+                    "known_cached_tokens": cached_tokens},
                 "dimensions": {"scorer": "mcp_evals_scores.CoverageEvaluator",
+                               "cache_unknown_input_count": unknown_input,
+                               "cache_known_input_count": input_tokens - unknown_input,
+                               "cache_accounting": "partial" if 0 < unknown_input < input_tokens else "unknown" if unknown_input else "complete",
+                               "cost_is_estimate": True,
                                "policy_version": policy_version},
             },
         }, ensure_ascii=False))

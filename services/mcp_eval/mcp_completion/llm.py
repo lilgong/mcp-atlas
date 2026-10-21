@@ -135,6 +135,7 @@ def _write_token_usage(
         "prompt_tokens": getattr(usage, "prompt_tokens", None),
         "completion_tokens": getattr(usage, "completion_tokens", None),
         "total_tokens": getattr(usage, "total_tokens", None),
+        "usage": jsonable(usage),
         "prompt": [item.role + str(item.content) for item in messages],
         "answer": answer,
     }
@@ -160,22 +161,27 @@ def _normalized_usage(usage: Any) -> Optional[Dict[str, Any]]:
         return None
     details = value.get("prompt_tokens_details") or value.get("input_tokens_details")
     details = details if isinstance(details, dict) else {}
-    cache_reported = (
-        "cached_tokens" in details
-        or "cache_read_input_tokens" in value
-        or "cached_tokens" in value
-    )
+    cache_values = (details.get("cached_tokens"), value.get("cache_read_input_tokens"),
+                    value.get("prompt_cache_hit_tokens"), value.get("cached_tokens"))
+    cache_value = next((n for n in cache_values
+                        if isinstance(n, int) and not isinstance(n, bool) and n >= 0), None)
+    cache_reported = cache_value is not None
+    input_count = int(value.get("prompt_tokens") or value.get("input_tokens") or 0)
     return {
         "input_tokens": int(value.get("prompt_tokens") or value.get("input_tokens") or 0),
         "output_tokens": int(value.get("completion_tokens") or value.get("output_tokens") or 0),
-        "cached_tokens": int(
-            details.get("cached_tokens")
-            or value.get("cache_read_input_tokens")
-            or value.get("cached_tokens")
-            or 0
-        ),
+        "cached_tokens": cache_value or 0,
+        "cache_unknown_input_tokens": 0 if cache_reported else input_count,
         "cache_reported": cache_reported,
     }
+
+
+def _accumulate_usage(total, usage):
+    """Retain known cache hits even if a different request omits usage details."""
+    for key in total:
+        fallback = (int(usage.get("input_tokens") or 0) - int(usage.get("cached_tokens") or 0)
+                    if key == "cache_unknown_input_tokens" and not usage.get("cache_reported") else 0)
+        total[key] += int(usage.get(key, fallback) or 0)
 
 
 # Only braces are ever restored, shortest first. The observed defect drops
@@ -431,7 +437,8 @@ async def create_completion(
     reasoning_content = None
     content = ""
     call_id = ""
-    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                   "cache_unknown_input_tokens": 0}
     usage_seen = False
     cache_reported = True
 
@@ -498,8 +505,7 @@ async def create_completion(
         normalized_usage = _normalized_usage(usage)
         if normalized_usage is not None:
             usage_seen = True
-            for key in total_usage:
-                total_usage[key] += int(normalized_usage[key])
+            _accumulate_usage(total_usage, normalized_usage)
             cache_reported = cache_reported and bool(normalized_usage["cache_reported"])
         write_runtime_event(
             "model_calls",

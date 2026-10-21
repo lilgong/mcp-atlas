@@ -616,6 +616,8 @@ class AsyncLiteLLMClient(AsyncLLMClient):
             # 统计token使用
             token_usage = {
                 "model": self.config.evaluator_model,
+                "usage": response.usage.model_dump(exclude_none=True)
+                if hasattr(response.usage, 'model_dump') else None,
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,

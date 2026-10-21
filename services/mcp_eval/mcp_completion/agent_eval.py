@@ -7,7 +7,7 @@ import uuid
 from typing import AsyncGenerator, Dict, List, Union, Any, Optional, Tuple
 
 from .mcp_client import IsolatedMCPClient, MCPClient
-from .llm import create_completion, _transform_tool_calls
+from .llm import create_completion, _transform_tool_calls, _accumulate_usage
 from .account_guard import FatalAccountError
 from .schema import (
     RunAgentAPIRequestBody,
@@ -136,7 +136,8 @@ async def run_mcp_eval(
     total_tool_calls = 0
     reached_max_turns = True
     reached_max_tool_calls = False
-    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                   "cache_unknown_input_tokens": 0}
     usage_seen = False
     cache_reported = True
 
@@ -165,8 +166,7 @@ async def run_mcp_eval(
             original_content = result.original_content
             if isinstance(result.usage, dict):
                 usage_seen = True
-                for key in total_usage:
-                    total_usage[key] += int(result.usage.get(key) or 0)
+                _accumulate_usage(total_usage, result.usage)
                 cache_reported = cache_reported and bool(result.usage.get("cache_reported"))
 
         except FatalAccountError:

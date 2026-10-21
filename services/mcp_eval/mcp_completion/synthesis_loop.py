@@ -21,7 +21,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from .account_guard import FatalAccountError
 from .failure_protocol import classify_model_exception, failure_receipt
-from .llm import _transform_tool_calls, create_completion
+from .llm import _transform_tool_calls, create_completion, _accumulate_usage
 from .runtime_log import write_runtime_event
 from .schema import (
     Message,
@@ -218,7 +218,8 @@ async def run_synthesis_eval(
     warning_tier: dict[str, int] = state.setdefault("warning_tier", {})
     timed_out_servers: set[str] = state.setdefault("timed_out_servers", set())
     aborted: str | None = None
-    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                   "cache_unknown_input_tokens": 0}
     usage_seen = False
     cache_reported = True
 
@@ -253,8 +254,7 @@ async def run_synthesis_eval(
             return
         if isinstance(result.usage, dict):
             usage_seen = True
-            for key in total_usage:
-                total_usage[key] += int(result.usage.get(key) or 0)
+            _accumulate_usage(total_usage, result.usage)
             cache_reported = cache_reported and bool(result.usage.get("cache_reported"))
         message = result.message
         raw_calls = list(message.tool_calls or [])

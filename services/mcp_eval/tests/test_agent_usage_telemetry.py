@@ -20,6 +20,7 @@ class UsageNormalizationTests(unittest.TestCase):
                 "input_tokens": 1000,
                 "output_tokens": 50,
                 "cached_tokens": 625,
+                "cache_unknown_input_tokens": 0,
                 "cache_reported": True,
             },
         )
@@ -31,6 +32,7 @@ class UsageNormalizationTests(unittest.TestCase):
                 "input_tokens": 100,
                 "output_tokens": 5,
                 "cached_tokens": 0,
+                "cache_unknown_input_tokens": 100,
                 "cache_reported": False,
             },
         )
