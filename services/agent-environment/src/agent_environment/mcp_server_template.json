@@ -166,9 +166,11 @@
       }
     },
     "google-maps": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "@modelcontextprotocol/server-google-maps@0.6.2"
+        "/agent-environment/src/agent_environment/run_node_mcp.cjs",
+        "@modelcontextprotocol/server-google-maps@0.6.2",
+        "dist/index.js"
       ],
       "env": {
         "GOOGLE_MAPS_API_KEY": "${GOOGLE_MAPS_API_KEY}"
