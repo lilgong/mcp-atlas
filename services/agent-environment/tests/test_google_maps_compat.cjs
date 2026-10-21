@@ -21,9 +21,9 @@ test('Places search uses field mask and location bias, preserves numeric zero an
   assert.equal(data.results[0].name,'Museum');assert.equal(data.results[0].place_id,'id');
   assert.deepEqual(data.results[0].geometry.location,{lat:0,lng:2});assert.equal(data.results[0].rating,0);
 });
-test('empty search succeeds with empty places instead of inventing results', async () => {
+test('empty search retains upstream legacy ZERO_RESULTS status', async () => {
   const {fetch}=fixture({});
-  assert.deepEqual(await (await fetch(legacy('place/textsearch',{query:'nothing'}))).json(),{status:'OK',results:[]});
+  assert.deepEqual(await (await fetch(legacy('place/textsearch',{query:'nothing'}))).json(),{status:'ZERO_RESULTS',results:[]});
 });
 test('details translate review attribution, timestamps, phone, website and opening periods', async () => {
   const {fetch,calls}=fixture({id:'x',nationalPhoneNumber:'123',websiteUri:'https://example.com',
@@ -55,7 +55,7 @@ test('matrix sorts indexed responses, handles omitted zero indices, zero values 
  const d=await (await fetch(legacy('distancematrix',{origins:'A|B',destinations:'C|D',mode:'walking'}))).json();
  assert(calls[0].headers['X-Goog-FieldMask'].includes('status'));
  assert.deepEqual(d.origin_addresses,['A','B']);assert.deepEqual(d.destination_addresses,['C','D']);
- assert.equal(d.rows[0].elements[0].status,'OK');assert.equal(d.rows[0].elements[0].distance.value,0);assert.equal(d.rows[0].elements[0].duration.value,0);
+ assert.equal(d.rows[0].elements[0].status,'OK');assert.equal(d.rows[0].elements[0].distance.value,0);assert.equal(d.rows[0].elements[0].duration.value,0);assert.equal(d.rows[0].elements[0].duration.text,'0 mins');
  assert.equal(d.rows[0].elements[1].status,'OVER_QUERY_LIMIT');assert.equal(d.rows[1].elements[0].status,'ZERO_RESULTS');assert.equal(d.rows[1].elements[1].distance.value,20);
 });
 for(const status of [400,403,429,500]) {
@@ -109,4 +109,10 @@ test('actual stdio tools/list stays identical to pinned upstream (no network)', 
  const old=await tools([resolve(root,'node_modules/@modelcontextprotocol/server-google-maps/dist/index.js')]);
  const current=await tools([resolve(root,'src/agent_environment/run_node_mcp.cjs'),'@modelcontextprotocol/server-google-maps@0.6.2','dist/index.js']);
  assert.equal(current.length,7);assert.deepEqual(current,old);
+});
+
+test('empty directions retain upstream legacy ZERO_RESULTS status',async()=>{
+ const {fetch}=fixture({});
+ const d=await (await fetch(legacy('directions',{origin:'a',destination:'b'}))).json();
+ assert.deepEqual(d,{status:'ZERO_RESULTS',routes:[]});
 });
