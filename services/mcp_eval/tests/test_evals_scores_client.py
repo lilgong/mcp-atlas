@@ -111,6 +111,28 @@ class LiteLLMRequestOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.source_name, "gpt-5.4")
         self.assertEqual(raised.exception.credential_envs, ("EVAL_LLM_API_KEY",))
 
+    async def test_explicit_token_quota_shortfall_is_not_retried(self):
+        calls = 0
+
+        async def fake_acompletion(**kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError(
+                "litellm.APIError: APIError: OpenAIException - token quota is not enough, "
+                "token remain quota: ＄0.000874, need quota: ＄0.020000"
+            )
+
+        client = AsyncLiteLLMClient(
+            EvaluatorConfig(evaluator_model="gpt-5.4", semaphore_limit=2)
+        )
+        with patch.object(mcp_evals_scores.litellm, "acompletion", fake_acompletion):
+            with self.assertRaises(FatalAccountError) as raised:
+                await client.generate_structured_content("prompt", {})
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.source_kind, "evaluator_model")
+        self.assertEqual(raised.exception.credential_envs, ("EVAL_LLM_API_KEY",))
+
     async def test_streamed_strict_json_is_parsed_after_completion(self):
         captured = {}
 
