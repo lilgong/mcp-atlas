@@ -25,6 +25,14 @@ def test_insufficient_model_balance_stops_the_run():
     assert is_fatal_account_error(body)
 
 
+def test_explicit_token_quota_shortfall_stops_the_run():
+    body = (
+        "litellm.APIError: APIError: OpenAIException - token quota is not enough, "
+        "token remain quota: ＄0.000874, need quota: ＄0.020000"
+    )
+    assert is_fatal_account_error(body)
+
+
 def test_normal_rate_limit_does_not_stop_the_run():
     body = "LLM completion failed: HTTP 429 rate limit exceeded"
     assert not is_fatal_account_error(body)
