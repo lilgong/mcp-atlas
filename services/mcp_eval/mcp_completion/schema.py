@@ -122,6 +122,9 @@ class SynthesisControl(BaseModel):
     max_repeat_per_tool: int = Field(8, alias="maxRepeatPerTool", ge=1)
     per_result_max_chars: int = Field(6000, alias="perResultMaxChars", ge=1)
     context_max_chars: int = Field(180_000, alias="contextMaxChars", ge=1)
+    notion_query_view: bool = Field(False, alias="notionQueryView")
+    tool_repeat_limits: Dict[str, int] = Field(default_factory=dict, alias="toolRepeatLimits")
+    author_max_repairs: int = Field(1, alias="authorMaxRepairs", ge=1, le=2)
     authoring_mode: Optional[Literal["joint-author-v3"]] = Field(None, alias="authoringMode")
     no_retry_timeout_servers: List[str] = Field(
         default_factory=list, alias="noRetryTimeoutServers",

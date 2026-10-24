@@ -1,4 +1,4 @@
-"""Bounded author conversations: one live tool environment, at most one repair.
+"""Bounded author conversations: one live tool environment, a frozen bounded repair allowance.
 
 Local control-plane only. Sessions are runtime state, never benchmark answers.
 Ordinary evaluation/rollout requests never enter this registry.
@@ -60,7 +60,7 @@ class AuthorSessions:
             if not entry.busy and time.monotonic() - entry.touched > self.idle_seconds:
                 await self.discard(key)
                 raise HTTPException(410, "author session expired; fresh exploration required")
-            if entry.busy or entry.closing or entry.repairs >= 1 or entry.identity != identity:
+            if entry.busy or entry.closing or entry.repairs >= entry.control.author_max_repairs or entry.identity != identity:
                 raise HTTPException(409, "author session busy, repaired, or configuration changed")
             if any(m.role != "user" for m in body.messages) or not body.messages:
                 raise HTTPException(422, "resume accepts user feedback only")

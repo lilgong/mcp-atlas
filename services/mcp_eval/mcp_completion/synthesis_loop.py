@@ -149,6 +149,43 @@ def model_visible_text(text: str, max_chars: int) -> str:
     return text
 
 
+
+def notion_query_text(content: str, max_chars: int) -> str:
+    """Lossless record-property view; original MCP receipts remain unmodified.
+
+    Remove only page transport metadata, never property values or records. An
+    oversized projection exposes pagination metadata and explicitly NO rows,
+    asking the author to restart with smaller pages rather than sum a prefix.
+    """
+    try:
+        page = content
+        for _ in range(3):
+            if not isinstance(page, str):
+                break
+            page = json.loads(page)
+        if (not isinstance(page, dict) or not isinstance(page.get("results"), list)
+                or type(page.get("has_more")) is not bool
+                or any(not isinstance(r, dict) or not r.get("id")
+                       or not isinstance(r.get("properties"), dict) for r in page["results"])):
+            raise ValueError("not a database page")
+        projected = {"view": "notion-record-properties-v1",
+                     "has_more": page["has_more"], "next_cursor": page.get("next_cursor"),
+                     "results": [{"id": r["id"], "properties": r["properties"]}
+                                 for r in page["results"]]}
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        if len(text) <= max_chars:
+            return text
+        return json.dumps({"view": "notion-record-properties-v1", "rows_visible": False,
+            "has_more": page["has_more"], "next_cursor": page.get("next_cursor"),
+            "record_count": len(page["results"]), "projected_chars": len(text),
+            "notice": "NO record values shown: this complete page exceeds the observation budget. "
+                      "Restart the same population with smaller page_size (e.g. 25 or 10), "
+                      "and filter_properties for the required fields. Do not compute from this page."},
+            ensure_ascii=False, separators=(",", ":"))
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return model_visible_text(str(content), max_chars)
+
+
 def _limit_tool_calls(message: Any, allowed: int) -> None:
     """Keep only the calls the budget admits, in both message copies."""
     message.tool_calls = list(message.tool_calls or [])[:allowed] or None
@@ -280,7 +317,8 @@ async def run_synthesis_eval(
             state["evidence_count"] = evidence_number
             name = str(call.function.get("name") or "")
             calls_by_tool[name] += 1
-            warning = repeat_tool_warning(name, calls_by_tool[name], control.max_repeat_per_tool)
+            warning = repeat_tool_warning(name, calls_by_tool[name],
+                max(1, control.tool_repeat_limits.get(name, control.max_repeat_per_tool)))
             if warning is not None and warning[0] > warning_tier.get(name, 0):
                 warning_tier[name] = warning[0]
                 warnings.append(warning[1])
@@ -320,7 +358,9 @@ async def run_synthesis_eval(
             stored = ToolCallOutputMessage(role="tool", tool_call_id=call.id, content=content)
             stored_dump = stored.model_dump()
             yield output_factory("message", stored_dump)
-            visible = model_visible_text(str(stored_dump["content"]), control.per_result_max_chars)
+            visible = (notion_query_text(stored_dump["content"], control.per_result_max_chars)
+                       if control.notion_query_view and name == "notion_API-post-database-query"
+                       else model_visible_text(str(stored_dump["content"]), control.per_result_max_chars))
             if control.authoring_mode == "joint-author-v3":
                 visible = (f"[Evidence E{evidence_number}; source_event_id={call.id}; tool={name}]\n"
                            "The label identifies this observation, NOT proof that its content is correct.\n" + visible)

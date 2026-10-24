@@ -106,3 +106,52 @@ class AuthorSessionTests(unittest.IsolatedAsyncioTestCase):
     def test_evaluation_cannot_accidentally_open_author_session(self):
         with self.assertRaises(ValidationError):
             body(synthesisControl=None)
+
+class NotionRepairAllowanceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_b_has_two_repairs_and_cannot_raise_its_frozen_allowance(self):
+        registry = AuthorSessions()
+        client = Client()
+        control = {"authoringMode": "joint-author-v3", "authorMaxRepairs": 2}
+        seen = []
+        answers = [_assistant([("read", {})]), _assistant([], "initial draft"),
+                   _assistant([("read", {})]), _assistant([], "material revision"),
+                   _assistant([("read", {})]), _assistant([], "quality correction")]
+        for i in [0, 2, 4]:
+            answers[i].message.tool_calls[0].id = f"call-{i}"
+
+        async def model(**kwargs):
+            seen.append(copy.deepcopy(kwargs["messages"]))
+            return answers.pop(0)
+
+        with patch.object(author_sessions, "AUTHOR_SESSIONS", registry), \
+             patch.object(agent_eval, "IsolatedMCPClient", return_value=client), \
+             patch.object(synthesis_loop, "create_completion", side_effect=model):
+            first = [x async for x in agent_eval.handle_run_mcp_eval(body(synthesisControl=control))]
+            second = [x async for x in agent_eval.handle_run_mcp_eval(body("resume", messages=[
+                {"role": "user", "content": "Complete the population"}]))]
+            third = [x async for x in agent_eval.handle_run_mcp_eval(body("resume", messages=[
+                {"role": "user", "content": "Correct the GT units"}]))]
+        entry = registry.entries["a" * 64]
+        self.assertEqual(entry.repairs, 2)
+        self.assertEqual(entry.state["evidence_count"], 3)
+        self.assertEqual(client.enters, 1)
+        for text in ["initial draft", "material revision", "Correct the GT units"]:
+            self.assertIn(text, str(seen[-1]))
+        self.assertTrue(first and second and third)
+        with self.assertRaises(HTTPException) as exc:
+            await registry.begin(body("resume", synthesisControl=control), Client)
+        self.assertEqual(exc.exception.status_code, 409)
+        await registry.close("a" * 64)
+        self.assertEqual(client.closes, 1)
+
+    async def test_default_a_still_allows_only_one_repair(self):
+        registry = AuthorSessions()
+        entry = await registry.begin(body(), Client)
+        entry.state['conversation'] = list(entry.initial_messages)
+        registry.idle(entry)
+        await registry.begin(body("resume"), Client)
+        registry.idle(entry)
+        with self.assertRaises(HTTPException):
+            await registry.begin(body("resume", synthesisControl={
+                "authoringMode": "joint-author-v3", "authorMaxRepairs": 2}), Client)
+        await registry.close("a" * 64)

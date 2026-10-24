@@ -182,6 +182,7 @@ SYNTHESIS_PROTOCOL_CAPABILITIES = {
             "usage_telemetry",
             "joint_author_evidence_labels_v1",
             "joint_author_sessions_v1",
+            "notion_complete_statistics_v1",
         ],
     },
     "runtime": {

@@ -160,3 +160,49 @@ class SynthesisLoopTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class NotionObservationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_b_preserves_all_property_values_cursor_and_original_receipt(self):
+        page = {"results": [{"id": str(i), "url": "x" * 2000,
+                 "properties": {"Amount": {"type": "number", "number": i},
+                                "Title": {"type": "title", "title": [{"plain_text": f"row {i}"}]}}}
+                for i in range(25)], "has_more": True, "next_cursor": "cursor-25"}
+        raw = json.dumps(page)
+        query = "notion_API-post-database-query"
+        client = FakeClient([FakeTool(query)], results={query: raw})
+        outputs, seen = await _run(client, [
+            _assistant([(query, {"page_size": 25})]), _assistant([], text="done")],
+            control=SynthesisControl(notionQueryView=True, perResultMaxChars=6000))
+        visible = next(m for m in seen[1] if m.role == "tool").content[0].text
+        projected = json.loads(visible)
+        self.assertEqual(len(projected["results"]), 25)
+        self.assertEqual(projected["next_cursor"], "cursor-25")
+        self.assertEqual([r["properties"] for r in projected["results"]],
+                         [r["properties"] for r in page["results"]])
+        stored = next(x.data for x in outputs if x.type == "message" and x.data.get("role") == "tool")
+        self.assertEqual(stored["content"], raw)
+
+    def test_oversized_page_is_not_a_misleading_partial_population(self):
+        page = {"results": [{"id": "a", "properties": {"text": "x" * 10000}}],
+                "has_more": False, "next_cursor": None}
+        text = synthesis_loop.notion_query_text(json.dumps(page), 1000)
+        parsed = json.loads(text)
+        self.assertFalse(parsed["rows_visible"])
+        self.assertNotIn("results", parsed)
+        self.assertIn("smaller page_size", parsed["notice"])
+        self.assertFalse(parsed["has_more"])
+
+    def test_error_receipts_are_not_projected_into_success(self):
+        raw = json.dumps({"object": "error", "status": 429, "message": "rate limited"})
+        self.assertEqual(synthesis_loop.notion_query_text(raw, 1000), raw)
+
+    async def test_a_keeps_old_result_view_and_b_query_limit_is_explicit(self):
+        query = "notion_API-post-database-query"
+        client = FakeClient([FakeTool(query)], results={query: "x" * 1000})
+        _, seen = await _run(client, [_assistant([(query, {})]), _assistant([], text="done")],
+                             control=SynthesisControl(perResultMaxChars=100))
+        text = next(m for m in seen[1] if m.role == "tool").content[0].text
+        self.assertIn("truncated", text)
+        self.assertLessEqual(len(text), 100)
+        control = SynthesisControl(toolRepeatLimits={query: 28})
+        self.assertIsNone(synthesis_loop.repeat_tool_warning(query, 8, control.tool_repeat_limits[query]))
