@@ -28,8 +28,7 @@ OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45
 ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20
 EXPLORE_ATTEMPT_TIMEOUT_SECONDS = 25
 EXPLORE_REVERSE_TIMEOUT_SECONDS = 10
-UPSTREAM_ROUTE_URL_PREFIX = "http://router.project-osrm.org/route/v1"
-FALLBACK_ROUTE_URL_PREFIXES = {
+ROUTE_URL_PREFIXES = {
     "car": "https://routing.openstreetmap.de/routed-car/route/v1/driving",
     "bike": "https://routing.openstreetmap.de/routed-bike/route/v1/driving",
     "foot": "https://routing.openstreetmap.de/routed-foot/route/v1/driving",
@@ -222,9 +221,11 @@ async def resilient_get_route(
     to_lon: float,
     mode: str = "car",
 ) -> dict[str, Any]:
-    """Preserve the upstream route response with a bounded public fallback."""
+    """Use only a backend prepared for the requested transportation mode."""
     if not self.session:
         raise RuntimeError("OSM client not connected")
+    if mode not in ROUTE_URL_PREFIXES:
+        raise ValueError(f"Unsupported route mode: {mode}")
 
     params = {
         "overview": "full",
@@ -233,31 +234,30 @@ async def resilient_get_route(
         "annotations": "true",
     }
     coordinates = f"{from_lon},{from_lat};{to_lon},{to_lat}"
-    targets = (
-        f"{UPSTREAM_ROUTE_URL_PREFIX}/{mode}/{coordinates}",
-        f"{FALLBACK_ROUTE_URL_PREFIXES.get(mode, FALLBACK_ROUTE_URL_PREFIXES['car'])}/{coordinates}",
-    )
-    last_error: BaseException | None = None
-    for index, url in enumerate(targets):
-        try:
-            async with self.session.get(
-                url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=ROUTE_ATTEMPT_TIMEOUT_SECONDS),
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                error = RuntimeError(f"Failed to get route: {response.status}")
-                if response.status not in RETRYABLE_STATUSES or index + 1 == len(targets):
-                    raise error
-                last_error = error
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            last_error = exc
-            if index + 1 == len(targets):
-                raise
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("no routing endpoint was attempted")
+    url = f"{ROUTE_URL_PREFIXES[mode]}/{coordinates}"
+    async with self.session.get(
+        url,
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=ROUTE_ATTEMPT_TIMEOUT_SECONDS),
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Failed to get {mode} route: HTTP {response.status}")
+        data = await response.json()
+
+    if data.get("code") != "Ok" or not data.get("routes"):
+        raise RuntimeError(f"Failed to get {mode} route: {data.get('code', 'invalid response')}")
+    # Walking or pushing a bicycle and ferries can be valid parts of a route.
+    # The reported profile must still never silently become a driving route.
+    allowed_modes = {
+        "car": {"driving", "ferry"},
+        "bike": {"cycling", "walking", "pushing bike", "steps", "ferry"},
+        "foot": {"walking", "steps", "ferry"},
+    }[mode]
+    for route in data["routes"]:
+        steps = [step for leg in route.get("legs", []) for step in leg.get("steps", [])]
+        if not steps or any(step.get("mode") not in allowed_modes for step in steps):
+            raise RuntimeError(f"Routing profile mismatch for requested {mode} route")
+    return data
 
 
 def install_route_fallback() -> None:
