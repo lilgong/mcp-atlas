@@ -301,10 +301,7 @@ async def run_synthesis_eval(
         has_text = bool((message.content or "").strip())
         if not selected and not has_text:
             yield output_factory("message", message.model_dump())
-            aborted = (
-                "malformed_tool_call" if result.dropped_tool_calls
-                else "empty_model_response"
-            )
+            aborted = "empty_model_response"
             break
         conversation.append(message)
         yield output_factory("message", message.model_dump())

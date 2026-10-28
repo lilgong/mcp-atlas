@@ -301,118 +301,99 @@ class ClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MalformedToolCallTests(unittest.TestCase):
-    """A null function.name used to fail the whole task."""
+    def test_invalid_calls_fail_the_entire_turn(self):
+        for function, reason in [
+            ({"name": None, "arguments": "{}"}, "function.name"),
+            ({"name": "", "arguments": "{}"}, "function.name"),
+            ({"name": "search", "arguments": None}, "JSON string"),
+        ]:
+            with self.subTest(function=function), self.assertRaisesRegex(ValueError, reason):
+                _sanitize_tool_calls([
+                    {"id": "good", "type": "function", "function": {"name": "search", "arguments": "{}"}},
+                    {"id": "bad", "type": "function", "function": function},
+                ])
 
-    def test_null_name_is_dropped_not_raised(self):
-        kept, dropped, _ = _sanitize_tool_calls(
-            [
-                {"id": "1", "type": "function",
-                 "function": {"name": None, "arguments": "{}"}},
-                {"id": "2", "type": "function",
-                 "function": {"name": "search", "arguments": "{}"}},
-            ]
-        )
-        self.assertEqual(dropped, 1)
-        self.assertEqual(len(kept), 1)
-        self.assertEqual(kept[0]["function"]["name"], "search")
+    def test_missing_function_fails(self):
+        with self.assertRaisesRegex(ValueError, "function.name"):
+            _sanitize_tool_calls([{"id": "bad", "type": "function"}])
 
-    def test_all_malformed_yields_none_and_a_count(self):
-        kept, dropped, _ = _sanitize_tool_calls(
-            [
-                {"id": "1", "type": "function",
-                 "function": {"name": None, "arguments": "{}"}},
-                {"id": "2", "type": "function",
-                 "function": {"name": "", "arguments": "{}"}},
-            ]
-        )
-        self.assertIsNone(kept)
-        self.assertEqual(dropped, 2)
-
-    def test_well_formed_calls_are_untouched(self):
-        calls = [
-            {"id": "1", "type": "function",
-             "function": {"name": "search", "arguments": "{}"}}
-        ]
-        kept, dropped, _ = _sanitize_tool_calls(calls)
-        self.assertEqual(dropped, 0)
-        self.assertEqual(kept, calls)
-
-    def test_missing_function_key_is_treated_as_malformed(self):
-        kept, dropped, _ = _sanitize_tool_calls([{"id": "1", "type": "function"}])
-        self.assertIsNone(kept)
-        self.assertEqual(dropped, 1)
+    def test_valid_arguments_are_unchanged(self):
+        calls = [{"id": "1", "type": "function", "function": {"name": "search", "arguments": '{ "q": "x" }'}}]
+        self.assertIs(_sanitize_tool_calls(calls), calls)
 
 
 class MalformedTurnLoopTests(unittest.IsolatedAsyncioTestCase):
-    """The agent loop must retry a malformed turn, not end the task."""
-
-    @staticmethod
-    def _response(dropped):
-        from litellm.types.utils import Message as LiteLLMMessage
-        from mcp_completion.llm import LLMResponse
-        from mcp_completion.schema import AssistantMessage
-
-        return LLMResponse(
-            message=AssistantMessage(
-                role="assistant",
-                content="thinking",
-                original_message=LiteLLMMessage(role="assistant", content="x"),
-                tool_calls=None,
-            ),
-            dropped_tool_calls=dropped,
-        )
-
-    async def _drive(self, dropped_per_turn, max_turns=6, max_tool_calls=100):
+    async def test_invalid_turn_fails_without_feedback_or_second_request(self):
         from mcp_completion import agent_eval
 
-        class FakeClient:
-            async def list_tools(self):
-                return []
+        client = SimpleNamespace(list_tools=AsyncMock(return_value=[]))
+        completion = AsyncMock(side_effect=ValueError("function.name is missing or empty"))
+        outputs = []
+        with patch.object(agent_eval, "create_completion", completion), patch.object(agent_eval, "_transform_tool_calls", return_value=[]):
+            async for output in agent_eval.run_mcp_eval(
+                mcp_client=client, model="m", messages=[], max_turns=6,
+                max_tool_calls=100, task_id="invalid-call",
+            ):
+                outputs.append(output)
+        self.assertEqual(completion.await_count, 1)
+        self.assertFalse(any(o.data.get("role") == "user" for o in outputs))
+        self.assertEqual(outputs[-1].type, "error")
+        self.assertIn("function.name is missing or empty", outputs[-1].data["message"])
 
-        calls = {"n": 0}
+    async def test_completion_failure_preserves_prior_messages(self):
+        from mcp_completion import agent_eval
+        from mcp_completion.llm import LLMResponse
+        from mcp_completion.schema import AssistantMessage, ToolCall, CallToolResponse, TextContent
+        from litellm.types.utils import Message as LiteLLMMessage
 
-        async def fake_completion(**kwargs):
-            i = calls["n"]
-            calls["n"] += 1
-            dropped = (
-                dropped_per_turn[i] if i < len(dropped_per_turn) else 0
-            )
-            return self._response(dropped)
+        first = LLMResponse(message=AssistantMessage(
+            role="assistant", content=None,
+            original_message=LiteLLMMessage(role="assistant", content=None),
+            tool_calls=[ToolCall(id="call", type="function", function={"name": "lookup", "arguments": "{}"})],
+        ))
+        client = SimpleNamespace(
+            list_tools=AsyncMock(return_value=[]),
+            call_tool=AsyncMock(return_value=CallToolResponse(content=[TextContent(type="text", text="found")])),
+        )
+        completion = AsyncMock(side_effect=[first, ValueError("missing name")])
+        with patch.object(agent_eval, "create_completion", completion), patch.object(agent_eval, "_transform_tool_calls", return_value=[]):
+            outputs = [o async for o in agent_eval.run_mcp_eval(
+                mcp_client=client, model="m", messages=[], max_turns=6,
+                max_tool_calls=100, task_id="partial-history",
+            )]
+        self.assertEqual([o.type for o in outputs], ["message", "message", "error"])
+        self.assertEqual(outputs[1].data["role"], "tool")
+        self.assertIn("found", str(outputs[1].data["content"]))
+        client.call_tool.assert_awaited_once()
 
-        with patch.object(agent_eval, "create_completion", fake_completion), \
-             patch.object(agent_eval, "_transform_tool_calls", lambda t: []), \
-             patch.object(agent_eval, "write_runtime_event"):
-            outputs = [
-                o
-                async for o in agent_eval.run_mcp_eval(
-                    mcp_client=FakeClient(),
-                    model="m",
-                    messages=[],
-                    max_turns=max_turns,
-                    max_tool_calls=max_tool_calls,
-                    task_id="syn-loop",
-                )
-            ]
-        return calls["n"], outputs
+    async def test_invalid_json_uses_tool_error_without_user_feedback(self):
+        from mcp_completion import agent_eval
+        from mcp_completion.llm import LLMResponse
+        from mcp_completion.schema import AssistantMessage, ToolCall
+        from litellm.types.utils import Message as LiteLLMMessage
 
-    async def test_malformed_turn_triggers_a_corrective_retry(self):
-        # Turn 1 malformed, turn 2 clean -> the loop must reach turn 2.
-        turns, outputs = await self._drive([1, 0])
-        self.assertEqual(turns, 2)
-        corrective = [
-            o for o in outputs if o.data.get("role") == "user"
-        ]
-        self.assertEqual(len(corrective), 1)
-        self.assertIn("function name was missing", corrective[0].data["content"])
-
-    async def test_persistent_malformed_calls_stop_instead_of_looping(self):
-        # Bounded by _MAX_MALFORMED_TURNS (2), not by max_turns.
-        turns, _ = await self._drive([1] * 6, max_turns=6)
-        self.assertEqual(turns, 3)
-
-    async def test_clean_turn_with_no_tool_calls_still_ends_immediately(self):
-        turns, _ = await self._drive([0])
-        self.assertEqual(turns, 1)
+        client = SimpleNamespace(list_tools=AsyncMock(return_value=[]), call_tool=AsyncMock())
+        broken = '{"pipeline": '
+        first = LLMResponse(message=AssistantMessage(
+            role="assistant", content=None,
+            original_message=LiteLLMMessage(role="assistant", content=None),
+            tool_calls=[ToolCall(id="bad", type="function", function={"name": "lookup", "arguments": broken})],
+        ))
+        final = LLMResponse(message=AssistantMessage(
+            role="assistant", content="done", original_message=LiteLLMMessage(role="assistant", content="done"),
+        ))
+        completion = AsyncMock(side_effect=[first, final])
+        with patch.object(agent_eval, "create_completion", completion), patch.object(agent_eval, "_transform_tool_calls", return_value=[]):
+            outputs = [o async for o in agent_eval.run_mcp_eval(
+                mcp_client=client, model="m", messages=[], max_turns=6,
+                max_tool_calls=100, task_id="invalid-args",
+            )]
+        client.call_tool.assert_not_awaited()
+        self.assertEqual(completion.await_count, 2)
+        messages = [o.data for o in outputs if o.type == "message"]
+        self.assertEqual([m["role"] for m in messages], ["assistant", "tool", "assistant"])
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["arguments"], broken)
+        self.assertIn("Error:", str(messages[1]["content"]))
 
 
 class AgentLoopLimitTests(unittest.IsolatedAsyncioTestCase):
@@ -441,7 +422,6 @@ class AgentLoopLimitTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 tool_calls=tool_calls,
             ),
-            dropped_tool_calls=0,
         )
 
     async def _drive(self, *, max_turns, max_tool_calls, calls_per_turn):
@@ -576,67 +556,6 @@ class AgentLoopLimitTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class MalformedArgumentsTests(unittest.TestCase):
-    """Unbalanced arguments JSON poisons the history and 400s every later turn."""
-
-    @staticmethod
-    def _call(name="search", arguments='{"q": "x"}'):
-        return {"id": "1", "type": "function",
-                "function": {"name": name, "arguments": arguments}}
-
-    def test_missing_outer_brace_is_repaired_not_dropped(self):
-        # Exactly the provider defect: nested final value, outer '}' lost.
-        broken = '{"query": "x", "filter": {"property": "object"}'
-        kept, dropped, repaired = _sanitize_tool_calls(
-            [self._call(arguments=broken)]
-        )
-        self.assertEqual((dropped, repaired), (0, 1))
-        import json as _json
-        self.assertEqual(
-            _json.loads(kept[0]["function"]["arguments"]),
-            {"query": "x", "filter": {"property": "object"}},
-        )
-
-    def test_valid_arguments_are_left_byte_identical(self):
-        good = '{"q": "x", "n": 10}'
-        kept, dropped, repaired = _sanitize_tool_calls(
-            [self._call(arguments=good)]
-        )
-        self.assertEqual((dropped, repaired), (0, 0))
-        self.assertEqual(kept[0]["function"]["arguments"], good)
-
-    def test_unrepairable_arguments_are_dropped(self):
-        kept, dropped, repaired = _sanitize_tool_calls(
-            [self._call(arguments='{"q": "unterminated')]
-        )
-        self.assertIsNone(kept)
-        self.assertEqual((dropped, repaired), (1, 0))
-
-    def test_non_string_arguments_are_dropped(self):
-        kept, dropped, repaired = _sanitize_tool_calls(
-            [self._call(arguments=None)]
-        )
-        self.assertIsNone(kept)
-        self.assertEqual((dropped, repaired), (1, 0))
-
-    def test_repair_does_not_mutate_the_original_call(self):
-        original = self._call(arguments='{"a": {"b": 1}')
-        kept, _, repaired = _sanitize_tool_calls([original])
-        self.assertEqual(repaired, 1)
-        self.assertEqual(original["function"]["arguments"], '{"a": {"b": 1}')
-
-    def test_name_and_argument_defects_are_counted_together(self):
-        kept, dropped, repaired = _sanitize_tool_calls(
-            [
-                self._call(name=None),
-                self._call(arguments='{"a": {"b": 1}'),
-                self._call(),
-            ]
-        )
-        self.assertEqual((dropped, repaired), (1, 1))
-        self.assertEqual(len(kept), 2)
 
 
 class StartupReapResilienceTests(unittest.IsolatedAsyncioTestCase):

@@ -206,3 +206,13 @@ class NotionObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(text), 100)
         control = SynthesisControl(toolRepeatLimits={query: 28})
         self.assertIsNone(synthesis_loop.repeat_tool_warning(query, 8, control.tool_repeat_limits[query]))
+
+
+class UpstreamResponseCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_response_uses_error_receipt_without_removed_drop_counter(self):
+        client = FakeClient([FakeTool("read")])
+        outputs, seen = await _run(client, [_assistant([], text="")])
+        errors = [item.data for item in outputs if item.type == "error"]
+        self.assertEqual(errors[-1]["reason"], "empty_model_response")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(len(seen), 1)
