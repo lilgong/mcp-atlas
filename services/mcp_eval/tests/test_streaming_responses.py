@@ -51,6 +51,26 @@ def test_streaming_is_enabled_by_default(monkeypatch):
     assert llm_streaming_enabled() is True
 
 
+@pytest.mark.parametrize("arguments", ['{"command": "find", "arguments": ', '{"pipeline": ', '{"a": {"b": 1}'])
+def test_invalid_streamed_arguments_are_preserved_without_repair(arguments):
+    response = AsyncChunks([
+        chunk({"tool_calls": [{"index": 0, "id": "call-1", "type": "function",
+                               "function": {"name": "lookup"}}]}),
+        chunk({"tool_calls": [{"index": 0, "function": {"arguments": arguments}}]},
+              finish_reason="tool_calls"),
+    ])
+    completion = AsyncMock(return_value=response)
+    with (
+        patch("mcp_completion.llm.litellm.acompletion", completion),
+        patch("mcp_completion.llm.write_runtime_event"),
+        patch("mcp_completion.llm._write_token_usage"),
+        patch.dict(os.environ, {"LLM_STREAMING_ENABLED": "true"}),
+    ):
+        result = asyncio.run(create_completion(model="test-model", messages=[], tools=[]))
+    assert result.message.tool_calls[0].function["arguments"] == arguments
+    assert completion.await_count == 1
+
+
 def test_stream_reconstructs_reasoning_content_and_split_tool_arguments():
     streamed = AsyncChunks(
         [

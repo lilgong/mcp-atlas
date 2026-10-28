@@ -254,6 +254,38 @@ def test_timeout_cancels_exact_attempt_before_retry(monkeypatch):
     asyncio.run(run())
 
 
+def test_model_error_event_does_not_trigger_whole_task_retry():
+    async def run():
+        events = []
+        error = [{"type": "error", "data": {"message": "function.name is missing"}}]
+        generator = AsyncMCPTrajectoryGenerator("test-model")
+        class Response:
+            status = 200
+
+            async def json(self):
+                return error
+
+        class RequestContext:
+            async def __aenter__(self):
+                return Response()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Session:
+            def post(self, *_args, **_kwargs):
+                events.append("post")
+                return RequestContext()
+
+        generator.session = Session()
+        response, attempts = await generator.run_live_task_async([], "prompt", "t")
+        assert json.loads(response) == error
+        assert attempts == 1
+        assert len(events) == 1
+
+    asyncio.run(run())
+
+
 def test_run_cancellation_cleans_remote_attempt(monkeypatch):
     request_started = asyncio.Event()
     cancelled_ids = []

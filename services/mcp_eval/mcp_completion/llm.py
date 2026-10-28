@@ -146,78 +146,27 @@ class LLMResponse(BaseModel):
 
     message: AssistantMessage
     original_content: Optional[str] = None
-    dropped_tool_calls: int = 0
-    repaired_tool_calls: int = 0
-
-
-# Only braces are ever restored, shortest first. The observed defect drops
-# closing braces when a response is split between calls. A missing quote or
-# bracket means the text itself was cut short instead, and inventing one would
-# fabricate arguments the model never produced.
-_ARGUMENT_CLOSERS = ("}", "}}", "}}}")
-
-
-def _repair_arguments(arguments: str) -> Optional[str]:
-    """Rebalance arguments JSON that lost its outermost closing brace.
-
-    Some providers split a multi-tool-call response by scanning for the first
-    closing brace instead of balancing them, so every call except the last
-    loses one '}' whenever its final value is a nested object. The prefix is
-    otherwise intact, which makes appending the missing closers a faithful
-    reconstruction rather than a guess. Returns None if it cannot be repaired.
-    """
-    for closer in _ARGUMENT_CLOSERS:
-        candidate = arguments + closer
-        try:
-            json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        return candidate
-    return None
 
 
 def _sanitize_tool_calls(
     raw_calls: List[Dict[str, Any]],
-) -> Tuple[Optional[List[Dict[str, Any]]], int, int]:
-    """Make tool calls representable, and count what was repaired or dropped.
-
-    Two provider defects are handled. A null function.name cannot satisfy
-    ToolCall's Dict[str, str] and the call is unusable, so it is dropped.
-    Arguments that are not valid JSON are worse than unusable: the malformed
-    assistant message lands in the history and every later turn is rejected
-    upstream with a 400, so the task can never recover and each rerun
-    reproduces it. Those are repaired when possible, dropped otherwise.
-    """
-    kept: List[Dict[str, Any]] = []
-    dropped = 0
-    repaired = 0
-    for call in raw_calls:
+) -> Optional[List[Dict[str, Any]]]:
+    """Validate tool-call field types, preserving the original arguments."""
+    for index, call in enumerate(raw_calls):
         function = call.get("function") or {}
         name = function.get("name")
         if not (isinstance(name, str) and name):
-            dropped += 1
-            continue
+            raise ValueError(
+                f"tool call {index}: function.name is missing or empty"
+            )
 
         arguments = function.get("arguments")
         if not isinstance(arguments, str):
-            dropped += 1
-            continue
+            raise ValueError(
+                f"tool call {index} ({name}): function.arguments must be a JSON string"
+            )
 
-        try:
-            json.loads(arguments)
-        except (json.JSONDecodeError, TypeError):
-            fixed = _repair_arguments(arguments)
-            if fixed is None:
-                dropped += 1
-                continue
-            call = {
-                **call,
-                "function": {**function, "arguments": fixed},
-            }
-            repaired += 1
-
-        kept.append(call)
-    return (kept or None), dropped, repaired
+    return raw_calls or None
 
 
 def configure_litellm():
@@ -499,8 +448,6 @@ async def create_completion(
         # Convert response back to our format
         # Handle tool_calls conversion from OpenAI format to our format
         tool_calls = None
-        dropped_tool_calls = 0
-        repaired_tool_calls = 0
         if isinstance(response, dict):
             if response["choices"][0]["message"].get("tool_calls"):
                 tool_calls = []
@@ -531,23 +478,7 @@ async def create_completion(
                     )
 
         if tool_calls:
-            (
-                tool_calls,
-                dropped_tool_calls,
-                repaired_tool_calls,
-            ) = _sanitize_tool_calls(tool_calls)
-            if dropped_tool_calls or repaired_tool_calls:
-                write_runtime_event(
-                    "model_calls",
-                    "malformed_tool_calls_dropped",
-                    task_id=task_id,
-                    turn=turn,
-                    call_id=call_id,
-                    model=model,
-                    dropped=dropped_tool_calls,
-                    repaired=repaired_tool_calls,
-                    kept=len(tool_calls or []),
-                )
+            tool_calls = _sanitize_tool_calls(tool_calls)
 
         original_message = (
             response["choices"][0]["message"]
@@ -566,8 +497,6 @@ async def create_completion(
 
         return LLMResponse(
             message=assistant_message,
-            dropped_tool_calls=dropped_tool_calls,
-            repaired_tool_calls=repaired_tool_calls,
         )
 
     except Exception as error:
