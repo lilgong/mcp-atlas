@@ -179,6 +179,18 @@ class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.source_name, "bare-model-name")
         self.assertEqual(raised.exception.credential_envs, ("LLM_API_KEY",))
 
+    async def test_stopped_model_service_aborts_without_request_retries(self):
+        completion = AsyncMock(side_effect=_ProviderError(
+            503, 'Service model-123 is unavailable with status: STOPPED'))
+        with (
+            patch('mcp_completion.llm.litellm.acompletion', completion),
+            patch('mcp_completion.llm.write_runtime_event'),
+        ):
+            with self.assertRaises(FatalAccountError) as raised:
+                await self._run()
+        self.assertEqual(completion.await_count, 1)
+        self.assertEqual(str(raised.exception), 'model service is STOPPED')
+
 
 class OpenAIBaseURLTests(unittest.TestCase):
     def test_gateway_root_gets_v1_suffix(self):
