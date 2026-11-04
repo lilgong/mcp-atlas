@@ -1676,13 +1676,14 @@ docker run --rm hello-world
 
 ```dotenv
 MCP_TOOL_TRANSPORT=hub
-MCPHUB_URL=http://127.0.0.1:3002
+MCPHUB_URL=http://192.168.0.22:3003
+MCPHUB_CATALOG=atlas
 MCPHUB_TOKEN=<Hub 中 atlas 用户组的调用 Key>
-MCPHUB_TARGET=atlas/official
+MCPHUB_TARGET=official
 MCPHUB_SERVERS=airtable,alchemy,brave-search,calculator,clinicaltrialsgov-mcp-server,context7,ddg-search,e2b-server,exa,fetch,github,google-maps,google-workspace,lara-translate,met-museum,national-parks,notion,open-library,osm-mcp-server,oxylabs,slack,twelvedata,weather,weather-data,whois,wikipedia
 MCPHUB_NAME_SEPARATOR=-
-MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:mcphub
-MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub
+MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:mcphub-v2
+MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub-v2
 ```
 
 只有 `MCPHUB_SERVERS` 中选定的共享服务转到 Hub，其余保持直连。工具名称保持一致。
@@ -1691,14 +1692,14 @@ MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub
 运行日志使用同一个网页入口；持久化日志不写入完整 key 或请求内容。
 
 10 个任务隔离 MCP 也可经由 Hub：另外开启 `MCPHUB_TASK_ROUTING=true`，在 Hub
-配置临时任务目标，并明确设置 `MCPHUB_TARGET` 和可从 Hub 到达的
+配置默认任务入口，并设置可从 Hub 到达的
 `MCPHUB_TASK_CALLBACK_URL`。隔离容器仍由 Atlas 启动和销毁，Hub 不接 Docker socket。
-目标路径缺失、未知、无权限或者租约过期时直接失败，不回退到其他工作区。
+默认任务入口不明确、无权限或者租约过期时直接失败，不回退到其他工作区。
 共享服务列表仍不包含任务型 MCP，两类客户端的接入方式不同。
 
 完整配置与适用范围参见 [Hub 任务路由](services/mcp_eval/HUB-TASK-ROUTING.md)。
-main 分支保留直连实现；mcphub 分支可以选择 `direct` 或 `hub`。当前本机 `.env`
-使用 Hub 模式。26 个共享 MCP 从 Hub 获取工具 schema 和调用结果；
+main 分支保留直连实现；mcphub 分支适配原 Hub，mcphub-v2 分支从 mcphub 派生，
+使用 v2 命名空间和自动任务注册，仍可选择 `direct` 或 `hub`。26 个共享 MCP 从 Hub 获取工具 schema 和调用结果；
 arxiv/pubmed 通过 Hub 的任务转发调用，但仍在 Atlas 的隔离任务容器执行；其他 8 个本地 MCP
 保持本地任务路由。`MCPHUB_TASK_ROUTING=true`、`MCPHUB_TASK_SERVERS=arxiv,pubmed`
 明确选择需要经过 Hub 的任务 MCP。
@@ -1711,7 +1712,7 @@ Atlas `.env` 不保存这些变量或其他 MCP 上游 Key。`MCP_USAGE_LOG_DIR`
 启动：
 
 ```bash
-make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:mcphub
+make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:mcphub-v2
 make run-docker-host
 # 另一终端启动测评服务，然后按原来的命令运行测评
 make run-mcp-completion
@@ -1721,6 +1722,12 @@ make run-mcp-completion
 将 `ENABLED_SERVERS` 设置为 Hub 的共享列表，不会在测评进程中禁用任务 MCP。
 请求自动携带 `Authorization: Bearer ${MCPHUB_TOKEN}` 和
 `X-MCPHub-Target: ${MCPHUB_TARGET}`。Atlas 工具名称保持原有的 `服务器_工具` 格式。
+v2 共享路由为 `/mcp/${MCPHUB_CATALOG}/服务器名`；任务启动配置和注册也使用相同空间。
+`MCPHUB_CATALOG` 留空时显式访问 v2 公共空间；不会查找失败后自动换空间。
+任务调用只提交空间、服务名和每次运行唯一的 task ID，不读取或发送工作区目标。
+Hub 自动选择该服务的默认任务入口；Atlas 无需配置任务目标变量。`MCPHUB_TARGET`
+只选择共享账号 MCP 的工作区。并发运行相同题目时，任务 ID、租约、回调凭据和任务
+容器均独立；访问同一个云端工作区的工具仍共享该工作区的数据。
 选中的 Hub 共享 MCP 不再叠加 Atlas 外层限速，未转发的任务 MCP 继续使用原来的策略。
 
 Relay 服务端的 IP 池、监听和鉴权配置单独放在 `.env.relay`。启动使用

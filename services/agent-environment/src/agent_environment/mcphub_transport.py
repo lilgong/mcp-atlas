@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
 
@@ -59,15 +60,23 @@ def hub_server_configs(
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("TOOL_CALL_TIMEOUT must be positive and finite")
     separator = environment.get("MCPHUB_NAME_SEPARATOR") or "-"
+    catalog = (environment.get("MCPHUB_CATALOG") or "").strip()
+    if catalog and not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", catalog):
+        raise ValueError("MCPHUB_CATALOG must be a valid Hub namespace")
+    route = f"{catalog}/" if catalog else ""
     headers = {"Authorization": f"Bearer {token}"}
     target = (environment.get("MCPHUB_TARGET") or "").strip()
     if target:
-        if len(target) > 160 or any(ord(char) < 32 or ord(char) == 127 for char in target):
-            raise ValueError("MCPHUB_TARGET must be an exact path of at most 160 characters")
+        if len(target) > 160 or any(
+            ord(char) < 32 or ord(char) == 127 for char in target
+        ):
+            raise ValueError(
+                "MCPHUB_TARGET must be an exact path of at most 160 characters"
+            )
         headers["X-MCPHub-Target"] = target
     return {
         name: {
-            "url": f"{base}/mcp/{quote(name, safe='')}",
+            "url": f"{base}/mcp/{route}{quote(name, safe='')}",
             "transport": "streamable-http",
             "sse_read_timeout": timeout,
             "headers": dict(headers),

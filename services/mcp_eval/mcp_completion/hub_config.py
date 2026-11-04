@@ -2,8 +2,74 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
+import time
+
 import httpx
+
+from .runtime_log import write_runtime_event
+
+_TRANSIENT_STATUSES = {408, 429, 500, 502, 503, 504}
+
+
+async def _runtime_snapshot(client, root: str, token: str, server: str, stage: str):
+    """Retry read-only setup requests within one bounded control-plane budget."""
+    started = time.monotonic()
+    deadline = started + 30
+    for attempt in range(1, 4):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        attempt_started = time.monotonic()
+        status = None
+        error_type = None
+        try:
+            response = await asyncio.wait_for(
+                client.get(
+                    f"{root}/api/servers/{server}/runtime",
+                    params={"catalog": hub_catalog()},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=min(10, remaining),
+                ),
+                timeout=min(10, remaining),
+            )
+            status = response.status_code
+        except (httpx.TransportError, asyncio.TimeoutError) as error:
+            error_type = type(error).__name__
+        retryable = error_type is not None or status in _TRANSIENT_STATUSES
+        retry = retryable and attempt < 3 and time.monotonic() < deadline
+        write_runtime_event(
+            "tools",
+            "hub_setup_request",
+            server=server,
+            catalog=hub_catalog(),
+            stage=stage,
+            attempt=attempt,
+            http_status=status,
+            error_type=error_type,
+            duration_ms=round((time.monotonic() - attempt_started) * 1000),
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+            retry=retry,
+        )
+        if status == 200:
+            return response
+        if not retry:
+            raise RuntimeError(
+                f"Hub {stage} is unavailable or access was denied "
+                f"for {server} ({'HTTP ' + str(status) if status else error_type})"
+            ) from None
+        await asyncio.sleep(min(attempt, max(0, deadline - time.monotonic())))
+    raise RuntimeError(f"Hub {stage} request budget exhausted for {server}")
+
+
+def hub_catalog() -> str:
+    """Select a v2 namespace; an empty value explicitly selects public resources."""
+    catalog = os.getenv("MCPHUB_CATALOG", "").strip()
+    if catalog and not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", catalog):
+        raise RuntimeError("MCPHUB_CATALOG must be a valid Hub namespace")
+    return catalog
 
 
 def task_hub_servers() -> set[str]:
@@ -33,7 +99,7 @@ def hub_manages_policy(server: str) -> bool:
 
 
 async def managed_task_relay(servers: list[str]) -> dict[str, str] | None:
-    """Return None for legacy mode, otherwise a bounded relay-only snapshot."""
+    """Return None when delegation is disabled, otherwise a relay-only snapshot."""
     if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() != "hub" or os.getenv(
         "MCPHUB_MANAGE_RELAY", "false"
     ).lower() not in {"true", "1", "yes"}:
@@ -60,10 +126,8 @@ async def managed_task_relay(servers: list[str]) -> dict[str, str] | None:
     snapshot = None
     async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
         for server in sorted(requested):
-            response = await client.get(
-                f"{root}/api/servers/{server}/runtime",
-                params={"target": os.getenv("MCPHUB_TARGET", "")},
-                headers={"Authorization": f"Bearer {token}"},
+            response = await _runtime_snapshot(
+                client, root, token, server, "relay configuration"
             )
             if response.status_code != 200:
                 raise RuntimeError(
@@ -118,10 +182,8 @@ async def managed_task_startup_env(servers: list[str]) -> dict[str, str]:
     result: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
         for server in sorted(set(servers) & task_hub_servers()):
-            response = await client.get(
-                f"{root}/api/servers/{server}/runtime",
-                params={"target": os.getenv("MCPHUB_TARGET", "")},
-                headers={"Authorization": f"Bearer {token}"},
+            response = await _runtime_snapshot(
+                client, root, token, server, "task setup"
             )
             if response.status_code != 200:
                 raise RuntimeError("Hub task setup is unavailable or access was denied")

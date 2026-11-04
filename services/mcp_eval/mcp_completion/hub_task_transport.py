@@ -7,6 +7,7 @@ import contextlib
 import os
 import re
 import secrets
+import time
 import uuid
 from urllib.parse import urlsplit
 from typing import Any
@@ -17,11 +18,14 @@ from fastapi import APIRouter, HTTPException, Request
 from .mcp_client.base_client import MCPClient
 from .schema import CallToolResponse, ToolDefinition
 from .runtime_log import write_runtime_event
+from .hub_config import hub_catalog, _TRANSIENT_STATUSES
 
 router = APIRouter()
 # Opaque route IDs bind one server to one task client, never a user-supplied URL.
 _bindings: dict[str, tuple[str, MCPClient, frozenset[str]]] = {}
 _active_calls: dict[str, set[asyncio.Task]] = {}
+# Hub taskConnectionService grants a fixed five-minute lease on register/renew.
+_LEASE_SECONDS = 300
 
 
 def _revoke_binding(binding: str) -> None:
@@ -126,15 +130,12 @@ class HubTaskClient(MCPClient):
         self.server_for_tool = server_for_tool
         self.root = _root("MCPHUB_URL")
         self.callback = _root("MCPHUB_TASK_CALLBACK_URL")
-        self.target = os.getenv("MCPHUB_TARGET", "").strip()
-        if not self.target:
-            raise RuntimeError("Task routing requires an explicit MCPHUB_TARGET")
+        self.catalog = hub_catalog()
         token = os.getenv("MCPHUB_TOKEN", "").strip()
         if not token or any(c.isspace() for c in token):
             raise RuntimeError("Task registration requires a Hub operator Bearer Key")
         self.headers = {
             "Authorization": f"Bearer {token}",
-            "X-MCPHub-Target": self.target,
         }
         # Unique even when the same benchmark task is run concurrently by models.
         self.task_id = (
@@ -142,6 +143,9 @@ class HubTaskClient(MCPClient):
         )
         self.connections: dict[str, dict] = {}
         self.binding_ids: list[str] = []
+        self.server_bindings: dict[str, str] = {}
+        self.lease_deadlines: dict[str, float] = {}
+        self.failed_servers: set[str] = set()
         self.renewal: asyncio.Task | None = None
         self.failed = False
         self.http = httpx.AsyncClient(timeout=180, follow_redirects=False)
@@ -161,12 +165,14 @@ class HubTaskClient(MCPClient):
                 )
                 _bindings[binding] = (callback_token, self.upstream, allowed)
                 self.binding_ids.append(binding)
+                self.server_bindings[server] = binding
+                sent_at = time.monotonic()
                 response = await self.http.post(
                     f"{self.root}/api/task-connections",
                     headers=self.headers,
                     json={
                         "server": server,
-                        "target": self.target,
+                        "catalog": self.catalog,
                         "taskId": self.task_id,
                         "url": f"{self.callback}/internal/task-bridge/{binding}",
                         "token": callback_token,
@@ -190,12 +196,15 @@ class HubTaskClient(MCPClient):
                 ):
                     raise RuntimeError("Invalid Hub task registration response")
                 self.connections[server] = data
+                # Count from request send, never from receipt: network latency
+                # must not extend our view of the Hub's confirmed lease.
+                self.lease_deadlines[server] = sent_at + _LEASE_SECONDS
                 write_runtime_event(
                     "tools",
                     "hub_task_registered",
                     task_id=self.task_id,
                     server=server,
-                    target=self.target,
+                    catalog=self.catalog,
                     connection_id=data["id"],
                 )
             self.renewal = asyncio.create_task(self._renew())
@@ -205,30 +214,92 @@ class HubTaskClient(MCPClient):
             raise
 
     async def _renew(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(120)
-                for data in self.connections.values():
-                    response = await self.http.put(
+        await asyncio.gather(
+            *(self._renew_connection(server) for server in self.connections)
+        )
+
+    def _fail_connection(self, server: str, reason: str) -> None:
+        if server in self.failed_servers:
+            return
+        self.failed_servers.add(server)
+        _revoke_binding(self.server_bindings[server])
+        write_runtime_event(
+            "tools",
+            "hub_task_lease_failed",
+            task_id=self.task_id,
+            catalog=self.catalog,
+            server=server,
+            connection_id=self.connections[server]["id"],
+            reason=reason,
+        )
+
+    async def _renew_connection(self, server: str) -> None:
+        # Registering other MCPs can consume part of this connection's first lease.
+        delay = max(
+            0, self.lease_deadlines[server] - _LEASE_SECONDS + 120 - time.monotonic()
+        )
+        failures = 0
+        data = self.connections[server]
+        while not self.failed and server not in self.failed_servers:
+            remaining = self.lease_deadlines[server] - time.monotonic()
+            if remaining <= 0:
+                self._fail_connection(server, "lease_expired")
+                return
+            await asyncio.sleep(min(delay, remaining))
+            remaining = self.lease_deadlines[server] - time.monotonic()
+            if remaining <= 0:
+                self._fail_connection(server, "lease_expired")
+                return
+            sent_at = time.monotonic()
+            status = None
+            error_type = None
+            confirmed = False
+            try:
+                response = await asyncio.wait_for(
+                    self.http.put(
                         f"{self.root}/api/task-connections/{data['id']}",
                         headers=self.headers,
-                        timeout=15,
-                    )
-                    if response.status_code != 200:
-                        raise RuntimeError("Task lease renewal rejected")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
+                        timeout=min(15, remaining),
+                    ),
+                    timeout=min(15, remaining),
+                )
+                status = response.status_code
+                if status == 200:
+                    confirmed = response.json().get("success") is True
+                    if not confirmed:
+                        error_type = "InvalidRenewalResponse"
+            except (
+                httpx.TransportError,
+                asyncio.TimeoutError,
+                ValueError,
+                AttributeError,
+            ) as error:
+                error_type = type(error).__name__
             write_runtime_event(
                 "tools",
-                "hub_task_lease_failed",
+                "hub_task_lease_renewal",
                 task_id=self.task_id,
-                target=self.target,
+                catalog=self.catalog,
+                server=server,
+                connection_id=data["id"],
+                http_status=status,
+                error_type=error_type,
+                confirmed=confirmed,
+                duration_ms=round((time.monotonic() - sent_at) * 1000),
             )
-            # Never continue against a recycled container or silently use direct mode.
-            self.failed = True
-            for binding in self.binding_ids:
-                _revoke_binding(binding)
+            if self.lease_deadlines[server] <= time.monotonic():
+                self._fail_connection(server, "lease_expired")
+                return
+            if confirmed:
+                self.lease_deadlines[server] = sent_at + _LEASE_SECONDS
+                failures = 0
+                delay = 120
+                continue
+            if error_type is None and status not in _TRANSIENT_STATUSES:
+                self._fail_connection(server, f"HTTP_{status}")
+                return
+            failures += 1
+            delay = min(2 ** min(failures, 4), 10)
 
     async def close(self) -> None:
         if self.renewal:
@@ -250,17 +321,22 @@ class HubTaskClient(MCPClient):
                     )
         finally:
             self.connections.clear()
+            self.lease_deadlines.clear()
+            self.server_bindings.clear()
             await self.http.aclose()
 
     async def _request(self, server: str, operation: str, body: dict) -> Any:
         if self.failed or server not in self.connections:
             raise RuntimeError("Hub task connection unavailable")
+        if self.lease_deadlines[server] <= time.monotonic():
+            self._fail_connection(server, "lease_expired")
+        if server in self.failed_servers:
+            raise RuntimeError(f"Hub task connection unavailable for {server}")
         data = self.connections[server]
         response = await self.http.post(
             f"{self.root}{data['path']}/{operation}",
             headers={
                 "Authorization": f"Bearer {data['token']}",
-                "X-MCPHub-Target": self.target,
             },
             json=body,
         )
@@ -270,7 +346,7 @@ class HubTaskClient(MCPClient):
                 "hub_task_request_failed",
                 task_id=self.task_id,
                 server=server,
-                target=self.target,
+                catalog=self.catalog,
                 http_status=response.status_code,
             )
             raise RuntimeError(f"Hub task request failed (HTTP {response.status_code})")
