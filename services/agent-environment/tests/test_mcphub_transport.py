@@ -41,6 +41,10 @@ def test_direct_does_not_require_hub_configuration():
         {"MCPHUB_SERVERS": "filesystem"},
         {"MCPHUB_SERVERS": "unknown"},
         {"MCPHUB_SERVERS": ""},
+        {"MCPHUB_CATALOG": "atlas/official"},
+        {"MCPHUB_CATALOG": "../public"},
+        {"MCPHUB_CATALOG": "Atlas"},
+        {"MCPHUB_CATALOG": "x" * 49},
     ],
 )
 def test_invalid_hub_config_fails_closed(changes):
@@ -59,14 +63,15 @@ def test_hub_config_has_no_upstream_keys_or_local_command():
 
 
 def test_real_streamable_http_preserves_atlas_names_and_auth():
-    async def run():
+    async def run(catalog):
         mcp = FastMCP("mock-hub")
 
         @mcp.tool(name="brave-search_brave_web_search")
         def search(query: str) -> str:
             return "fake:" + query
 
-        app = mcp.http_app(path="/mcp/brave-search")
+        route = f"/mcp/{catalog + '/' if catalog else ''}brave-search"
+        app = mcp.http_app(path=route)
         seen_auth = []
 
         class Auth:
@@ -101,8 +106,14 @@ def test_real_streamable_http_preserves_atlas_names_and_auth():
                     break
                 await asyncio.sleep(0.01)
             configs = hub_server_configs(
-                {**ENV, "MCPHUB_URL": f"http://127.0.0.1:{port}"}, {"brave-search"}
+                {
+                    **ENV,
+                    "MCPHUB_URL": f"http://127.0.0.1:{port}",
+                    "MCPHUB_CATALOG": catalog,
+                },
+                {"brave-search"},
             )
+            assert configs["brave-search"]["url"].endswith(route)
             router = DirectMCPRouter({"mcpServers": configs}, create_server_client)
             await router.start()
             assert [tool.name for tool in router.list_tools()] == [
@@ -122,7 +133,12 @@ def test_real_streamable_http_preserves_atlas_names_and_auth():
             await task
             sock.close()
 
-    asyncio.run(run())
+    async def scenarios():
+        # The SSE dependency keeps a process-wide exit event; share one event loop.
+        for catalog in ["", "atlas"]:
+            await run(catalog)
+
+    asyncio.run(scenarios())
 
 
 def test_bad_hub_prefix_is_rejected():
@@ -152,11 +168,24 @@ def test_bad_hub_prefix_is_rejected():
 
 
 def test_target_routes_without_reporting_labels_and_direct_mode_ignores_it():
-    environment = {**ENV, "MCPHUB_TARGET": "another-benchmark/suite-2", "MCPHUB_BENCHMARK": "another-benchmark", "MCPHUB_MODEL": "test-model", "MCPHUB_RUN_ID": "run-2"}
-    headers = hub_server_configs(environment, {"brave-search"})["brave-search"]["headers"]
+    environment = {
+        **ENV,
+        "MCPHUB_TARGET": "another-benchmark/suite-2",
+        "MCPHUB_BENCHMARK": "another-benchmark",
+        "MCPHUB_MODEL": "test-model",
+        "MCPHUB_RUN_ID": "run-2",
+    }
+    headers = hub_server_configs(environment, {"brave-search"})["brave-search"][
+        "headers"
+    ]
     assert headers["X-MCPHub-Target"] == "another-benchmark/suite-2"
     assert set(headers) == {"Authorization", "X-MCPHub-Target"}
-    assert hub_server_configs({**environment, "MCP_TOOL_TRANSPORT": "direct"}, {"brave-search"}) == {}
+    assert (
+        hub_server_configs(
+            {**environment, "MCP_TOOL_TRANSPORT": "direct"}, {"brave-search"}
+        )
+        == {}
+    )
 
 
 @pytest.mark.parametrize("target", ["x" * 161, "atlas/official\nother"])
@@ -166,10 +195,33 @@ def test_invalid_target_is_rejected_instead_of_truncated(target):
 
 
 def test_hub_timeout_covers_queue_and_execution():
-    config = hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": "420"}, {"brave-search"})["brave-search"]
+    config = hub_server_configs({**ENV, "TOOL_CALL_TIMEOUT": "420"}, {"brave-search"})[
+        "brave-search"
+    ]
     assert config["sse_read_timeout"] == 420
     client = create_server_client("brave-search", config)
     assert client.transport.sse_read_timeout.total_seconds() == 420
+
+
+def test_catalog_changes_only_the_route_and_direct_mode_ignores_it():
+    scoped = hub_server_configs(
+        {**ENV, "MCPHUB_CATALOG": "atlas", "MCPHUB_TARGET": "atlas/fixture3"},
+        {"brave-search"},
+    )["brave-search"]
+    assert scoped["url"].endswith("/mcp/atlas/brave-search")
+    assert scoped["atlas_hub_prefix"] == "brave-search_"
+    assert scoped["headers"]["X-MCPHub-Target"] == "atlas/fixture3"
+    assert (
+        hub_server_configs(
+            {
+                **ENV,
+                "MCP_TOOL_TRANSPORT": "direct",
+                "MCPHUB_CATALOG": "invalid/namespace",
+            },
+            {"brave-search"},
+        )
+        == {}
+    )
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "invalid"])

@@ -1348,6 +1348,4 @@ if __name__ == "__main__":
         logging.info("\nEvaluation interrupted by user.")
     except Exception as e:
         logging.error(f"Error: {e}")
-        import traceback
-
-        traceback.print_exc()
+        raise

@@ -8,7 +8,33 @@ from mcp_completion.account_guard import (
     is_fatal_account_error,
     is_fatal_mcp_account_error,
     is_fatal_tool_result,
+    is_stopped_model_service,
 )
+
+
+@pytest.mark.parametrize('status,body,expected', [
+    (503, {'error': {'message': 'Service model-123 is unavailable with status: STOPPED'}}, True),
+    (503, {'error': {'status': 'STOPPED', 'message': 'deployment is stopped'}}, True),
+    (503, {'error': {'message': 'deployment is stopped', 'status': 'STOPPED'}}, True),
+    (503, {'error': {'message': 'deployment is stopped', 'status': 'stopped'}}, True),
+    (503, {'error': {'message': 'service is starting', 'status': 'STARTING'}}, False),
+    (503, {'error': {'message': 'temporary failure'}, 'request': {'status': 'STOPPED', 'message': 'deployment is stopped'}}, False),
+    (503, {'error': '{"message": "deployment is stopped", "status": "STOPPED"}'}, True),
+    (503, {'error': {'message': 'Service unavailable'}}, False),
+    (504, {'error': {'message': 'Service model-123 is unavailable with status: STOPPED'}}, False),
+    (503, {'request': {'messages': [{'content': 'Service model-123 is unavailable with status: STOPPED'}]},
+           'error': {'message': 'temporary failure'}}, False),
+])
+def test_only_explicit_model_api_503_stopped_is_fatal(status, body, expected):
+    error = RuntimeError('provider failure')
+    error.status_code = status
+    error.body = body
+    assert is_stopped_model_service(error) is expected
+
+
+def test_plain_text_or_tool_content_cannot_trigger_model_service_breaker():
+    assert not is_stopped_model_service('HTTP 503 Service model-123 is unavailable with status: STOPPED')
+    assert not is_stopped_model_service({'error': 'HTTP 503 Service model-123 is unavailable with status: STOPPED'})
 
 
 def test_invalid_model_token_stops_the_run():

@@ -61,3 +61,13 @@ patches, but cherry-picked equivalents alone do NOT include origin/rollout's
 commit ancestry. A subsequent explicit merge of origin/rollout 4e6fc3d resolves
 this, preserving the same source tree and allowing non-force publication.
 Fetch/review any later upstream movement before publishing.
+
+## Synthesis integration on MCPHub v2
+
+Merged origin/rollout b02fc29 into the synthesis runtime. Configure
+MCPHUB_CATALOG separately from optional shared-account MCPHUB_TARGET.
+Task leases and runtime setup use catalog only, never the shared account target.
+Keep the local joint-author session lifecycle, evidence labels, readable Notion
+projection, evaluator task context and measured/unknown cache accounting.
+The remote stopped-service handling is retained without disabling model keys.
+Rebuild the image and recreate the runtime before using the new Hub transport.

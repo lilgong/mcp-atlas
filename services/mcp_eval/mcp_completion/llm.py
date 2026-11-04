@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .runtime_log import jsonable, write_runtime_event
-from .account_guard import FatalAccountError, is_fatal_account_error
+from .account_guard import FatalAccountError, is_fatal_account_error, is_stopped_model_service
 from .model_rate_limit import reserve_delay
 from .streaming import collect_litellm_response, llm_streaming_enabled
 
@@ -290,6 +290,8 @@ async def _create_openai_compatible_completion(
                 raise
 
             status_code = _model_error_status_code(error)
+            if is_stopped_model_service(error):
+                raise
             if status_code in {401, 402, 403} or is_fatal_account_error(error):
                 if len(pool_keys(config.LLM_API_KEY)) > 1:
                     attempted_keys.add(key)
@@ -437,9 +439,10 @@ async def create_completion(
                 error_type=type(error).__name__,
                 error=str(error),
             )
-            if isinstance(error, KeyPoolExhausted) or is_fatal_account_error(error):
+            stopped = is_stopped_model_service(error)
+            if stopped or isinstance(error, KeyPoolExhausted) or is_fatal_account_error(error):
                 raise FatalAccountError(
-                    "model credential is invalid or out of funds",
+                    "model service is STOPPED" if stopped else "model credential is invalid or out of funds",
                     source_kind="model",
                     source_name=model,
                     credential_envs=("LLM_API_KEY",),

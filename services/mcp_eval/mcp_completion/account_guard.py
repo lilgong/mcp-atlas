@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable, Optional
 
 
@@ -190,6 +191,41 @@ def is_fatal_account_error(value: Any) -> bool:
     """Return whether an actual error describes unusable credentials/funds."""
     text = str(value or "").casefold()
     return not is_time_based_quota_error(text) and any(marker in text for marker in _FATAL_ACCOUNT_MARKERS)
+
+
+def is_stopped_model_service(error: Any) -> bool:
+    """Recognize explicit model-service STOPPED errors, independent of JSON order."""
+    if not isinstance(error, BaseException) or getattr(error, "status_code", None) != 503:
+        return False
+
+    allowed = {"error", "message", "code", "type", "status", "error_description"}
+    phrase = re.compile(
+        r'\bService\s+[^\s"}]+\s+is unavailable with status:\s*STOPPED\b', re.I
+    )
+
+    def error_fields(value):
+        if isinstance(value, dict):
+            return {key: error_fields(item) for key, item in value.items() if key in allowed}
+        if isinstance(value, str):
+            try:
+                return error_fields(json.loads(value))
+            except ValueError:
+                return value
+        return value if isinstance(value, (int, float, bool)) else None
+
+    def stopped(value):
+        if isinstance(value, str):
+            return bool(phrase.search(value))
+        if not isinstance(value, dict):
+            return False
+        status = value.get("status")
+        if isinstance(status, str) and status.casefold() == "stopped":
+            if re.search(r"\b(?:service|deployment)\b", json.dumps(value), re.I):
+                return True
+        return any(stopped(item) for item in value.values())
+
+    body = getattr(error, "body", None)
+    return stopped(error_fields(str(error) if body is None else body))
 
 
 def is_fatal_tool_result(result: Any) -> bool:

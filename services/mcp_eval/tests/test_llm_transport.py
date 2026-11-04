@@ -212,6 +212,35 @@ class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
                     await self._run()
             self.assertEqual(completion.await_count, 2)
 
+    async def test_stopped_model_service_aborts_without_request_retries(self):
+        completion = AsyncMock(side_effect=_ProviderError(
+            503, 'Service model-123 is unavailable with status: STOPPED'))
+        with (
+            patch('mcp_completion.llm.litellm.acompletion', completion),
+            patch('mcp_completion.llm.write_runtime_event'),
+        ):
+            with self.assertRaises(FatalAccountError) as raised:
+                await self._run()
+        self.assertEqual(completion.await_count, 1)
+        self.assertEqual(str(raised.exception), 'model service is STOPPED')
+
+
+    async def test_stopped_service_does_not_disable_or_rotate_model_keys(self):
+        with tempfile.TemporaryDirectory() as root:
+            completion = AsyncMock(side_effect=_ProviderError(
+                503, "Service model-123 is unavailable with status: STOPPED"))
+            with (
+                patch.dict(os.environ, {"LLM_API_KEYS": '["test-key", "test-key-2"]',
+                                        "LLM_KEY_POOL_DB": root + "/pool.db"}),
+                patch("mcp_completion.llm.litellm.acompletion", completion),
+                patch("mcp_completion.llm.write_runtime_event"),
+                patch("mcp_completion.llm.exhaust_key") as exhaust,
+            ):
+                with self.assertRaisesRegex(FatalAccountError, "STOPPED"):
+                    await self._run()
+            self.assertEqual(completion.await_count, 1)
+            exhaust.assert_not_called()
+
 
 class OpenAIBaseURLTests(unittest.TestCase):
     def test_gateway_root_gets_v1_suffix(self):
