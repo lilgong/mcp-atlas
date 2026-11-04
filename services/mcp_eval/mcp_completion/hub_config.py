@@ -73,7 +73,7 @@ def hub_catalog() -> str:
 
 
 def task_hub_servers() -> set[str]:
-    defaults = "filesystem,git,memory,mongodb,cli-mcp-server,desktop-commander,mcp-code-executor,mcp-server-code-runner,arxiv,pubmed"
+    defaults = "arxiv,pubmed"
     return {
         name.strip()
         for name in os.getenv("MCPHUB_TASK_SERVERS", defaults).split(",")

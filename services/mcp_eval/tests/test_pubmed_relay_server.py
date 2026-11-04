@@ -215,6 +215,71 @@ def test_slow_upstream_request_does_not_block_another_request(monkeypatch):
     assert calls == ["https://test/first", "https://test/second"]
 
 
+def test_arxiv_controller_obeys_configured_concurrency(monkeypatch):
+    release = threading.Event()
+    two_started = threading.Event()
+    third_started = threading.Event()
+    lock = threading.Lock()
+    started = 0
+
+    def fake_fetch(url, _allow_redirects, *, session_id=None, budget=None):
+        nonlocal started
+        with lock:
+            started += 1
+            if started == 2:
+                two_started.set()
+            elif started == 3:
+                third_started.set()
+        assert release.wait(2)
+        return 200, {}, b"ok", url
+
+    monkeypatch.setattr(relay, "_fetch_once", fake_fetch)
+    controller = relay.Controller(0)
+    controller.max_concurrency = 2
+    threads = [
+        threading.Thread(
+            target=controller.fetch,
+            args=(f"https://test/{index}", True),
+        )
+        for index in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        assert two_started.wait(1)
+        assert not third_started.wait(0.2)
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(2)
+    assert third_started.is_set()
+
+
+def test_arxiv_controller_has_no_adaptive_concurrency_cap():
+    controller = relay.CONTROLLERS["arxiv"]
+    assert controller.min_interval == 3.0
+    assert controller.max_concurrency == relay.DEFAULT_LIMITS["arxiv"]["concurrency"]
+    assert not hasattr(controller, "adaptive_rate_limit")
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_arxiv_queue_removes_expired_or_cancelled_request(cancelled):
+    controller = relay.Controller(0)
+    controller.max_concurrency = 1
+    controller._wait_for_slot(relay.RequestBudget(10))
+    budget = relay.RequestBudget(0.02, disconnected=lambda: cancelled)
+    error = relay.RelayRequestCancelled if cancelled else relay.RelayRequestExpired
+    with pytest.raises(error):
+        controller._wait_for_slot(budget)
+    assert not controller.pending
+    assert controller.active == 1
+    assert controller.max_concurrency == 1
+    with controller.slots:
+        controller.active -= 1
+    controller._wait_for_slot(relay.RequestBudget(10))
+    assert controller.active == 1
+
+
 def test_wikipedia_controller_pool_uses_independent_sticky_lanes(monkeypatch):
     url = "https://en.wikipedia.org/w/api.php"
     session_ids = []

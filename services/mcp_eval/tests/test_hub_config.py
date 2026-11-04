@@ -2,10 +2,14 @@ import os
 import unittest
 from unittest.mock import AsyncMock, patch
 import httpx
-from mcp_completion.hub_config import hub_manages_policy, managed_task_relay
+from mcp_completion.hub_config import hub_manages_policy, managed_task_relay, task_hub_servers
 
 
 class HubConfigTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_task_hub_routes_leave_eight_local_servers_local(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(task_hub_servers(), {"arxiv", "pubmed"})
+
     def test_only_selected_hub_servers_delegate_limits(self):
         with patch.dict(
             os.environ,

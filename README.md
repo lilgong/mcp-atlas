@@ -26,7 +26,7 @@
 | completion 服务 | 调用模型、执行多轮工具调用、管理任务容器 | `http://localhost:3000` |
 | 轨迹与评分脚本 | 读取任务 CSV，调用 completion，保存轨迹并评分 | 不监听端口 |
 | task-local 容器 | 承载 filesystem、Git、Memory、CLI、Desktop Commander、代码执行等工具 | 不发布固定宿主端口 |
-| task-network 容器 | 承载 Arxiv、PubMed 等需要联网且会写本地缓存的工具 | Docker 临时分配回环端口 |
+| task-network 容器 | 承载 Arxiv、PubMed 等需要联网且会写本地缓存的工具 | 不发布宿主端口，通过 Docker exec 访问容器回环地址 |
 | task-Mongo 容器 | 为包含 MongoDB 工具的任务恢复一份独立数据库 | 不发布宿主端口 |
 
 调用路径如下：
@@ -360,18 +360,20 @@ MCP_TASK_ISOLATION_ENABLED=true
 Docker 繁忙或残留较多时阻塞 `/health`；运行中的 age-gated sweeper 会回收已失去
 进程跟踪且超过 `MCP_SANDBOX_ORPHAN_MAX_AGE` 的资源。
 
-同一宿主机、同一 Unix 用户并行运行 MCP-Atlas 和 data-syn 时，Brave、
-TwelveData 与未配置集中 relay 的 arXiv、OSM、PubMed、Wikipedia 调用会自动通过
-`/tmp/mcp-atlas-rate-gates-<uid>/` 的文件锁统一串行和间隔调度；可识别的 429 退避也在
-进程间共享。
-`MCP_SHARED_RATE_LIMIT_DIR` 通常留空，
-只有迁移本地锁目录时才填写；不要指向 NFS。该机制只协调调用时序，不代理请求、
-不改变工具 schema，也不适用于不同宿主机或不同 Unix 用户。
-Wikipedia、arXiv 和 OSM 的一个工具调用可能包含多个 HTTP 子请求；配置集中
-relay 时不锁住整个工具调用，而是将每个受支持的 HTTP 请求统一交给 relay
-调度并经 IPWO 出口，避免长工具调用阻塞其他任务。未配置时 runtime 会逐次间隔并遵守
-`Retry-After`。
-两种路径都不改变工具 schema 或返回结构。
+多 Worker 部署时，给每个 completion 配置同一个 `REDIS_URL`。Brave、E2B、
+TwelveData 与未配置集中 relay 的 arXiv、OSM、PubMed、Wikipedia 整个 MCP 工具调用
+会先通过 Redis 获取许可；可识别的 429 退避也会写入相同状态。配置集中 relay 时，
+这些服务改由 relay 逐请求调度，不再额外锁住整个工具调用。
+
+Redis 只保存 `mcp-atlas:rate-limit:v1:*` 命名空间下的调用租约、开始时间和 429 冷却
+状态，不代理 MCP 请求，不接触模型凭据或任务数据。Redis 地址只提供给 completion，
+不要注入任务 MCP 容器。Redis 暂时不可用时，受限工具调用会直接失败，防止跨 Worker
+限速静默失效；其他工具不受影响。
+
+单机直接运行且未配置 `REDIS_URL` 时，继续使用
+`/tmp/mcp-atlas-rate-gates-<uid>/` 的文件锁。`MCP_SHARED_RATE_LIMIT_DIR` 通常留空，
+只有迁移本地锁目录时才填写，且不能指向 NFS。两种后端都只协调调用时序，不改变
+任务容器、工具 schema 或返回结构。arXiv、PubMed 等仍按任务运行在独立容器中。
 
 ### 5.5 轨迹参数
 
@@ -526,7 +528,8 @@ curl http://<relay内网IP>:3985/health
 relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议使用
 `IPWO_PROXY_COUNTRY=US`；relay 为 NCBI、arXiv、Nominatim、Overpass 和 OSRM 分别复用一条
 粘性出口，为无状态的 Wikipedia Action API 使用四条独立粘性出口 lane。arXiv 全局
-每 3 秒最多启动一次请求，OSM 各类上游全局每秒最多启动一次。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
+每 3 秒最多启动一次请求，并发上限由调度配置控制，不随 429 自动调整。
+OSM 各类上游全局每秒最多启动一次。各 lane 独立限速，只在上游连接失败、限流、服务错误或 abuse 响应时更换动态
 住宅代理的 `sid`。请求记录
 写入 `MCP_RELAY_USAGE_LOG`（默认 `/var/log/pubmed-relay/usage.jsonl`），其中不记录
 query 参数或凭证。relay 不应暴露到公网。
@@ -1698,16 +1701,20 @@ MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub-v2
 共享服务列表仍不包含任务型 MCP，两类客户端的接入方式不同。
 
 完整配置与适用范围参见 [Hub 任务路由](services/mcp_eval/HUB-TASK-ROUTING.md)。
-main 分支保留直连实现；mcphub 分支适配原 Hub，mcphub-v2 分支从 mcphub 派生，
-使用 v2 命名空间和自动任务注册，仍可选择 `direct` 或 `hub`。26 个共享 MCP 从 Hub 获取工具 schema 和调用结果；
+main 分支仅提供直连；redis 分支基于 mcphub-v2，保留 Redis 跨 Worker 调度。
+默认使用 `direct`，也可配置 v2 命名空间后使用 `hub`。26 个共享 MCP 从 Hub 获取工具 schema 和调用结果；
 arxiv/pubmed 通过 Hub 的任务转发调用，但仍在 Atlas 的隔离任务容器执行；其他 8 个本地 MCP
 保持本地任务路由。`MCPHUB_TASK_ROUTING=true`、`MCPHUB_TASK_SERVERS=arxiv,pubmed`
 明确选择需要经过 Hub 的任务 MCP。
 `MCPHUB_MANAGE_RELAY=true` 让 arxiv/pubmed 的任务容器读取 Hub 的 relay 配置。
 PubMed 的 NCBI 变量由 Hub 中的任务目标明确发布给启动中的任务容器，
-Atlas `.env` 不保存这些变量或其他 MCP 上游 Key。`MCP_USAGE_LOG_DIR` 从 Atlas `.env`
-移除，Hub 模式的共享容器不再挂载用量日志目录。工具调用统计由 Hub 记录，Atlas
+Hub 配置中无需在 Atlas `.env` 保存这些变量或其他 MCP 上游 Key。
+Hub 模式的共享容器不再挂载用量日志目录。工具调用统计由 Hub 记录，Atlas
 仅保留测评轨迹、模型 token 和任务运行日志。
+直连模式仍保留原有 `mcp_usage_log`。Hub 模式的本地 runtime 工具日志仍记录
+调用开始、完成、耗时与错误，但不是 Hub 内上游 HTTP 请求次数的镜像；
+上游请求及凭证统计应查看 Hub，Relay 请求另查看 Relay 的 usage JSONL。
+未委托给 Hub 的服务继续使用 Redis/本地原有限速链路。
 
 启动：
 
