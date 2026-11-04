@@ -5,10 +5,10 @@ VERSION = 1.2.5
 GHCR_REPO = ghcr.io/scaleapi/mcp-atlas
 MCP_HOST_PORT ?= 1984
 MCP_STATUS_HOST_PORT ?= 1985
+RELAY_ENV_FILE ?= .env
 # Host-networked shared MCP port is read from MCP_SHARED_PORT in .env.
 TASK_MONGO_IMAGE ?=
-ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:latest
-RELAY_ENV_FILE ?= $(if $(wildcard .env.relay),.env.relay,.env)
+ATLAS_RUNTIME_IMAGE ?= mcp-atlas-runtime:rollout
 MONGO_FIXTURE_DUMP ?=
 MONGO_FIXTURE_DB ?=
 MONGO_FIXTURE_ID ?=

@@ -7,6 +7,7 @@ from mcp_completion.runtime_log import write_runtime_event
 from mcp_completion.tool_policy import (
     ToolRoute,
     effective_enabled_servers,
+    generation_policy_for_tool,
     is_cloud_data_write,
     route_for_tool,
     server_for_tool,
@@ -26,6 +27,26 @@ class ToolPolicyTests(unittest.TestCase):
             "mcp-code-executor_execute_code",
         ):
             self.assertEqual(route_for_tool(name), ToolRoute.TASK_LOCAL, name)
+
+    def test_generation_policy_separates_isolation_from_read_safety(self):
+        expected = {
+            "filesystem_read_file": ("read", True, "evidence"),
+            "filesystem_write_file": ("local_mutation", False, "excluded"),
+            "git_git_log": ("read", True, "evidence"),
+            "git_git_reset": ("local_mutation", False, "excluded"),
+            "memory_read_graph": ("read", True, "entry"),
+            "memory_create_entities": ("local_mutation", False, "excluded"),
+            "mongodb_find": ("read", True, "evidence"),
+            "mongodb_drop-database": ("local_mutation", False, "excluded"),
+            "mcp-code-executor_execute_code": ("compute", True, "compute"),
+        }
+        for name, values in expected.items():
+            policy = generation_policy_for_tool(name)
+            self.assertEqual(
+                values,
+                (policy["effect"], policy["generation_allowed"], policy["coverage_role"]),
+                name,
+            )
 
     def test_download_caches_are_task_isolated_with_network(self):
         self.assertEqual(

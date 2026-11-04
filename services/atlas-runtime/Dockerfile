@@ -63,6 +63,7 @@ COPY pyproject.toml uv.lock README.md entrypoint.sh ./
 COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/main.py src/agent_environment/mcp_client.py \
      src/agent_environment/mcp_router.py \
+     src/agent_environment/credential_pool.py \
      src/agent_environment/mcphub_transport.py \
      src/agent_environment/usage_audit.py \
      src/agent_environment/arxiv_mcp_compat.py \
@@ -70,6 +71,7 @@ COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/osm_mcp_compat.py \
      src/agent_environment/oxylabs_mcp_compat.py \
      src/agent_environment/pubmed_mcp_compat.py \
+     src/agent_environment/runtime_identity.py \
      src/agent_environment/twelvedata_mcp_compat.py \
      src/agent_environment/run_node_mcp.cjs \
      src/agent_environment/met_museum_compat.cjs \

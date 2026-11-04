@@ -30,7 +30,8 @@ class FakeTask(MCPClient):
             )
         ]
 
-    async def call_tool(self, tool_name, args):
+    async def call_tool(self, tool_name, args, *, use_cache=True):
+        assert use_cache is False
         self.calls += 1
         return CallToolResponse(content=[TextContent(type="text", text=self.value)])
 

@@ -1,6 +1,7 @@
 """LLM completion functionality using LiteLLM."""
 
 import asyncio
+from .key_pool import choose as choose_key, exhaust as exhaust_key, keys as pool_keys, KeyPoolExhausted
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error, is_stopped_model_service
+from .model_rate_limit import reserve_delay
 from .streaming import collect_litellm_response, llm_streaming_enabled
 
 logger = logging.getLogger(__name__)
@@ -146,6 +148,34 @@ class LLMResponse(BaseModel):
 
     message: AssistantMessage
     original_content: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+
+
+def _normalized_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """Normalize provider usage without turning absent cache telemetry into zero."""
+    value = jsonable(usage)
+    if not isinstance(value, dict):
+        return None
+    details = value.get("prompt_tokens_details") or value.get("input_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    cache_reported = (
+        "cached_tokens" in details
+        or "cache_read_input_tokens" in value
+        or "cached_tokens" in value
+    )
+    return {
+        "input_tokens": int(value.get("prompt_tokens") or value.get("input_tokens") or 0),
+        "output_tokens": int(value.get("completion_tokens") or value.get("output_tokens") or 0),
+        "cached_tokens": int(
+            details.get("cached_tokens")
+            or value.get("cache_read_input_tokens")
+            or value.get("cached_tokens")
+            or 0
+        ),
+        "cache_reported": cache_reported,
+    }
+
+
 
 
 def _sanitize_tool_calls(
@@ -199,6 +229,7 @@ async def _create_openai_compatible_completion(
     task_id: str,
     turn: int,
     call_id: str,
+    prompt_cache_key: Optional[str] = None,
 ) -> Any:
     """Call the configured OpenAI-compatible endpoint with bounded retries.
 
@@ -207,18 +238,28 @@ async def _create_openai_compatible_completion(
     retried because the upstream generation may still be running.
     """
 
-    for provider_attempt in range(1, config.LLM_MAX_ATTEMPTS + 1):
+    provider_attempt = 0
+    attempted_keys = set()
+    key = None
+    while provider_attempt < config.LLM_MAX_ATTEMPTS:
+        if key is None:
+            key = await asyncio.to_thread(choose_key, config.LLM_BASE_URL, config.LLM_API_KEY, attempted_keys)
+        provider_attempt += 1
         try:
+            delay = await asyncio.to_thread(reserve_delay, config.LLM_BASE_URL, key)
+            if delay:
+                await asyncio.sleep(delay)
             use_streaming = llm_streaming_enabled()
             provider_response = await litellm.acompletion(
                 model=model,
                 custom_llm_provider="openai",
                 messages=messages,
                 tools=tools,
-                api_key=config.LLM_API_KEY,
+                api_key=key,
                 api_base=config.LLM_BASE_URL,
                 timeout=config.DEFAULT_TIMEOUT,
                 max_retries=0,
+                **({"prompt_cache_key": prompt_cache_key} if prompt_cache_key else {}),
                 **(
                     {
                         "stream": True,
@@ -246,6 +287,16 @@ async def _create_openai_compatible_completion(
 
             status_code = _model_error_status_code(error)
             if is_stopped_model_service(error):
+                raise
+            if status_code in {401, 402, 403} or is_fatal_account_error(error):
+                if len(pool_keys(config.LLM_API_KEY)) > 1:
+                    attempted_keys.add(key)
+                    await asyncio.to_thread(exhaust_key, config.LLM_BASE_URL, config.LLM_API_KEY, key)
+                    key = None
+                    provider_attempt -= 1  # Key failover is not a transient retry.
+                    write_runtime_event("model_calls", "model_key_disabled", task_id=task_id,
+                                        call_id=call_id, reason="account_unavailable", remaining=len(pool_keys(config.LLM_API_KEY))-len(attempted_keys))
+                    continue
                 raise
             should_retry = (
                 status_code in RETRYABLE_MODEL_STATUS_CODES
@@ -296,6 +347,7 @@ async def create_completion(
     retry_thinking_contract_violations: bool = False,
     task_id: str = "unknown",
     turn: int = 0,
+    prompt_cache_key: Optional[str] = None,
 ) -> LLMResponse:
     """Create a completion using LiteLLM."""
 
@@ -332,6 +384,9 @@ async def create_completion(
     reasoning_content = None
     content = ""
     call_id = ""
+    total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    usage_seen = False
+    cache_reported = True
 
     for attempt in range(1, max_attempts + 1):
         call_id = uuid.uuid4().hex
@@ -363,6 +418,7 @@ async def create_completion(
                 task_id=task_id,
                 turn=turn,
                 call_id=call_id,
+                prompt_cache_key=prompt_cache_key,
             )
         except Exception as error:
             logger.error(f"LiteLLM completion failed: {error}")
@@ -379,7 +435,7 @@ async def create_completion(
                 error=str(error),
             )
             stopped = is_stopped_model_service(error)
-            if stopped or is_fatal_account_error(error):
+            if stopped or isinstance(error, KeyPoolExhausted) or is_fatal_account_error(error):
                 raise FatalAccountError(
                     "model service is STOPPED" if stopped else "model credential is invalid or out of funds",
                     source_kind="model",
@@ -393,6 +449,12 @@ async def create_completion(
             usage = jsonable(getattr(response, "usage", None))
         elif isinstance(response.get("usage"), dict):
             usage = response.get("usage")
+        normalized_usage = _normalized_usage(usage)
+        if normalized_usage is not None:
+            usage_seen = True
+            for key in total_usage:
+                total_usage[key] += int(normalized_usage[key])
+            cache_reported = cache_reported and bool(normalized_usage["cache_reported"])
         write_runtime_event(
             "model_calls",
             "model_call_completed",
@@ -500,6 +562,10 @@ async def create_completion(
 
         return LLMResponse(
             message=assistant_message,
+            usage=(
+                {**total_usage, "cache_reported": cache_reported}
+                if usage_seen else None
+            ),
         )
 
     except Exception as error:

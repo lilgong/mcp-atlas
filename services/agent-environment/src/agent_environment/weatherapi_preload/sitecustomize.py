@@ -27,6 +27,10 @@ def _yibu_key() -> str:
     return (os.getenv("WEATHER_YIBU_API_KEY") or "").strip()
 
 
+def _usage_key() -> str:
+    return _yibu_key() or (os.getenv("WEATHER_API_KEY") or "").strip()
+
+
 # uvx starts a separate environment; load the audit helper beside this preload.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from usage_audit import start_usage, usage_event
@@ -53,14 +57,15 @@ def _rewrite_request(url: object, kwargs: dict) -> tuple[str, dict]:
 
 
 def _install() -> None:
-    key = _yibu_key()
+    key = _usage_key()
     if not key:
         return
 
     # The official server checks this variable before it calls HTTPX.  Supplying
     # the Yibu token here satisfies that check; the token is removed from query
     # parameters by ``_rewrite_request`` and is sent only as a Bearer header.
-    os.environ["WEATHER_API_KEY"] = key
+    if _yibu_key():
+        os.environ["WEATHER_API_KEY"] = key
 
     import httpx
 
@@ -70,7 +75,10 @@ def _install() -> None:
 
     async def yibu_get(client, url, *args, **kwargs):
         rewritten_url, rewritten_kwargs = _rewrite_request(url, kwargs)
-        if rewritten_url == str(url):
+        original_url = str(url)
+        original = urlsplit(original_url)
+        is_weather_request = f"{original.scheme}://{original.netloc}" == OFFICIAL_ORIGIN
+        if not is_weather_request:
             return await original_get(client, url, *args, **kwargs)
         request_id = start_usage("weatherapi", key)
         started = time.monotonic()

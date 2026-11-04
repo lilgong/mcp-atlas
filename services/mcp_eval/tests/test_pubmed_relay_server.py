@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,11 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 relay = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(relay)
+
+
+@pytest.fixture(autouse=True)
+def isolated_relay_audit(monkeypatch, tmp_path):
+    monkeypatch.setattr(relay, "LOG_PATH", tmp_path / "usage.jsonl")
 
 
 def test_ipwo_proxy_auth_failure_latches(monkeypatch):
@@ -213,6 +219,129 @@ def test_slow_upstream_request_does_not_block_another_request(monkeypatch):
         first.join(2)
         second.join(2)
     assert calls == ["https://test/first", "https://test/second"]
+
+
+def test_arxiv_controller_caps_concurrent_upstream_requests(monkeypatch):
+    release = threading.Event()
+    two_started = threading.Event()
+    third_started = threading.Event()
+    lock = threading.Lock()
+    started = 0
+
+    def fake_fetch(url, _allow_redirects, *, session_id=None, budget=None):
+        nonlocal started
+        with lock:
+            started += 1
+            if started == 2:
+                two_started.set()
+            elif started == 3:
+                third_started.set()
+        assert release.wait(2)
+        return 200, {}, b"ok", url
+
+    monkeypatch.setattr(relay, "_fetch_once", fake_fetch)
+    controller = relay.Controller(0)
+    controller.max_concurrency = 2
+    threads = [
+        threading.Thread(
+            target=controller.fetch,
+            args=(f"https://test/{index}", True),
+        )
+        for index in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        assert two_started.wait(1)
+        assert not third_started.wait(0.2)
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(2)
+    assert third_started.is_set()
+
+
+def test_expired_queue_does_not_call_upstream_or_leak_capacity(monkeypatch):
+    controller = relay.Controller(0)
+    controller.max_concurrency = 1
+    controller.active = 1
+    calls = []
+    monkeypatch.setattr(relay, "_fetch_once", lambda *a, **k: calls.append(a))
+    with pytest.raises(relay.RelayRequestExpired) as exc:
+        controller.fetch("https://test/queued", True, budget=relay.RequestBudget(0.02))
+    assert exc.value.phase == "queue"
+    assert not calls and not controller.pending and controller.active == 1
+
+
+def test_cancelled_request_does_not_retry_and_releases_capacity(monkeypatch):
+    controller = relay.Controller(0)
+    calls = []
+
+    def cancelled(*args, **kwargs):
+        calls.append(args)
+        raise relay.RelayRequestCancelled("Disconnected")
+
+    monkeypatch.setattr(relay, "_fetch_once", cancelled)
+    with pytest.raises(relay.RelayRequestCancelled):
+        controller.fetch("https://test/cancelled", True)
+    assert len(calls) == 1
+    assert controller.active == 0 and not controller.pending
+
+
+def test_retry_budget_expires_in_cooldown_without_second_upstream_call(monkeypatch):
+    controller = relay.Controller(0)
+    calls = []
+
+    def rate_limited(url, *args, **kwargs):
+        calls.append(url)
+        return 429, {"Retry-After": "60"}, b"limited", url
+
+    monkeypatch.setattr(relay, "_fetch_once", rate_limited)
+    with pytest.raises(relay.RelayRequestExpired) as exc:
+        controller.fetch("https://test/limited", True, budget=relay.RequestBudget(0.03))
+    assert exc.value.phase == "queue"
+    assert len(calls) == 1 and controller.active == 0 and not controller.pending
+
+
+def test_socket_watch_interrupts_expired_read_and_stops_thread():
+    interrupted = threading.Event()
+
+    class Socket:
+        def shutdown(self, how):
+            interrupted.set()
+
+    with relay._watch_socket(Socket(), relay.RequestBudget(0.01)):
+        assert interrupted.wait(1)
+
+
+def test_fifo_queue_admits_waiters_in_order(monkeypatch):
+    controller = relay.Controller(0)
+    controller.max_concurrency = 1
+    controller.active = 1
+    calls = []
+    monkeypatch.setattr(relay, "_fetch_once", lambda url, *a, **k: (
+        calls.append(url) or (200, {}, b"ok", url)))
+    threads = []
+    for index in range(3):
+        thread = threading.Thread(target=controller.fetch, args=(f"https://test/{index}", True))
+        threads.append(thread)
+        thread.start()
+        deadline = time.monotonic() + 1
+        while True:
+            with controller.slots:
+                queued = len(controller.pending)
+            if queued == index + 1:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+    with controller.slots:
+        controller.active = 0
+        controller.slots.notify_all()
+    for thread in threads:
+        thread.join(2)
+        assert not thread.is_alive()
+    assert calls == [f"https://test/{i}" for i in range(3)]
+    assert controller.active == 0 and not controller.pending
 
 
 def test_wikipedia_controller_pool_uses_independent_sticky_lanes(monkeypatch):

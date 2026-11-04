@@ -29,8 +29,11 @@ import argparse
 import asyncio
 import csv
 import datetime as dt
+import dataclasses
 import io
 import json
+import os
+import re
 import sys
 import time
 import uuid
@@ -134,7 +137,7 @@ def make_isolated_caller(
         while True:
             try:
                 response = await asyncio.wait_for(
-                    client.call_tool(tool, args),
+                    client.call_tool(tool, args, use_cache=False),
                     timeout=timeout,
                 )
                 body = json.dumps(
@@ -168,21 +171,146 @@ def _flat(s: str) -> str:
     return " ".join(s.split())
 
 
-def _tool_errored(body: str) -> bool:
-    """MCP 工具级错误：[{type:text, text:"Error: ..."}] 或整体含 error。"""
+_ERROR_PREFIX_RE = re.compile(
+    r"^\s*(?:error|authentication error|authorization error|unauthorized|"
+    r"forbidden|an error occurred while\b[^:]*|http error during\b[^:]*|"
+    r"request error during\b[^:]*|tool execution failed)\s*[:\-]",
+    re.IGNORECASE,
+)
+_RATE_LIMIT_RE = re.compile(
+    r"^\s*(?:rate[- ]limit(?:ed|ing)\b|rate[- ]limit "
+    r"(?:exceeded|reached)\b|(?:monthly\s+)?quota "
+    r"(?:exceeded|reached)\b|too many requests\b)",
+    re.IGNORECASE,
+)
+_SEMANTIC_RESULT_KEYS = {
+    "content", "coordinates", "data", "documents", "entries", "facts",
+    "items", "links", "matches", "records", "results", "rows",
+    "sections", "summary", "text",
+}
+_EMPTY_METADATA_KEYS = {
+    "count", "cursor", "has_more", "limit", "message", "meta",
+    "metadata", "next_cursor", "offset", "page", "page_size",
+    "pagination", "query", "request", "status", "success", "total",
+    "total_count", "total_results", "type", "mimetype",
+}
+_SENSITIVE_PROBE_TOOLS = {
+    "notion_API-get-user",
+    "notion_API-get-users",
+}
+
+
+def _decoded(value: str) -> Any:
     try:
-        data = json.loads(body)
-    except Exception:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _structured_error(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_structured_error(child) for child in value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if _ERROR_PREFIX_RE.search(stripped) or _RATE_LIMIT_RE.search(stripped):
+            return True
+        decoded = _decoded(stripped)
+        return decoded is not None and _structured_error(decoded)
+    if not isinstance(value, dict):
         return False
-    if isinstance(data, dict) and "error" in str(data).lower():
+    if value.get("isError") is True or value.get("object") == "error":
         return True
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                text = item.get("text", "")
-                if isinstance(text, str) and text.startswith("Error:"):
-                    return True
+    if value.get("error") not in (None, False, "", [], {}):
+        return True
+    if value.get("success") is False:
+        return True
+    status = str(value.get("status") or "").strip().lower()
+    if status in {"error", "failed", "failure"}:
+        return True
+    try:
+        if int(value.get("statusCode", value.get("status"))) >= 400:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if set(value) <= {"type", "text", "mimeType"} and isinstance(value.get("text"), str):
+        return _structured_error(value["text"])
+    return any(
+        _structured_error(child)
+        for key, child in value.items()
+        if str(key).lower() in {"content", "structuredcontent"}
+    )
+
+
+def _tool_errored(body: str) -> bool:
+    """Recognize explicit MCP/upstream failures without matching prose like error rate."""
+    decoded = _decoded(body)
+    return _structured_error(decoded if decoded is not None else body)
+
+
+def _semantically_empty(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.casefold() in {"none", "null", "nil", "undefined", "n/a"}:
+            return True
+        if re.match(
+            r"^no (?:results|matches|records|items) (?:were )?found\b",
+            stripped,
+            re.IGNORECASE,
+        ):
+            return True
+        decoded = _decoded(stripped)
+        return decoded is not None and _semantically_empty(decoded)
+    if isinstance(value, (list, tuple)):
+        return not value or all(_semantically_empty(child) for child in value)
+    if isinstance(value, dict):
+        if value.get("exists") is False:
+            return True
+        semantic = [
+            child for key, child in value.items()
+            if str(key).lower() in _SEMANTIC_RESULT_KEYS
+        ]
+        if semantic and all(_semantically_empty(child) for child in semantic):
+            other = [
+                child for key, child in value.items()
+                if str(key).lower()
+                not in _SEMANTIC_RESULT_KEYS | _EMPTY_METADATA_KEYS
+            ]
+            if not other or all(_semantically_empty(child) for child in other):
+                return True
+        payload = [
+            child for key, child in value.items()
+            if str(key).lower() not in {"type", "mimetype"}
+        ]
+        return not value or (bool(payload) and all(_semantically_empty(child) for child in payload))
     return False
+
+
+def _result_is_empty(body: str) -> bool:
+    decoded = _decoded(body)
+    return _semantically_empty(decoded if decoded is not None else body)
+
+
+def _secret_values() -> list[str]:
+    markers = (
+        "KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "USERNAME",
+        "EMAIL", "CLIENT_ID", "PAGE_ID",
+    )
+    values = {
+        value for name, value in os.environ.items()
+        if value and len(value) >= 4 and any(marker in name.upper() for marker in markers)
+    }
+    connection = os.getenv("MONGODB_CONNECTION_STRING", "")
+    if len(connection) >= 4:
+        values.add(connection)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact(text: str) -> str:
+    for value in _secret_values():
+        text = text.replace(value, "<redacted>")
+    return text
 
 
 def _texts(body: str) -> str:
@@ -508,6 +636,7 @@ class Result:
     status: str
     elapsed: float = 0.0
     detail: str = ""
+    tool: str = ""
 
 
 async def run_probe(call, server: str, timeout: float) -> Result:
@@ -525,12 +654,21 @@ async def run_probe(call, server: str, timeout: float) -> Result:
 
 
 async def run_smoke(call, server: str, tool: str, args: dict) -> Result:
+    if tool in _SENSITIVE_PROBE_TOOLS:
+        return Result(
+            server, "smoke", FAIL, 0.0,
+            f"refusing account-personal probe tool: {tool}", tool,
+        )
     t0 = time.monotonic()
     try:
-        await call(tool, args)
-        return Result(server, "smoke", OK, time.monotonic() - t0)
+        body = await call(tool, args)
+        if _result_is_empty(body):
+            raise ApiError(f"{tool}: empty_or_placeholder_result")
+        return Result(server, "smoke", OK, time.monotonic() - t0, tool=tool)
     except ApiError as e:
-        return Result(server, "smoke", FAIL, time.monotonic() - t0, str(e))
+        return Result(
+            server, "smoke", FAIL, time.monotonic() - t0, _redact(str(e)), tool,
+        )
 
 
 async def load_target_servers(
@@ -598,6 +736,7 @@ async def _run_checks(
     smokes: list[str],
     concurrency: int,
     timeout: float,
+    smoke_calls: dict | None = None,
 ) -> list[Result]:
     sem = asyncio.Semaphore(concurrency)
 
@@ -607,10 +746,22 @@ async def _run_checks(
 
     tasks = [guard(run_probe, call, name, timeout) for name in probes]
     tasks += [
-        guard(run_smoke, call, name, *TEST_CALLS[name])
+        guard(run_smoke, call, name, *(smoke_calls or TEST_CALLS)[name])
         for name in smokes
     ]
     return list(await asyncio.gather(*tasks))
+
+
+def fixture_smoke_calls(data_dir: str) -> dict:
+    """Select a real pinned Git path; never assume the official fixture."""
+    from mcp_completion.task_data import _load_repo_specs, TaskDataError
+    specs = _load_repo_specs(Path(data_dir) / "repos/git_submodule_info.csv")
+    if not specs:
+        raise TaskDataError("Git probe requires a nonempty pinned repository manifest")
+    calls = dict(TEST_CALLS)
+    tool, args = calls["git"]
+    calls["git"] = (tool, {**args, "repo_path": "/data/repos/" + specs[0].name})
+    return calls
 
 
 def _render_results(results: list[Result]) -> None:
@@ -625,14 +776,14 @@ def _render_results(results: list[Result]) -> None:
             if r.server in PROBES:
                 print(f"       └─ 验的是: {PROBES[r.server][1]}")
             if r.detail:
-                print(f"       └─ {r.detail}")
+                print(f"       └─ {_redact(r.detail)}")
 
     if smoke_res:
         print(f"\n{'='*78}\n连通性冒烟（无专属数据的服务，只验 API 能否调通）\n{'='*78}")
         for r in sorted(smoke_res, key=lambda x: x.server):
             print(f"{icon[r.status]} {'OK' if r.status == OK else r.status:9s} {r.server:18s} {r.elapsed:5.1f}s")
             if r.detail:
-                print(f"       └─ {r.detail}")
+                print(f"       └─ {_redact(r.detail)}")
 
     n = {s: sum(1 for r in results if r.status == s) for s in (OK, BAD, FAIL)}
     print(f"\n{'='*78}")
@@ -647,6 +798,38 @@ def _render_results(results: list[Result]) -> None:
         print("→ 💥 调用本身失败：检查 key、服务是否启动、MCP_SERVER_URL 端口。")
 
 
+def _write_results(path: Path, results: list[Result], *, mode: str) -> None:
+    """Persist a compact, secret-redacted probe report with restrictive permissions."""
+    counts = {status: sum(r.status == status for r in results) for status in (OK, BAD, FAIL)}
+    payload = {
+        "schema_version": 1,
+        "mode": mode,
+        "ok": all(result.status == OK for result in results),
+        "summary": {
+            "total": len(results),
+            "ok": counts[OK],
+            "data_bad": counts[BAD],
+            "api_fail": counts[FAIL],
+        },
+        "results": [
+            {**dataclasses.asdict(result), "detail": _redact(result.detail)}
+            for result in sorted(results, key=lambda item: item.server)
+        ],
+    }
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 async def run_legacy(
     base_url: str,
     timeout: float,
@@ -655,7 +838,7 @@ async def run_legacy(
     data_only: bool,
     smoke_only: bool,
     retries: int = 0,
-) -> None:
+) -> list[Result]:
     """Validate the legacy runtime by sending every call to shared /call-tool."""
 
     async with httpx.AsyncClient() as client:
@@ -680,6 +863,7 @@ async def run_legacy(
             timeout=timeout,
         )
     _render_results(results)
+    return results
 
 
 async def run_isolated(
@@ -691,8 +875,17 @@ async def run_isolated(
     smoke_only: bool,
     retries: int = 0,
     input_path: Path | None = None,
-) -> None:
+    *,
+    completion_owned: bool = False,
+) -> list[Result]:
     """Validate tools and data through the production task-isolated routes."""
+
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub" and not completion_owned:
+        # Hub bindings must live inside the service receiving callbacks. A CLI
+        # process cannot register its local bindings against completion's URL.
+        return await run_completion_owned_probe(
+            base_url, timeout, concurrency, only, data_only, smoke_only, retries, input_path,
+        )
 
     async with httpx.AsyncClient() as client:
         shared_servers = await load_target_servers(client, base_url, timeout)
@@ -733,6 +926,7 @@ async def run_isolated(
             smokes=smokes,
             concurrency=concurrency,
             timeout=timeout,
+            smoke_calls=fixture_smoke_calls(os.environ["MCP_TASK_DATA_DIR"]) if "git" in smokes else None,
         )
         if "slack" in probes:
             selected_input = input_path or resolve_completion_input(None)
@@ -752,6 +946,45 @@ async def run_isolated(
                     slack_result.status = FAIL
                     slack_result.detail = str(exc)
     _render_results(results)
+    return results
+
+
+async def run_completion_owned_probe(
+    base_url: str, timeout: float, concurrency: int, only: str | None,
+    data_only: bool, smoke_only: bool, retries: int, input_path: Path | None,
+) -> list[Result]:
+    port = int(os.getenv("PORT", "3000"))
+    if not 1 <= port <= 65535:
+        raise ValueError("Completion PORT must be between 1 and 65535")
+    url = f"http://127.0.0.1:{port}/v2/mcp_eval/runtime-probe"
+    payload = {"shared_url": base_url, "server": only, "timeout": timeout,
+               "concurrency": concurrency, "retries": retries,
+               "data_only": data_only, "smoke_only": smoke_only,
+               "input_path": str(input_path) if input_path else None}
+    # Include sandbox setup and every probe wave; individual calls retain their
+    # original timeout/retry budgets in the completion process.
+    request_timeout = 600 + 36 * timeout * (retries + 1) / max(1, concurrency)
+    async with httpx.AsyncClient(timeout=request_timeout, follow_redirects=False) as client:
+        response = await client.post(url, json=payload)
+        if response.status_code != 200:
+            raise ApiError(f"Completion-owned probe failed (HTTP {response.status_code}); no direct fallback")
+        body = response.json()
+    if not isinstance(body, dict) or body.get("schema_version") != 1 or not isinstance(body.get("results"), list):
+        raise ApiError("Invalid completion-owned probe response")
+    identity = body.get("runtime_identity", {})
+    for key, name in (("launch_id", "MCP_ATLAS_LAUNCH_ID"),
+                      ("transport_digest", "MCP_ATLAS_TRANSPORT_DIGEST")):
+        expected = os.getenv(name)
+        if expected and identity.get(key) != expected:
+            raise ApiError(f"Completion-owned probe identity mismatch for {key}")
+    results = [Result(**row) for row in body["results"]]
+    _render_results(results)
+    return results
+
+
+def _exit_if_unhealthy(results: list[Result]) -> None:
+    if any(result.status != OK for result in results):
+        raise SystemExit(2)
 
 
 def _parse_cli(description: str, *, default_concurrency: int):
@@ -761,7 +994,7 @@ def _parse_cli(description: str, *, default_concurrency: int):
         default=None,
         help="MCP 服务地址（否则读取 .env 的 MCP_SERVER_URL；必须显式含端口）",
     )
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -795,6 +1028,11 @@ def _parse_cli(description: str, *, default_concurrency: int):
             "MCP_COMPLETION_INPUT，未配置时使用 MCP-Atlas.csv"
         ),
     )
+    parser.add_argument(
+        "--json-output",
+        default=None,
+        help="把逐服务结果写入指定 JSON（不保存工具响应，文件权限 0600）",
+    )
     return parser, parser.parse_args()
 
 
@@ -812,7 +1050,7 @@ def cli_legacy() -> None:
     print("测试模式: V1 旧共享 runtime（所有工具直接调用共享端点）")
     if args.input:
         parser.error("--input 仅用于 test_server_v2.py")
-    asyncio.run(
+    results = asyncio.run(
         run_legacy(
             mcp_url,
             args.timeout,
@@ -823,6 +1061,9 @@ def cli_legacy() -> None:
             args.retries,
         )
     )
+    if args.json_output:
+        _write_results(Path(args.json_output), results, mode="legacy")
+    _exit_if_unhealthy(results)
 
 
 def cli_isolated() -> None:
@@ -834,14 +1075,17 @@ def cli_isolated() -> None:
         mcp_url, mcp_port = resolve_mcp_server_url(args.base_url, ENV_PATH)
     except ValueError as exc:
         parser.error(str(exc))
-    try:
-        input_path = resolve_completion_input(args.input)
-    except ValueError as exc:
-        parser.error(str(exc))
+    input_path = None
+    if not args.smoke_only or args.input:
+        try:
+            input_path = resolve_completion_input(args.input)
+        except ValueError as exc:
+            parser.error(str(exc))
     print(f"共享 MCP 服务: {mcp_url}  (端口 {mcp_port})")
     print("测试模式: V2 正式路由（云端共享，本地/下载/Mongo 使用任务容器）")
-    print(f"评测输入: {input_path}")
-    asyncio.run(
+    if input_path is not None:
+        print(f"评测输入: {input_path}")
+    results = asyncio.run(
         run_isolated(
             mcp_url,
             args.timeout,
@@ -853,3 +1097,6 @@ def cli_isolated() -> None:
             input_path,
         )
     )
+    if args.json_output:
+        _write_results(Path(args.json_output), results, mode="isolated")
+    _exit_if_unhealthy(results)

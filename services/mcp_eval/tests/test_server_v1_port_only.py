@@ -24,6 +24,10 @@ from test_server_v1 import (  # noqa: E402
 )
 from test_server_v2 import main as run_isolated_checks  # noqa: E402
 from mcp_server_probe import (  # noqa: E402
+    FAIL,
+    OK,
+    Result,
+    _exit_if_unhealthy,
     probe_slack,
     probe_slack_timestamp_alignment,
     resolve_completion_input,
@@ -205,8 +209,8 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, exc_type, exc, traceback):
                 return None
 
-            async def call_tool(self, tool, args):
-                calls.append((tool, args))
+            async def call_tool(self, tool, args, use_cache=True):
+                calls.append((tool, args, use_cache))
                 item = SimpleNamespace(
                     model_dump=lambda **kwargs: {
                         "type": "text",
@@ -238,6 +242,8 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["mongodb_count"], requested)
         self.assertEqual("mongodb_count", calls[0][0])
+        # Probes bypass the gateway cache so a cached failure cannot mask the service.
+        self.assertIs(False, calls[0][2])
         self.assertIn("DATA OK   mongodb", output.getvalue())
 
     async def test_e2b_is_called_through_v2_instead_of_policy_skipped(
@@ -256,8 +262,8 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, exc_type, exc, traceback):
                 return None
 
-            async def call_tool(self, tool, args):
-                calls.append((tool, args))
+            async def call_tool(self, tool, args, use_cache=True):
+                calls.append((tool, args, use_cache))
                 item = SimpleNamespace(
                     model_dump=lambda **kwargs: {
                         "type": "text",
@@ -289,6 +295,7 @@ class GatewayRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["e2b-server_run_code"], requested)
         self.assertEqual("e2b-server_run_code", calls[0][0])
+        self.assertIs(False, calls[0][2])
         self.assertIn("OK        e2b-server", output.getvalue())
         self.assertNotIn("POLICY SKIP", output.getvalue())
 
@@ -400,6 +407,14 @@ class SlackTimestampAlignmentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EnvLoadingTests(unittest.TestCase):
+    def test_probe_exit_status_rejects_any_failed_server(self) -> None:
+        _exit_if_unhealthy([Result("notion", "smoke", OK)])
+        with self.assertRaisesRegex(SystemExit, "2"):
+            _exit_if_unhealthy([
+                Result("notion", "smoke", OK),
+                Result("slack", "smoke", FAIL, detail="invalid_auth"),
+            ])
+
     def test_expands_port_reference_from_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             env_path = Path(raw) / ".env"

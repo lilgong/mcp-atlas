@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import sys
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,8 +16,40 @@ from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_FILE = ROOT / ".env"
 DEFAULT_RUNTIME_IMAGE = "mcp-atlas-runtime:latest"
+
+
+def secret_values(environment: dict[str, str]) -> list[str]:
+    """Return configured secrets for exact-value log redaction."""
+    markers = (
+        "KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "USERNAME",
+        "EMAIL", "CLIENT_ID", "PAGE_ID",
+    )
+    values = {
+        value for name, value in environment.items()
+        if value and len(value) >= 4 and any(marker in name.upper() for marker in markers)
+    }
+    for name in ("CONTEXT7_API_KEYS", "TWELVE_DATA_API_KEYS", "LLM_API_KEYS"):
+        raw = environment.get(name, "")
+        pool = json.loads(raw) if raw.strip().startswith("[") else raw.split(",")
+        if isinstance(pool, list):
+            values.update(k for k in pool if isinstance(k, str) and len(k) >= 4)
+    connection = environment.get("MONGODB_CONNECTION_STRING", "")
+    if len(connection) >= 4:
+        values.add(connection)
+    return sorted(values, key=len, reverse=True)
+
+
+def redact_line(line: str, secrets: list[str]) -> str:
+    for value in secrets:
+        line = line.replace(value, "<redacted>")
+    return line
+
+
+def configured_env_file() -> Path:
+    """Allow an orchestrator-owned ephemeral env file without CLI flags."""
+    configured = os.getenv("MCP_ATLAS_RUNTIME_ENV_FILE")
+    return Path(configured).expanduser().resolve() if configured else ROOT / ".env"
 
 
 def validate_shared_bind_host(host: str) -> None:
@@ -63,9 +98,10 @@ def configured_shared_hub_servers() -> str | None:
 
 
 def main() -> int:
-    if not ENV_FILE.is_file():
-        raise RuntimeError(f"missing environment file: {ENV_FILE}")
-    load_dotenv(ENV_FILE, override=False)
+    env_file = configured_env_file()
+    if not env_file.is_file():
+        raise RuntimeError(f"missing environment file: {env_file}")
+    load_dotenv(env_file, override=False)
     port = configured_shared_port()
     host = os.getenv("MCP_SHARED_HOST", "127.0.0.1")
     isolation_enabled = os.getenv("MCP_TASK_ISOLATION_ENABLED", "true").lower() not in {
@@ -75,15 +111,17 @@ def main() -> int:
     }
     if isolation_enabled:
         validate_shared_bind_host(host)
-    image = os.getenv("MCP_SHARED_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
-    usage_log_dir = (
-        Path(os.getenv("MCP_USAGE_LOG_DIR") or ROOT / "mcp_usage_log")
-        .expanduser()
-        .resolve()
-    )
-    hub_mode = os.getenv("MCP_TOOL_TRANSPORT", "direct").strip().lower() == "hub"
-    if not hub_mode:
-        usage_log_dir.mkdir(parents=True, exist_ok=True)
+    image = os.getenv("MCP_AGENT_IMAGE", DEFAULT_RUNTIME_IMAGE)
+    launch_id = (os.getenv("MCP_ATLAS_LAUNCH_ID") or uuid.uuid4().hex).strip()
+    safe_launch_id = "".join(
+        character if character.isalnum() or character in "_.-" else "-"
+        for character in launch_id
+    )[:48]
+    container_name = f"mcp-atlas-shared-{safe_launch_id}"
+    usage_log_dir = Path(
+        os.getenv("MCP_USAGE_LOG_DIR") or ROOT / "mcp_usage_log"
+    ).expanduser().resolve()
+    usage_log_dir.mkdir(parents=True, exist_ok=True)
     inspected = subprocess.run(
         [
             "docker",
@@ -109,31 +147,15 @@ def main() -> int:
         raise RuntimeError(f"{image} is not a fixture-free MCP-Atlas runtime image")
     shared_hub_servers = configured_shared_hub_servers()
     command = [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "host",
+        "docker", "run", "--rm", "--network", "host",
+        "--name", container_name,
+        "--label", f"mcp-atlas.launch-id={launch_id}",
+        "--label", "mcp-atlas.role=shared-gateway",
         "--add-host=host.docker.internal:host-gateway",
-        "--env-file",
-        str(ENV_FILE),
-        *(
-            ["--env", f"ENABLED_SERVERS={shared_hub_servers}"]
-            if shared_hub_servers
-            else []
-        ),
-        "--env",
-        "MCP_ATLAS_SHARED_RUNTIME=true",
-        *(
-            []
-            if hub_mode
-            else [
-                "--env",
-                "MCP_USAGE_LOG_DIR=/mcp-usage-log",
-                "--volume",
-                f"{usage_log_dir}:/mcp-usage-log:rw",
-            ]
-        ),
+        "--env-file", str(env_file),
+        "--env", "MCP_ATLAS_SHARED_RUNTIME=true",
+        "--env", "MCP_USAGE_LOG_DIR=/mcp-usage-log",
+        "--volume", f"{usage_log_dir}:/mcp-usage-log:rw",
         image,
         "/agent-environment/.venv/bin/python",
         "-m",
@@ -144,8 +166,61 @@ def main() -> int:
         "--port",
         str(port),
     ]
-    os.execvp(command[0], command)
-    return 0
+    if shared_hub_servers is not None:
+        image_index = command.index(image)
+        command[image_index:image_index] = [
+            "--env", f"ENABLED_SERVERS={shared_hub_servers}",
+            "--env", f"MCPHUB_SERVERS={shared_hub_servers}",
+        ]
+    # Some third-party MCP SDKs dump request headers on failures.  Proxy the
+    # container output so credential values never reach terminal/runtime logs.
+    secrets = secret_values(dict(os.environ))
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        # The orchestrator signals this wrapper's process group.  Keep the
+        # Docker client in its own group so the wrapper can stop the container
+        # explicitly instead of merely killing the client and orphaning it.
+        start_new_session=True,
+    )
+
+    def stop_container(*, remove: bool = False) -> None:
+        command = ["docker", "rm", "-f", container_name] if remove else [
+            "docker", "stop", "--time", "10", container_name,
+        ]
+        try:
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # RuntimeManager performs a second launch-label cleanup.  Never
+            # let a cleanup-tool failure hide the gateway's real exit status.
+            pass
+
+    def forward_signal(signum, _frame):
+        if process.poll() is None:
+            stop_container()
+
+    signal.signal(signal.SIGTERM, forward_signal)
+    signal.signal(signal.SIGINT, forward_signal)
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            sys.stdout.write(redact_line(line, secrets))
+            sys.stdout.flush()
+        return process.wait()
+    finally:
+        # --rm normally removes the container.  This final targeted cleanup is
+        # deliberately redundant: losing the docker client must never leave a
+        # host-network container holding the gateway port.
+        stop_container(remove=True)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     @property
     def OXYLABS_SCRAPER_URL(self) -> str:
         base_url = os.getenv("MCP_TOOL_BASE_URL") or "https://yibuapi.com"
+        explicit = os.getenv("OXYLABS_SCRAPER_URL")
+        if explicit:
+            return explicit.replace(
+                "${MCP_TOOL_BASE_URL}", base_url.rstrip("/"),
+            ).rstrip("/")
         return f"{base_url.rstrip('/')}/oxylabs/v1/queries"
 
 

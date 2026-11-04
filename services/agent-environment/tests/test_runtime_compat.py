@@ -20,6 +20,25 @@ ROOT = Path(__file__).resolve().parents[3]
 AGENT_ROOT = ROOT / "services" / "agent-environment"
 
 
+def test_osm_uses_unscoped_runtime_setting_with_legacy_fallback():
+    template = (ROOT / "env.template").read_text(encoding="utf-8")
+    assert "\nOSM_OVERPASS_URLS=" in template
+    assert "\nSYN_OSM_OVERPASS_URLS=" not in template
+    source = (
+        AGENT_ROOT / "src" / "agent_environment" / "osm_mcp_compat.py"
+    ).read_text(encoding="utf-8")
+    assert source.index('os.getenv("OSM_OVERPASS_URLS")') < source.index(
+        'os.getenv("SYN_OSM_OVERPASS_URLS")'
+    )
+    servers = json.loads(
+        (AGENT_ROOT / "src" / "agent_environment" / "mcp_server_template.json")
+        .read_text(encoding="utf-8")
+    )["mcpServers"]
+    assert servers["osm-mcp-server"]["env"]["OSM_OVERPASS_URLS"] == (
+        "${OSM_OVERPASS_URLS}"
+    )
+
+
 def test_oxylabs_universal_payload_gets_required_source():
     original = {"url": "https://example.com"}
     assert normalize_scraper_payload(original) == {
@@ -501,6 +520,8 @@ def test_weather_data_keeps_official_tools_and_uses_optional_yibu_transport():
     text = preload.read_text(encoding="utf-8")
     assert "httpx.AsyncClient.get" in text
     assert 'params.pop("key", None)' in text
+    assert "_usage_key()" in text
+    assert "is_weather_request" in text
 
 
 def test_special_cased_servers_receive_every_env_var_their_gating_reads():
