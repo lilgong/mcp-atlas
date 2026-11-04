@@ -1,13 +1,40 @@
 import pytest
 
 from mcp_completion.account_guard import (
+    _FATAL_ACCOUNT_MARKERS,
     FatalAccountError,
     credential_envs_for_mcp_server,
     describe_fatal_account_error,
     is_fatal_account_error,
     is_fatal_mcp_account_error,
     is_fatal_tool_result,
+    is_stopped_model_service,
 )
+
+
+@pytest.mark.parametrize('status,body,expected', [
+    (503, {'error': {'message': 'Service model-123 is unavailable with status: STOPPED'}}, True),
+    (503, {'error': {'status': 'STOPPED', 'message': 'deployment is stopped'}}, True),
+    (503, {'error': {'message': 'deployment is stopped', 'status': 'STOPPED'}}, True),
+    (503, {'error': {'message': 'deployment is stopped', 'status': 'stopped'}}, True),
+    (503, {'error': {'message': 'service is starting', 'status': 'STARTING'}}, False),
+    (503, {'error': {'message': 'temporary failure'}, 'request': {'status': 'STOPPED', 'message': 'deployment is stopped'}}, False),
+    (503, {'error': '{"message": "deployment is stopped", "status": "STOPPED"}'}, True),
+    (503, {'error': {'message': 'Service unavailable'}}, False),
+    (504, {'error': {'message': 'Service model-123 is unavailable with status: STOPPED'}}, False),
+    (503, {'request': {'messages': [{'content': 'Service model-123 is unavailable with status: STOPPED'}]},
+           'error': {'message': 'temporary failure'}}, False),
+])
+def test_only_explicit_model_api_503_stopped_is_fatal(status, body, expected):
+    error = RuntimeError('provider failure')
+    error.status_code = status
+    error.body = body
+    assert is_stopped_model_service(error) is expected
+
+
+def test_plain_text_or_tool_content_cannot_trigger_model_service_breaker():
+    assert not is_stopped_model_service('HTTP 503 Service model-123 is unavailable with status: STOPPED')
+    assert not is_stopped_model_service({'error': 'HTTP 503 Service model-123 is unavailable with status: STOPPED'})
 
 
 def test_invalid_model_token_stops_the_run():
@@ -292,3 +319,41 @@ def test_fatal_account_description_names_source_and_env_without_key_value():
     assert "source=mcp" in description
     assert "name=brave-search" in description
     assert "credential_env=BRAVE_API_KEY" in description
+
+
+@pytest.mark.parametrize("window", ["Units per minute per user", "Requests per second"])
+def test_time_window_quota_does_not_stop_account(window):
+    from mcp_completion.account_guard import is_time_based_quota_error
+    text = f"Error fetching emails: Quota exceeded for quota metric 'Total Query Cost' and limit '{window}' of service 'gmail.googleapis.com'"
+    result = {"isError": True, "content": [{"type": "text", "text": text}]}
+    assert is_time_based_quota_error(text)
+    assert not is_fatal_account_error(text)
+    assert not is_fatal_mcp_account_error("google-workspace", result)
+
+
+@pytest.mark.parametrize("text", ["Quota exceeded: monthly quota", "Quota exceeded: daily credits exhausted", "Quota exceeded per minute; invalid credentials", "Quota exceeded per minute; invalid token"])
+def test_permanent_quota_or_credentials_remain_fatal(text):
+    assert is_fatal_account_error(text)
+
+
+def test_gmail_minute_quota_is_a_rate_limited_tool_result():
+    from mcp_completion.mcp_client.isolated_client import _is_rate_limited_tool_result
+    result = {"isError": True, "content": [{"type": "text", "text": "Error fetching emails: Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user' of service 'gmail.googleapis.com'"}]}
+    assert _is_rate_limited_tool_result(result)
+    assert not is_fatal_mcp_account_error("google-workspace", result)
+    result["isError"] = False
+    result["content"][0]["text"] = "An email discussing quota exceeded per minute"
+    assert not _is_rate_limited_tool_result(result)
+
+
+@pytest.mark.parametrize("marker", [
+    marker for marker in _FATAL_ACCOUNT_MARKERS
+    if marker not in {"quota exceeded", "quota has been exceeded", "exceeded quota"}
+])
+def test_all_permanent_markers_override_time_window_quota(marker):
+    from mcp_completion.account_guard import is_time_based_quota_error
+    text = f"Error fetching emails: Quota exceeded: Units per minute per user; {marker}"
+    result = {"isError": True, "content": [{"type": "text", "text": text}]}
+    assert not is_time_based_quota_error(text)
+    assert is_fatal_account_error(text)
+    assert is_fatal_mcp_account_error("google-workspace", result)

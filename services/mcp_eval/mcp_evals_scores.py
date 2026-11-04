@@ -46,6 +46,7 @@ from mcp_completion.account_guard import (
     FatalAccountError,
     describe_fatal_account_error,
     is_fatal_account_error,
+    is_stopped_model_service,
 )
 from mcp_completion.config import normalize_openai_base_url
 from mcp_completion.streaming import (
@@ -639,9 +640,10 @@ class AsyncLiteLLMClient(AsyncLLMClient):
                 f"model={self.config.evaluator_model} "
                 f"error_type={type(e).__name__} error={e}"
             )
-            if is_fatal_account_error(e):
+            stopped = is_stopped_model_service(e)
+            if stopped or is_fatal_account_error(e):
                 raise FatalAccountError(
-                    "evaluator credential is invalid or out of funds",
+                    "evaluator model service is STOPPED" if stopped else "evaluator credential is invalid or out of funds",
                     source_kind="evaluator_model",
                     source_name=self.config.evaluator_model,
                     credential_envs=("EVAL_LLM_API_KEY",),
