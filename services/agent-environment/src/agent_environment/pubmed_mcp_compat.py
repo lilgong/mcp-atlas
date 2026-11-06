@@ -9,6 +9,9 @@ E-utilities traffic.
 from __future__ import annotations
 
 import base64
+import calendar
+from datetime import date
+import json
 import os
 import re
 import threading
@@ -222,6 +225,37 @@ def _text(node: ET.Element | None, default: str = "") -> str:
     return re.sub(r"\s+", " ", value) if value else default
 
 
+def _publication_date(node: ET.Element | None) -> tuple[str, str]:
+    """Preserve source precision; never manufacture a month/day or flatten a range."""
+    if node is None:
+        return "No publication date available", "missing"
+    medline = _text(node.find("MedlineDate"))
+    if medline:
+        return medline, "year" if re.fullmatch(r"\d{4}", medline) else "unstructured"
+    parts = {name: _text(node.find(name)) for name in ("Year", "Month", "Day", "Season")}
+    year, month, day = (parts[k] for k in ("Year", "Month", "Day"))
+    raw = " ".join(parts[k] for k in ("Year", "Month", "Day", "Season") if parts[k])
+    if not re.fullmatch(r"\d{4}", year):
+        return raw or "No publication date available", "partial" if raw else "missing"
+    if not month:
+        if day or parts['Season']:
+            return raw, "partial"
+        return year, "year"
+    names = {name.lower(): i for i in range(1, 13)
+             for name in (calendar.month_name[i], calendar.month_abbr[i])}
+    names['sept'] = 9
+    number = int(month) if month.isdigit() else names.get(month.lower())
+    if number is None or not 1 <= number <= 12 or parts['Season']:
+        return raw, "partial"
+    if not day:
+        return f"{year}-{number:02d}", "month"
+    try:
+        actual = date(int(year), number, int(day))
+    except ValueError:
+        return raw, "partial"
+    return actual.isoformat(), "day"
+
+
 def _metadata(article: ET.Element) -> dict[str, str] | None:
     citation = article.find(".//MedlineCitation")
     if citation is None:
@@ -238,24 +272,35 @@ def _metadata(article: ET.Element) -> dict[str, str] | None:
         if name:
             authors.append(name)
     pub_date = article_node.find(".//Journal/JournalIssue/PubDate")
-    year = _text(pub_date.find("Year") if pub_date is not None else None)
-    if not year and pub_date is not None:
-        match = re.search(r"\b(?:19|20)\d{2}\b", _text(pub_date))
-        year = match.group(0) if match else ""
+    published, precision = _publication_date(pub_date)
     abstract_parts = [
         _text(item) for item in article_node.findall(".//Abstract/AbstractText")
     ]
-    return {
+    result = {
         "PMID": pmid,
         "Title": _text(article_node.find("ArticleTitle"), "No title available"),
         "Authors": ", ".join(authors) if authors else "No authors available",
         "Journal": _text(
             article_node.find(".//Journal/Title"), "No journal available"
         ),
-        "Publication Date": year or "No publication date available",
+        "Publication Date": published,
+        "Publication Date Precision": precision,
+        "Publication Date Source": "Journal/JournalIssue/PubDate",
+        "Publication Date Raw": json.dumps(
+            {child.tag: _text(child) for child in pub_date} if pub_date is not None else {},
+            ensure_ascii=False,
+        ),
         "Abstract": " ".join(filter(None, abstract_parts))
         or "No abstract available",
     }
+    # Electronic/other article dates are separate events, not substitutes for
+    # the journal issue date or proof of the search engine's date semantics.
+    dates = [{"type": item.get("DateType", "unspecified"),
+              "date": _publication_date(item)[0], "precision": _publication_date(item)[1]}
+             for item in article_node.findall("ArticleDate")]
+    if dates:
+        result["Article Dates"] = json.dumps(dates, ensure_ascii=False)
+    return result
 
 
 def _search_ids(term: str, num_results: int) -> list[str]:
