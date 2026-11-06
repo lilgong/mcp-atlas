@@ -229,7 +229,8 @@ def test_pubmed_search_batches_all_metadata_into_one_efetch(monkeypatch):
 
     assert [row["PMID"] for row in rows] == ["1", "2"]
     assert rows[0]["Title"] == "First paper"
-    assert rows[1]["Publication Date"] == "2024"
+    assert rows[1]["Publication Date"] == "2024 Winter"
+    assert rows[1]["Publication Date Precision"] == "unstructured"
     assert calls == [
         ("esearch", {"db": "pubmed", "term": "diabetes", "retmax": 10}),
         ("efetch", {"db": "pubmed", "id": "1,2"}),
