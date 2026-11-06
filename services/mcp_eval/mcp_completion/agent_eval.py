@@ -336,7 +336,11 @@ async def handle_run_mcp_eval(
             for output in entry.outputs:
                 yield AgentOutput(output["type"], output["data"])
             messages = entry.initial_messages
-            calls = min(body.max_tool_calls, 6 if body.author_session_action == "resume" else 16)
+            # The pipeline freezes the initial budget per production profile:
+            # ordinary authors request 16; Notion aggregation requests 20.
+            # Keep a server ceiling, but do not silently clamp both to 16.
+            # Review continuations retain the existing six-call allowance.
+            calls = min(body.max_tool_calls, 6 if body.author_session_action == "resume" else 20)
             async for output in run_synthesis_eval(
                 entry.client, body.model, messages, body.max_turns, calls,
                 entry.control, extra_body=body.extra_body,

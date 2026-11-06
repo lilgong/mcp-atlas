@@ -35,6 +35,28 @@ class Client(FakeClient):
 
 
 class AuthorSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_requested_initial_budget_reaches_loop_and_resume_stays_bounded(self):
+        for requested, expected in [(4, 4), (16, 16), (20, 20), (100, 20)]:
+            with self.subTest(requested=requested):
+                registry = AuthorSessions()
+                seen = []
+
+                async def loop(client, model, messages, turns, calls, control, **kwargs):
+                    seen.append(calls)
+                    kwargs['session_state']['conversation'] = list(messages)
+                    if False:
+                        yield None
+
+                with patch.object(author_sessions, "AUTHOR_SESSIONS", registry), \
+                     patch.object(agent_eval, "IsolatedMCPClient", return_value=Client()), \
+                     patch.object(synthesis_loop, "run_synthesis_eval", side_effect=loop):
+                    _ = [x async for x in agent_eval.handle_run_mcp_eval(
+                        body(maxToolCalls=requested))]
+                    _ = [x async for x in agent_eval.handle_run_mcp_eval(
+                        body("resume", maxToolCalls=100))]
+                self.assertEqual(seen, [expected, 6])
+                await registry.close("a" * 64)
+
     async def test_conversation_tools_labels_and_per_request_usage_survive_review(self):
         registry = AuthorSessions()
         client = Client()
