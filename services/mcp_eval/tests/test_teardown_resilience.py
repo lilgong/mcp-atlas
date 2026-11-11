@@ -649,6 +649,8 @@ class ServiceLifespanCleanupTests(unittest.IsolatedAsyncioTestCase):
             completion_main, "reap_owned_task_sandboxes", cleanup
         ), patch.object(
             completion_main, "run_orphan_sweeper", fake_sweeper
+        ), patch.object(completion_main.config, "HOST", "127.0.0.1"), patch.object(
+            completion_main.config, "MCP_SERVER_URL", "http://localhost:1984"
         ), patch.object(completion_main, "write_runtime_event"):
             async with completion_main.lifespan(None):
                 await sweeper_started.wait()
@@ -662,6 +664,8 @@ class ServiceLifespanCleanupTests(unittest.IsolatedAsyncioTestCase):
             "os.environ", {"MCP_TASK_ISOLATION_ENABLED": "false"}, clear=False
         ), patch.object(
             completion_main, "reap_owned_task_sandboxes", cleanup
+        ), patch.object(completion_main.config, "HOST", "127.0.0.1"), patch.object(
+            completion_main.config, "MCP_SERVER_URL", "http://localhost:1984"
         ), patch.object(completion_main, "write_runtime_event"):
             async with completion_main.lifespan(None):
                 pass
