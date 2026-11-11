@@ -87,8 +87,40 @@ def install_daily_credit_patch() -> None:
     httpx.Response.raise_for_status = raise_for_status
 
 
+def install_market_state_patch() -> None:
+    """Keep the validated market-state JSON in text, without an invalid list envelope.
+
+    The pinned tool returns a RootModel[list]. FastMCP validates that model,
+    but then puts its dumped list in structuredContent, which only accepts
+    objects. An explicit text result avoids that incompatible envelope while
+    preserving the original tool schema, model validation and JSON text.
+    """
+    from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+    from mcp.types import CallToolResult
+    from mcp_server_twelve_data.response_models import GetMarketState200Response
+
+    original_convert = FuncMetadata.convert_result
+    if getattr(original_convert, "_twelvedata_market_state_patch", False):
+        return
+
+    def convert_result(metadata: Any, result: Any) -> Any:
+        converted = original_convert(metadata, result)
+        if (
+            metadata.output_model is GetMarketState200Response
+            and isinstance(converted, tuple)
+            and len(converted) == 2
+            and isinstance(converted[1], list)
+        ):
+            return CallToolResult(content=converted[0])
+        return converted
+
+    convert_result._twelvedata_market_state_patch = True
+    FuncMetadata.convert_result = convert_result
+
+
 def main() -> None:
     install_daily_credit_patch()
+    install_market_state_patch()
     from mcp_server_twelve_data import main as upstream_main
 
     upstream_main()

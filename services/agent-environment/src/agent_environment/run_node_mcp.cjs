@@ -64,6 +64,9 @@ async function main() {
       resolve(NODE_MODULES, "metmuseum-mcp"),
     );
   }
+  if (parseSource(source).name === "@e2b/mcp-server") {
+    await require("./e2b_compat.cjs").installE2bCompatibility(resolve(NODE_MODULES, "@e2b/mcp-server"));
+  }
   process.argv = [process.argv[0], entrypoint, ...serverArgs];
   if (parseSource(source).name === "@modelcontextprotocol/server-google-maps") {
     await require("./google_maps_compat.cjs").runGoogleMaps(entrypoint);
