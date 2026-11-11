@@ -19,10 +19,41 @@ from prepare_slack_import import (
     repair_year_arithmetic,
     shift_bound_dates,
     trajectory_uses_slack,
+    month_safe_shift_days,
 )
 
 
 class PrepareSlackImportTests(unittest.TestCase):
+    def test_month_boundary_keeps_each_original_month_unambiguous(self):
+        dates = {dt.date(2025, 12, day) for day in range(1, 11)}
+        # Preferred dates Oct 30--Nov 8 would split the original June dates.
+        shift = month_safe_shift_days(dates, legacy=161, preferred_shift=333)
+        self.assertEqual(shift, 327)
+        self.assertEqual(month_safe_shift_days(dates, 161, 259), 259)
+        grouped = {}
+        for source in dates:
+            original = source - dt.timedelta(days=161)
+            target = source + dt.timedelta(days=shift)
+            grouped.setdefault((original.year, original.month), set()).add(
+                (target.year, target.month)
+            )
+        self.assertTrue(all(len(values) == 1 for values in grouped.values()))
+
+    def test_real_baseline_month_boundary_updates_prompts_and_claims(self):
+        origin = Path(__file__).resolve().parents[1] / "MCP-Atlas-origin.csv"
+        source = Path(__file__).resolve().parents[3] / "data_exports/slack_mcp_eval_export.zip"
+        messages = message_files(read_export(source))
+        dates = {dt.datetime.fromtimestamp(float(m['ts']), dt.timezone.utc).date()
+                 for values in messages.values() for m in values if m.get('ts')}
+        shift = month_safe_shift_days(dates, 161, 333)
+        with tempfile.TemporaryDirectory() as raw:
+            changes = fix_claims(origin, Path(raw) / "derived.csv", messages, 161, shift, True)
+        self.assertEqual(sum(field == 'PROMPT' for _, field, _, _ in changes), 2)
+        self.assertEqual(sum(field == 'GTFA_CLAIMS' for _, field, _, _ in changes), 3)
+        changed = [new for task, _, _, new in changes if task == '689cd6f8522029b7ad7b1fe0']
+        self.assertEqual(len(changed), 2)
+        self.assertTrue(all('october 2026' in text.lower() for text in changed))
+
     def test_reviewed_marketing_claim_survives_derivation(self):
         import ast
         from decimal import Decimal

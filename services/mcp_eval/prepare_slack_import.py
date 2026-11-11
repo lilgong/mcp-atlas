@@ -33,7 +33,7 @@ MCP-Atlas-origin.csv 保存已审核的答案与工具目录修正；脚本运�
 Usage:
     uv run prepare_slack_import.py                 # dry-run：产出 zip，只打印 CSV 会怎么改
     uv run prepare_slack_import.py --fix-claims    # 同时从已审核基准派生 MCP-Atlas.csv
-    uv run prepare_slack_import.py --days-ago 3    # 让最新消息落到 3 天前（默认 3）
+    uv run prepare_slack_import.py --days-ago 3    # 最新消息至少 3 天前，必要时整批提前以保持月份可对齐
 """
 
 from __future__ import annotations
@@ -344,6 +344,28 @@ def shift_bound_dates(
     return value, year_changes
 
 
+def month_safe_shift_days(
+    msg_dates: set[dt.date], legacy: int, preferred_shift: int,
+) -> int:
+    """Keep each original Slack month within one target month.
+
+    Move the batch earlier when the requested end date would split a month.
+    All messages retain the same whole-day offset and ordering. This makes
+    month-only task dates safe to rewrite without inventing a date or range.
+    """
+    for shift in range(preferred_shift, preferred_shift - 62, -1):
+        targets: dict[tuple[int, int], set[tuple[int, int]]] = {}
+        for source in msg_dates:
+            original = source - dt.timedelta(days=legacy)
+            target = source + dt.timedelta(days=shift)
+            targets.setdefault((original.year, original.month), set()).add(
+                (target.year, target.month)
+            )
+        if all(len(months) == 1 for months in targets.values()):
+            return shift
+    raise ValueError("Cannot keep Slack month conditions aligned; check the source export and requested date range")
+
+
 def repair_year_arithmetic(
     text: str, year_changes: set[tuple[int, int]]
 ) -> str:
@@ -433,7 +455,7 @@ def main() -> int:
         "--days-ago",
         type=int,
         default=3,
-        help="让最新一条消息落到几天前（默认 3，尽量吃满 90 天窗口）",
+        help="让最新消息至少落到几天前（默认 3）；必要时整批提前，避免月份条件跨月",
     )
     ap.add_argument(
         "--fix-claims",
@@ -476,6 +498,11 @@ def main() -> int:
     today = dt.datetime.now(UTC)
     target = today - dt.timedelta(days=a.days_ago)
     shift_days = (target.date() - newest.date()).days  # 整天 → 时分秒/微秒不变
+    preferred_shift = shift_days
+    legacy = derive_legacy_offset(a.origin, msgs) if a.origin.exists() else None
+    if legacy is not None:
+        msg_dates = {dt.datetime.fromtimestamp(timestamp, UTC).date() for timestamp in ts}
+        shift_days = month_safe_shift_days(msg_dates, legacy, shift_days)
     secs = shift_days * DAY
 
     print("=" * 74)
@@ -485,6 +512,8 @@ def main() -> int:
         f"原始范围    : {oldest.date()} ~ {newest.date()}  (最新距今 {(today - newest).days} 天)"
     )
     print(f"平移        : +{shift_days} 天")
+    if shift_days != preferred_shift:
+        print(f"月份对齐    : 整批额外提前 {preferred_shift - shift_days} 天，避免原月份跨越两个目标月份")
     print(
         f"平移后范围  : {(oldest + dt.timedelta(days=shift_days)).date()} ~ "
         f"{(newest + dt.timedelta(days=shift_days)).date()}"
@@ -501,9 +530,6 @@ def main() -> int:
             f"\n   它是日期平移的唯一基准（每次都从它派生，保证幂等）。"
         )
         legacy = None
-    else:
-        legacy = derive_legacy_offset(a.origin, msgs)
-
     if legacy is not None:
         print(
             f"\n官方那次平移量: +{legacy} 天（微秒指纹把原版 claim 与导出消息对上得到，非写死）"

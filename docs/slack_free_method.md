@@ -88,7 +88,7 @@ uv run prepare_slack_import.py --fix-claims
 | 参数 | 说明 |
 |---|---|
 | `--fix-claims` | 同步修正题面、GT claims 和年份算术。不加则只 dry-run 打印会改什么，不写入 |
-| `--days-ago N` | 让最新消息落到 N 天前（默认 3） |
+| `--days-ago N` | 最新消息至少落到 N 天前（默认 3）；必要时整批提前，避免同一原月份跨越两个目标月份 |
 | `--src` / `--out` / `--csv` | 覆盖默认路径 |
 
 ### 脚本只读输入，每次全新派生（幂等）
@@ -118,8 +118,11 @@ Git 中的 `MCP-Atlas-origin.csv` 是已审核的基准。固定答案和工具�
   `TASK`、`TRAJECTORY` 和 `ENABLED_TOOLS` 均保持不变。
 - 免费 Slack 运行时在 `.env` 设置
   `MCP_COMPLETION_INPUT=MCP-Atlas.csv`。
-- 使用基准日期运行时设置 `MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv`。
-  此文件已含审核修正，不应声称与未修改的上游原版字节一致。
+- 不启用 Slack，或已另行确认消息日期与基准完全一致时，才设置
+  `MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv`。此文件已含审核修正，不是未经修改的上游原版。
+  付费 Slack 也需要对齐官方导出与基准之间的 161 天历史偏移。
+- 已有配套导入和 CSV、只续跑测评时，不需要重跑脚本。重新生成 CSV 后必须
+  同时导入新 zip，不能把新日期 CSV 与上一轮 Slack 导入混用。
 - 跨机器比较免费 Slack 结果时，两台机器要在同一天用相同 `--days-ago`
   参数生成，并记录对齐版 SHA256。
 
@@ -357,6 +360,9 @@ uv run test_server_v2.py --data-only --base-url http://localhost:1984
 ---
 
 ## 6. 切回未做本地日期平移的基准
+
+仅适用于不启用 Slack，或已核对消息日期与基准完全一致的部署。
+直接导入官方 zip，即使是付费 Slack，也不满足这个日期一致条件。
 
 ```bash
 # .env
