@@ -155,7 +155,7 @@ RESULT_COLUMNS = (
 # Bump this whenever the judge prompt, output contract, or score aggregation
 # semantics change.  Resume is safe only when both the judged input and this
 # policy identity are unchanged.
-SCORING_POLICY_VERSION = "coverage-judge-v3-consistency"
+SCORING_POLICY_VERSION = "coverage-judge-v4-context-isolation"
 SCORING_FINGERPRINT_COLUMN = "scoring_fingerprint"
 SCORING_MODEL_COLUMN = "scoring_evaluator_model"
 SCORING_POLICY_COLUMN = "scoring_policy_version"
@@ -695,7 +695,7 @@ class CoverageEvaluator:
                 conversions.append(f"{value} -> {datetime.fromtimestamp(float(value), timezone.utc).isoformat()}")
             except (ValueError, OverflowError, OSError):
                 continue
-        computed_context = '\n'.join(conversions) or 'No explicitly labelled Unix timestamp found.'
+        computed_context = '\n'.join(conversions) or 'No Unix conversion was computed. This says nothing about ISO timestamps or dates in the answer.'
         criteria = getattr(self, "claim_criteria_override", None) or """SCORING CRITERIA:
 - fulfilled: Claim is completely and accurately addressed. The response covers all key details.
 - partially_fulfilled: Claim is partially addressed. The response covers some but not all key details.
@@ -742,7 +742,13 @@ CLAIM TO EVALUATE:
 {claim}
 MODEL RESPONSE TO ANALYZE:
 {response}
-CODE-COMPUTED UTC CONVERSIONS (derived context, not a new source):
+END MODEL RESPONSE TO ANALYZE
+CODE-COMPUTED UTC CONVERSIONS (evaluator helper, NOT model response, NOT a new source):
+Never attribute this helper text to the model. Absence of a Unix conversion does not
+mean the answer lacks a timestamp. ISO dates plus a stated common UTC time may
+express the same timestamps without repeating a full ISO string for every row.
+Equivalent natural-language statements of actual start dates need not repeat the
+literal registry field name ACTUAL. Preserve necessary implicit answer obligations.
 {computed_context}
 INSTRUCTIONS:
 {instructions}

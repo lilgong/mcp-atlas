@@ -21,4 +21,9 @@ def test_response_contradictions_and_exact_dates_are_not_approximate_coverage():
     assert '1787762784.732289 -> 2026-08-26T16:46:24' in converted
     version = next(n.value.value for n in tree.body if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == 'SCORING_POLICY_VERSION' for t in n.targets))
-    assert version == 'coverage-judge-v3-consistency'
+    assert version == 'coverage-judge-v4-context-isolation'
+
+    assert 'NOT model response' in prompt
+    assert 'Never attribute this helper text to the model' in prompt
+    assert 'No explicitly labelled Unix timestamp found.' not in prompt
+    assert 'ISO dates plus a stated common UTC time' in prompt
