@@ -5,17 +5,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pubmed-relay
-Group=pubmed-relay
-EnvironmentFile=/etc/pubmed-relay.env
-ExecStart=/usr/bin/python3 /opt/pubmed-relay/pubmed_relay_server.py
+User=mcp-relay
+Group=mcp-relay
+WorkingDirectory=/opt/mcp-relay
+Environment=MCP_RELAY_USAGE_LOG=/var/log/mcp-relay/usage.jsonl
+EnvironmentFile=/etc/mcp-relay.env
+LogsDirectory=mcp-relay
+ExecStart=/usr/bin/python3 /opt/mcp-relay/egress_relay.py
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/pubmed-relay
+ReadWritePaths=/var/log/mcp-relay
 
 [Install]
 WantedBy=multi-user.target
