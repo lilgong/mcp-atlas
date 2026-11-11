@@ -9,6 +9,7 @@ E-utilities traffic.
 from __future__ import annotations
 
 import base64
+import math
 import os
 import re
 import threading
@@ -66,6 +67,9 @@ def _request_via_relay(
         raise PubMedUpstreamError(
             "MCP_RELAY_URL is set but MCP_RELAY_TOKEN is empty"
         )
+    if not math.isfinite(RELAY_TIMEOUT_SECONDS) or RELAY_TIMEOUT_SECONDS <= 0:
+        raise PubMedUpstreamError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
+    budget = max(RELAY_TIMEOUT_SECONDS * 0.9, RELAY_TIMEOUT_SECONDS - 5.0)
     try:
         relay_response = _SESSION.post(
             f"{RELAY_URL}/v1/fetch",
@@ -74,6 +78,7 @@ def _request_via_relay(
                 "url": url,
                 "params": params,
                 "allow_redirects": allow_redirects,
+                "timeout_seconds": budget,
             },
             timeout=RELAY_TIMEOUT_SECONDS,
         )

@@ -83,12 +83,14 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert shared["osm-mcp-server"]["env"] == {
         "MCP_RELAY_URL": "${MCP_RELAY_URL}",
         "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
         "OSM_OVERPASS_URLS": "${OSM_OVERPASS_URLS}",
     }
     assert shared["arxiv"]["args"][-1].endswith("arxiv_mcp_compat.py")
     assert shared["arxiv"]["env"] == {
         "MCP_RELAY_URL": "${MCP_RELAY_URL}",
         "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
     }
     assert shared["met-museum"]["args"] == [
         "/agent-environment/src/agent_environment/run_node_mcp.cjs",
@@ -114,6 +116,7 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
         "NCBI_API_KEY": "${NCBI_API_KEY}",
         "NCBI_EMAIL": "${NCBI_EMAIL}",
         "NCBI_TOOL": "${NCBI_TOOL}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
     }
     assert shared["twelvedata"]["args"] == [
         "run",
@@ -259,6 +262,10 @@ def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
     assert response.content == b"<ok/>"
     assert calls[0][0].endswith("/v1/fetch")
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["timeout"] == pubmed.RELAY_TIMEOUT_SECONDS
+    assert calls[0][1]["json"]["timeout_seconds"] == max(
+        pubmed.RELAY_TIMEOUT_SECONDS * 0.9, pubmed.RELAY_TIMEOUT_SECONDS - 5.0
+    )
 
 
 def test_pubmed_relay_preserves_ipwo_auth_failure(monkeypatch):
@@ -440,6 +447,7 @@ def test_python_mcp_servers_pin_their_sdk():
         "env": {
             "MCP_RELAY_URL": "${MCP_RELAY_URL}",
             "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+            "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
         },
     }
     installer = (

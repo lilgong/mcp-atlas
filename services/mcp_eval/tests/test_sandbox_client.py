@@ -33,10 +33,9 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             (1, 3.0, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["arxiv"],
         )
-        self.assertEqual(
-            (1, 15.0, 60.0, 240.0),
-            isolated_client.SERVER_CALL_POLICIES["e2b-server"],
-        )
+        # Creation is paced inside the MCP, without serializing whole executions.
+        self.assertNotIn("e2b-server", isolated_client.SERVER_CALL_POLICIES)
+        self.assertNotIn("e2b-server", isolated_client._SHARED_SERVER_CALL_GATES)
         self.assertEqual(
             (1, 1.2, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["pubmed"],
@@ -52,7 +51,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ddg-search", isolated_client.SERVER_CALL_POLICIES)
         self.assertEqual(
             {
-                "arxiv", "brave-search", "e2b-server", "osm-mcp-server",
+                "arxiv", "brave-search", "osm-mcp-server",
                 "twelvedata", "wikipedia",
             },
             set(isolated_client._SHARED_SERVER_CALL_GATES),
@@ -204,6 +203,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
 
         test_gate = isolated_client.ServerCallGate(1, 0.02)
         with (
+            patch("mcp_completion.mcp_client.isolated_client.hub_manages_policy", return_value=False),
             patch.dict(
                 "os.environ",
                 {"MCP_RELAY_URL": "", "MCP_RELAY_TOKEN": ""},

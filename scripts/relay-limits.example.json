@@ -1,0 +1,28 @@
+{
+  "ncbi": {
+    "minIntervalMs": 334
+  },
+  "ncbi-key": {
+    "minIntervalMs": 100
+  },
+  "ncbi-pmc": {
+    "minIntervalMs": 1000
+  },
+  "wikipedia": {
+    "minIntervalMs": 300,
+    "concurrency": 1
+  },
+  "arxiv": {
+    "minIntervalMs": 0
+  },
+  "osm-nominatim": {
+    "minIntervalMs": 1000,
+    "concurrency": 1
+  },
+  "osm-overpass": {
+    "minIntervalMs": 0
+  },
+  "osm-routing": {
+    "minIntervalMs": 1000
+  }
+}
