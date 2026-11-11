@@ -81,6 +81,7 @@ function installRelay(instance, transport, env = process.env) {
 
 async function main() {
   const source = '@geobio/mcp-open-library@0.1.6';
+  if (process.argv[2] && process.argv[2] !== source) throw new Error('Unsupported Open Library MCP version');
   const { resolveEntrypoint } = require('./run_node_mcp.cjs');
   const entry = resolveEntrypoint(source, 'build/index.js');
   const packageFile = require.resolve('axios/package.json', { paths: [dirname(entry)] });

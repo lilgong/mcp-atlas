@@ -35,6 +35,7 @@ htmlcov/
 
 # Locally generated/backup MCP configs are not runtime sources. The entrypoint
 # renders mcp_server_config.json from the tracked template inside each container.
+src/agent_environment/mcp_server_config.json
 src/agent_environment/mcp_server_config_docker.json
 src/agent_environment/mcp_server_template_backup.json
 

@@ -271,7 +271,8 @@
     "open-library": {
       "command": "node",
       "args": [
-        "/agent-environment/src/agent_environment/open_library_compat.cjs"
+        "/agent-environment/src/agent_environment/open_library_compat.cjs",
+        "@geobio/mcp-open-library@0.1.6"
       ],
       "env": {
         "MCP_RELAY_URL": "${MCP_RELAY_URL}",
