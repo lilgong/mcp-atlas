@@ -54,9 +54,6 @@ SERVER_CALL_POLICIES: dict[str, tuple[int, float, float, float]] = {
     # light steady pacing and let observed 429s drive the longer delay.
     "arxiv": (1, 3.0, 15.0, 60.0),
     "brave-search": (1, 1.5, 2.0, 10.0),
-    # E2B's current account allows 20 executions per rolling five minutes.
-    # Pace starts globally; adaptive cooldown absorbs an already-full window.
-    "e2b-server": (1, 15.0, 60.0, 240.0),
     "osm-mcp-server": (1, 1.0, 0.0, 0.0),
     # The rate-safe server emits two paced requests per search (ESearch plus
     # one batched EFetch). Serialize calls across task containers sharing an IP.
@@ -132,7 +129,6 @@ _SERVER_CALL_GATES = {
 _SHARED_SERVER_CALL_GATES = {
     "arxiv": SharedRateGate("arxiv", 3.0, 15.0, 60.0),
     "brave-search": SharedRateGate("brave-search", 1.5, 2.0, 10.0),
-    "e2b-server": SharedRateGate("e2b-server", 15.0, 60.0, 240.0),
     "osm-mcp-server": SharedRateGate("osm-mcp-server", 1.0),
     "twelvedata": SharedRateGate("twelvedata", 8.0, 15.0, 60.0),
     "wikipedia": SharedRateGate(
@@ -239,8 +235,8 @@ def _server_call_gate(tool_name: str) -> Optional[ServerCallGate]:
 
 def _relay_handles_server(server: str) -> bool:
     return server in {"arxiv", "osm-mcp-server", "pubmed", "wikipedia"} and bool(
-        (os.getenv("PUBMED_RELAY_URL") or "").strip()
-        and (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+        (os.getenv("MCP_RELAY_URL") or "").strip()
+        and (os.getenv("MCP_RELAY_TOKEN") or "").strip()
     )
 
 

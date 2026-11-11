@@ -71,9 +71,14 @@ COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/twelvedata_mcp_compat.py \
      src/agent_environment/run_node_mcp.cjs \
      src/agent_environment/met_museum_compat.cjs \
+     src/agent_environment/e2b_compat.cjs \
+     src/agent_environment/gmail_quota_compat.cjs \
+     src/agent_environment/patch_google_workspace.cjs \
+     src/agent_environment/open_library_compat.cjs \
      src/agent_environment/google_maps_compat.cjs \
      src/agent_environment/yibu_fetch_preload.cjs \
      src/agent_environment/
+RUN node src/agent_environment/patch_google_workspace.cjs
 COPY src/agent_environment/mcp_server_template.json \
      src/agent_environment/mcp_server_template.json
 COPY src/agent_environment/wikipedia_preload/sitecustomize.py \

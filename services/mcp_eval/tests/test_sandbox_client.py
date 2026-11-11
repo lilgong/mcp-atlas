@@ -33,10 +33,9 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             (1, 3.0, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["arxiv"],
         )
-        self.assertEqual(
-            (1, 15.0, 60.0, 240.0),
-            isolated_client.SERVER_CALL_POLICIES["e2b-server"],
-        )
+        # Creation is paced inside the MCP, without serializing whole executions.
+        self.assertNotIn("e2b-server", isolated_client.SERVER_CALL_POLICIES)
+        self.assertNotIn("e2b-server", isolated_client._SHARED_SERVER_CALL_GATES)
         self.assertEqual(
             (1, 1.2, 15.0, 60.0),
             isolated_client.SERVER_CALL_POLICIES["pubmed"],
@@ -52,7 +51,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ddg-search", isolated_client.SERVER_CALL_POLICIES)
         self.assertEqual(
             {
-                "arxiv", "brave-search", "e2b-server", "osm-mcp-server",
+                "arxiv", "brave-search", "osm-mcp-server",
                 "twelvedata", "wikipedia",
             },
             set(isolated_client._SHARED_SERVER_CALL_GATES),
@@ -100,8 +99,8 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(
             "os.environ",
             {
-                "PUBMED_RELAY_URL": "http://relay.invalid:3985",
-                "PUBMED_RELAY_TOKEN": "test-token",
+                "MCP_RELAY_URL": "http://relay.invalid:3985",
+                "MCP_RELAY_TOKEN": "test-token",
             },
             clear=False,
         ):
@@ -206,7 +205,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(
                 "os.environ",
-                {"PUBMED_RELAY_URL": "", "PUBMED_RELAY_TOKEN": ""},
+                {"MCP_RELAY_URL": "", "MCP_RELAY_TOKEN": ""},
                 clear=False,
             ),
             patch.dict(

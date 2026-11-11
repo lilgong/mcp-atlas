@@ -48,6 +48,7 @@ RUN /install_mcp_packages.sh && rm /install_mcp_packages.sh
 
 # Copy project files and set up workspace
 COPY . .
+RUN node src/agent_environment/patch_google_workspace.cjs
 
 # Don't trust the checkout to have survived intact. COPY carries the build host's
 # file modes and bytes, and a tar-extracted or Windows tree hands us entrypoint.sh

@@ -9,6 +9,7 @@ E-utilities traffic.
 from __future__ import annotations
 
 import base64
+import math
 import os
 import re
 import threading
@@ -26,10 +27,10 @@ PMC_BASE = "https://www.ncbi.nlm.nih.gov/pmc/articles"
 REQUEST_INTERVAL_SECONDS = 0.4
 REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_RESULTS = 100
-RELAY_URL = (os.getenv("PUBMED_RELAY_URL") or "").strip().rstrip("/")
-RELAY_TOKEN = (os.getenv("PUBMED_RELAY_TOKEN") or "").strip()
+RELAY_URL = (os.getenv("MCP_RELAY_URL") or "").strip().rstrip("/")
+RELAY_TOKEN = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
 RELAY_TIMEOUT_SECONDS = float(
-    os.getenv("PUBMED_RELAY_TIMEOUT_SECONDS") or "90"
+    os.getenv("MCP_RELAY_TIMEOUT_SECONDS") or "90"
 )
 
 
@@ -64,8 +65,11 @@ def _request_via_relay(
 ) -> requests.Response:
     if not RELAY_TOKEN:
         raise PubMedUpstreamError(
-            "PUBMED_RELAY_URL is set but PUBMED_RELAY_TOKEN is empty"
+            "MCP_RELAY_URL is set but MCP_RELAY_TOKEN is empty"
         )
+    if not math.isfinite(RELAY_TIMEOUT_SECONDS) or RELAY_TIMEOUT_SECONDS <= 0:
+        raise PubMedUpstreamError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
+    budget = max(RELAY_TIMEOUT_SECONDS * 0.9, RELAY_TIMEOUT_SECONDS - 5.0)
     try:
         relay_response = _SESSION.post(
             f"{RELAY_URL}/v1/fetch",
@@ -74,6 +78,7 @@ def _request_via_relay(
                 "url": url,
                 "params": params,
                 "allow_redirects": allow_redirects,
+                "timeout_seconds": budget,
             },
             timeout=RELAY_TIMEOUT_SECONDS,
         )

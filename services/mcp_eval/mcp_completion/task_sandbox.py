@@ -363,9 +363,9 @@ class TaskSandbox:
                         "NCBI_API_KEY",
                         "NCBI_EMAIL",
                         "NCBI_TOOL",
-                        "PUBMED_RELAY_URL",
-                        "PUBMED_RELAY_TOKEN",
-                        "PUBMED_RELAY_TIMEOUT_SECONDS",
+                        "MCP_RELAY_URL",
+                        "MCP_RELAY_TOKEN",
+                        "MCP_RELAY_TIMEOUT_SECONDS",
                     )
                     if (value := (os.getenv(name) or "").strip())
                 }

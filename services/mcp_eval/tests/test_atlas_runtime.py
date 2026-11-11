@@ -314,6 +314,11 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 paths,
             )
             self.assertNotIn("metmuseum_mcp_compat.mjs", paths)
+            for filename in ("e2b_compat.cjs", "open_library_compat.cjs",
+                             "gmail_quota_compat.cjs", "patch_google_workspace.cjs"):
+                self.assertIn("src/agent_environment/" + filename, paths)
+            self.assertIn("RUN node src/agent_environment/patch_google_workspace.cjs",
+                          (context / "Dockerfile").read_text())
             template = (
                 context
                 / "src/agent_environment/mcp_server_template.json"
@@ -326,8 +331,9 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "/agent-environment/src/agent_environment/arxiv_mcp_compat.py",
                     ],
                     "env": {
-                        "PUBMED_RELAY_URL": "${PUBMED_RELAY_URL}",
-                        "PUBMED_RELAY_TOKEN": "${PUBMED_RELAY_TOKEN}",
+                        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+                        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+                        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
                     },
                 },
                 template_config["mcpServers"]["arxiv"],

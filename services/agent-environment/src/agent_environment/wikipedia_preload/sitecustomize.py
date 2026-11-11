@@ -6,6 +6,7 @@ import contextlib
 import base64
 import fcntl
 import json
+import math
 import os
 import tempfile
 import time
@@ -20,18 +21,20 @@ DEFAULT_RATE_LIMIT_SECONDS = 60.0
 
 
 def _relay_settings() -> tuple[str, str, float] | None:
-    url = (os.getenv("WIKIPEDIA_RELAY_URL") or "").strip().rstrip("/")
-    token = (os.getenv("WIKIPEDIA_RELAY_TOKEN") or "").strip()
+    url = (os.getenv("MCP_RELAY_URL") or "").strip().rstrip("/")
+    token = (os.getenv("MCP_RELAY_TOKEN") or "").strip()
     if not url and not token:
         return None
     if not url or not token:
         raise RuntimeError(
-            "WIKIPEDIA_RELAY_URL and WIKIPEDIA_RELAY_TOKEN must be set together"
+            "MCP_RELAY_URL and MCP_RELAY_TOKEN must be set together"
         )
     try:
-        timeout = float(os.getenv("WIKIPEDIA_RELAY_TIMEOUT_SECONDS") or "90")
+        timeout = float(os.getenv("MCP_RELAY_TIMEOUT_SECONDS") or "90")
     except ValueError:
         timeout = 90.0
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
     return url, token, timeout
 
 
@@ -41,7 +44,8 @@ def _relay_fetch(url: str, params: dict) -> tuple[int, dict, bytes, str]:
         raise RuntimeError("Wikipedia relay is not configured")
     relay_url, token, timeout = settings
     payload = json.dumps(
-        {"url": url, "params": params, "allow_redirects": False},
+        {"url": url, "params": params, "allow_redirects": False,
+         "timeout_seconds": max(timeout * 0.9, timeout - 5.0)},
         separators=(",", ":"),
     ).encode("utf-8")
     request = urllib.request.Request(
