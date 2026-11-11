@@ -168,7 +168,9 @@ Wikipedia、arXiv 和 OSM 的逐请求 relay 适配位于 runtime 镜像内，�
 
 ## 4. 准备部署材料
 
-仓库已经包含官方的 `services/mcp_eval/MCP-Atlas-origin.csv`。以下运行材料仍需单独准备：
+仓库已经包含基于官方题库的已审核基准 `services/mcp_eval/MCP-Atlas-origin.csv`，
+其中包含[固定答案与工具目录修正](services/mcp_eval/BENCHMARK_CORRECTIONS.md)，
+并非未经修改的上游原版。以下运行材料仍需单独准备：
 
 | 材料 | 用途 |
 | --- | --- |
@@ -611,9 +613,9 @@ GOOGLE_REFRESH_TOKEN=<refresh-token>
 data_exports/slack_mcp_eval_export.zip
 ```
 
-官方消息日期为 2025-12-01 至 2025-12-10。付费 Slack 能保留这段历史时，
-可以导入官方 zip；当前 `MCP-Atlas-origin.csv` 为含固定修正的基准，
-其中 Slack 日期与导出之间的历史偏移仍需通过脚本对齐。
+官方消息日期为 2025-12-01 至 2025-12-10，与基准中部分 Slack 日期仍有 161 天历史偏移。
+付费 Slack 能保留历史，也不代表直接导入官方 zip 后就能配合 origin 评测。
+新部署统一按下面的命令生成配套的 zip 和 `MCP-Atlas.csv`，再导入并使用这份 CSV。
 
 免费 Slack 只显示最近可见窗口内的消息，因此必须同时平移消息、绑定消息日期的题面
 与 claims，并重算依赖消息年份的简单算术。固定的答案和工具目录修正已保存于
@@ -640,6 +642,8 @@ services/mcp_eval/MCP-Atlas.csv
 ```
 
 `<MMDD>` 是运行日期；不要把尖括号原样写进命令。
+默认让最新消息至少落到 3 天前；如果原月份会被拆到两个目标月份，脚本会将
+整批消息额外提前几天，保持题目里的月份条件可准确对齐。实际导入范围以脚本输出为准。
 
 浏览器打开：
 
@@ -662,11 +666,14 @@ https://<你的-workspace>.slack.com/services/import
 MCP_COMPLETION_INPUT=MCP-Atlas.csv
 ```
 
-使用基准日期（未做本地日期平移）时设置：
+不启用 Slack，或已另行确认 Slack 消息日期与基准完全一致时，才使用基准输入：
 
 ```dotenv
 MCP_COMPLETION_INPUT=MCP-Atlas-origin.csv
 ```
+
+已有配套的 Slack 导入和 `MCP-Atlas.csv`、只继续测评时，不需要重跑转换脚本。
+脚本按运行当天重新计算日期；若重新生成 CSV，必须同时导入配套 zip，不能只换 CSV。
 
 然后写入同一个 workspace 的浏览器会话 token：
 
