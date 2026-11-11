@@ -482,66 +482,72 @@ MONGODB_CONNECTION_STRING=
 修改 `.env` 后，需要重启共享 MCP runtime 和 completion 服务。运行中的进程不会
 自动重新读取文件。
 
-### 5.8 MCP 集中出口（推荐多机共用一个）
+### 5.8 MCP 集中出口（无需 MCPHub）
 
-如果部署机器的公网 IP 被 NCBI abuse 系统限制，可以在一台受信任的内网机器上运行
-集中 relay，并通过 IPWO 粘性住宅代理访问 NCBI、Wikipedia、arXiv 和 OSM。relay 按服务
-统一执行限速，任务
-容器只收到 relay URL 和随机 token，不会收到代理凭证。
+本分支可独立运行 Relay，通过 IPWO 代理 PubMed、Wikipedia、arXiv、OSM 和
+Open Library。MCP 仍由 Atlas 的共享 runtime 或任务容器启动；Relay 只负责真实
+HTTP 请求的鉴权、出口、排队、限速、重试和日志，不要求 Hub key、工作区或任务注册。
 
-relay 主机的 `.env` 配置：
+在启动 Relay 的机器上填写 `.env`：
 
 ```dotenv
-MCP_RELAY_TOKEN=<足够长的随机token>
+MCP_RELAY_TOKEN=<自行生成的随机token>
 MCP_RELAY_BIND=0.0.0.0
 MCP_RELAY_PORT=3985
-MCP_RELAY_USAGE_LOG=completion_results/runtime_logs/pubmed-relay-usage.jsonl
+MCP_RELAY_USAGE_LOG=./data/relay/usage.jsonl
+MCP_RELAY_REQUEST_TIMEOUT_SECONDS=85
+MCP_RELAY_UPSTREAM_TIMEOUT_SECONDS=45
 IPWO_PROXY_HOST=<IPWO proxy host>
 IPWO_PROXY_PORT=<IPWO proxy port>
-IPWO_PROXY_USERNAME=<IPWO username>
+IPWO_PROXY_USERNAME=<IPWO生成的用户名>
 IPWO_PROXY_PASSWORD=<IPWO password>
 IPWO_PROXY_COUNTRY=US
 ```
-
-启动 relay：
 
 ```bash
 make run-egress-relay
 ```
 
-每台评测机器只配置：
+每台评测机在 `.env` 中填写下面三项；同机部署也须使用任务容器可访问的宿主地址，
+不能给容器填写它自己的 `127.0.0.1`。不需要把 IPWO 凭证复制给评测容器。
 
 ```dotenv
-MCP_RELAY_URL=http://<relay内网IP>:3985
-MCP_RELAY_TOKEN=<与relay主机相同的token>
+MCP_RELAY_URL=http://<Relay机器内网IP>:3985
+MCP_RELAY_TOKEN=<与Relay相同的token>
 MCP_RELAY_TIMEOUT_SECONDS=90
 ```
 
-不要把 IPWO 凭证复制到评测机器，也不需要在评测机器启动 relay。data-syn 若同时
-生产，可以连接同一个 relay，但它不是 MCP-Atlas 测评部署的依赖。健康检查：
+多台评测机共用一个 Relay，才能共享逐 HTTP 请求的额度。也可以每个独立部署自行
+启动 Relay，但同出口/同账号的多个实例不会自动协调额度。修改环境变量需要重启
+对应服务；MCP 适配代码更新后需要重建 runtime 镜像。
 
-```bash
-curl http://<relay内网IP>:3985/health
-```
+Relay 放行所有公开 HTTPS 地址和路径，并保留 token 鉴权、私网地址/DNS 检查、
+逐跳重定向校验。它支持 GET/POST；请求体默认上限 64 KiB，响应默认上限 64 MiB。
+`/health` 可检查状态，`GET /v1/limits` 需要 Bearer token。
 
-relay 只使用 IPWO，四项代理配置缺一时会拒绝启动。NCBI 建议使用
-`IPWO_PROXY_COUNTRY=US`；relay 为 NCBI、arXiv、Nominatim、Overpass 和 OSRM 分别复用一条
-粘性出口。逐上游请求间隔及并发由 Hub 管理的 relay limits 决定；不再保留 rollout
-独立的自适应 arXiv 并发策略。独立启动此脚本时，默认 arXiv 每 3 秒一次且并发 1、
-Wikipedia 每 300 毫秒一次且并发 1，部署时的持久化 limits 优先于默认值。
-排队、退避重试和上游传输共用请求总预算，默认 85 秒；取消或过期的请求退出 FIFO
-队列并释放容量。arXiv 异步请求使用可取消的原生 HTTP 客户端，不再遗留后台线程。
-各上游只在连接失败、限流、服务错误或 abuse 响应时更换动态住宅代理的 `sid`。请求记录
-写入 `MCP_RELAY_USAGE_LOG`（默认 `./data/relay/usage.jsonl`），其中不记录
-query 参数或凭证。relay 不应暴露到公网。
+限速配置保存在 `MCP_RELAY_USAGE_LOG` 同目录的 `limits.json`，不存在时使用代码默认值。
+默认与 Hub 当前配置对齐：NCBI 无 key 最小间隔 334ms、有 key 100ms、PMC 1000ms；
+Wikipedia 间隔 300ms、并发 1；Nominatim 间隔 1000ms、并发 1；OSM 路由间隔 1000ms；
+arXiv 和 Overpass 不额外设置请求间隔或并发上限。未知 HTTPS 主机没有额外速率限制。
+可参考 [Relay 配置示例](scripts/relay-limits.example.json)，通过携带同一 Bearer token 的
+`PUT /v1/limits` 提交 `{"limits": {...}}` 修改，成功后立即生效并保存。请求间隔和并发
+是独立配置；留空并发字段表示无额外并发上限，不要填 0。
 
-集中 relay 会跨机器统一 PubMed、Wikipedia、arXiv 和 OSM 的每次真实 HTTP 请求节奏。
-所有评测进程应指向同一个 relay 实例；不要在同一公网出口下启动多个独立 relay。
+IPWO 用户名不带 `_sid_` 时按新连接轮换出口；带 `_sid_` 时使用粘性出口。轮换模式下，
+arXiv 的 429、5xx 和可重试网络异常最多尝试三次（首次加两次重试），不增加共享冷却
+或重试退避；仍受整次请求期限约束。Overpass 每个节点只尝试一次，失败交给 MCP
+继续尝试另外两个节点。新连接不保证得到不同的实际 IP，也不保证上游可用。
 
-IPWO 代理返回 407 时，relay 会
-锁定账户错误且不再发出上游请求，`/health` 返回 503。错误标记会穿透 PubMed、Wikipedia、arXiv 和 OSM MCP：
-MCP-Atlas completion 停止整批评测，data-syn P2 取消其他并发任务并退出；已经成功的
-结果保持落盘，充值或换 key 并重启 relay 后可续跑。普通 429 仍按瞬时限流处理。
+走 Relay 的 arXiv、PubMed、OSM、Wikipedia 会跳过 Atlas 工具层的本地限速，避免
+整个工具调用占住串行队列；未配置 Relay 时仍使用本地兜底。TwelveData 保留每 8 秒
+一次，Brave 保留每 1.5 秒一次。E2B 在 MCP 内对沙箱创建按 1 秒间隔排队并重试明确的
+创建限流，执行结束释放沙箱，不在 Atlas 外层把整段代码执行串行化。Open Library
+保留 MCP 内的 1 秒请求间隔。Gmail 使用与独立包一致的配额队列，只重试明确的临时
+限流读取，不重发邮件等写操作。
+
+日志记录时间、状态、尝试次数及排队/网络耗时，不记录查询参数或凭据。IPWO 返回
+407 会锁定账号错误，`/health` 返回 503；更换凭据并重启后恢复。普通上游失败保留
+原始状态和数据，不转换为成功结果。
 
 ---
 
@@ -1670,7 +1676,7 @@ docker run --rm hello-world
 | `scripts/prepare_task_data_fixture.py` | 生成内容寻址文件 fixture |
 | `scripts/build_task_mongo_fixture.py` | 从 mongodump 构建 task-Mongo fixture 镜像 |
 | `scripts/run_shared_mcp.py` | 启动共享 MCP runtime |
-| `scripts/pubmed_relay_server.py` | PubMed、Wikipedia、arXiv 和 OSM 的鉴权、限速住宅代理出口 |
+| `scripts/egress_relay.py` | PubMed、Wikipedia、arXiv 和 OSM 的鉴权、限速住宅代理出口 |
 | `services/mcp_eval/mcp_completion_script.py` | 生成模型轨迹 |
 | `services/mcp_eval/mcp_evals_scores.py` | claim coverage 评分 |
 | `services/mcp_eval/atlas_verify_v2.py` | 结合 scored CSV、runtime log 和 usage log 审核 MCP 侧影响 |

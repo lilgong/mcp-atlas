@@ -14,9 +14,9 @@ from typing import Any
 import aiohttp
 from osm_mcp_server import server
 try:
-    from .egress_relay_client import enabled as relay_enabled, fetch as relay_fetch
+    from .egress_relay_client import RelayNetworkError, enabled as relay_enabled, fetch as relay_fetch
 except ImportError:  # Executed as the template's standalone script.
-    from egress_relay_client import enabled as relay_enabled, fetch as relay_fetch
+    from egress_relay_client import RelayNetworkError, enabled as relay_enabled, fetch as relay_fetch
 
 
 EXPECTED_VERSION = "0.1.1"
@@ -38,10 +38,7 @@ OVERPASS_HEADERS = {
     "Accept": "application/json",
 }
 
-OSM_RELAY_HOSTS = frozenset({
-    "nominatim.openstreetmap.org", "overpass-api.de", "maps.mail.ru",
-    "router.project-osrm.org", "routing.openstreetmap.de",
-})
+
 
 
 class _RelayResponse:
@@ -75,6 +72,9 @@ class _RelayRequestContext:
         if isinstance(body, dict):
             body = urllib.parse.urlencode(body, doseq=True).encode()
             headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        timeout = self.kwargs.get("timeout")
+        if isinstance(timeout, aiohttp.ClientTimeout):
+            timeout = timeout.total
         response = await asyncio.to_thread(
             relay_fetch,
             self.method,
@@ -83,6 +83,7 @@ class _RelayRequestContext:
             body=body,
             headers=headers,
             allow_redirects=True,
+            timeout_seconds=timeout,
         )
         return _RelayResponse(response)
 
@@ -91,8 +92,7 @@ class _RelayRequestContext:
 
 
 def _relay_request(method: str, url: str, kwargs: dict[str, Any]):
-    host = urllib.parse.urlsplit(url).hostname or ""
-    if relay_enabled() and host in OSM_RELAY_HOSTS:
+    if relay_enabled() and urllib.parse.urlsplit(url).scheme == "https":
         return _RelayRequestContext(method, url, kwargs)
     return None
 
@@ -134,7 +134,7 @@ class _FallbackRequestContext:
             context = self.request(self.session, url, *self.args, **kwargs)
             try:
                 response = await context.__aenter__()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, RelayNetworkError) as exc:
                 last_error = exc
                 continue
             if (
@@ -169,7 +169,6 @@ def install_overpass_redirect() -> None:
         )
     configured = (
         os.getenv("OSM_OVERPASS_URLS")
-        or os.getenv("SYN_OSM_OVERPASS_URLS")
         or (
             f"{UPSTREAM_OVERPASS_URL},{SECONDARY_OVERPASS_URL},"
             f"{FALLBACK_OVERPASS_URL}"

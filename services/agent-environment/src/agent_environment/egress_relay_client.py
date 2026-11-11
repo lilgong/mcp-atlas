@@ -1,4 +1,4 @@
-"""Small, allow-listed HTTP client for MCP services using the egress relay."""
+"""Small, authenticated HTTP client for MCP services using the egress relay."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import IncompleteRead
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,11 +30,33 @@ class RelayRequestError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-def request_budget_seconds() -> float:
-    if not math.isfinite(RELAY_TIMEOUT) or RELAY_TIMEOUT <= 0:
+class RelayNetworkError(RelayRequestError):
+    """Transient Relay failures may advance an MCP's configured endpoint fallback."""
+
+    def __init__(self, message: str, *, code: str = "relay_network_error", status: int = 502):
+        super().__init__(message, code=code, status=status)
+
+
+def _timeout_seconds(timeout_seconds: float | None = None) -> float:
+    timeout = RELAY_TIMEOUT
+    if timeout_seconds is not None:
+        if isinstance(timeout_seconds, bool) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("Relay request timeout must be positive and finite")
+        timeout = min(timeout, timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
-    # Reserve response-delivery time before the HTTP client's own timeout.
-    return max(RELAY_TIMEOUT * 0.9, RELAY_TIMEOUT - 5.0)
+    return timeout
+
+
+def request_budget_seconds(timeout_seconds: float | None = None) -> float:
+    timeout = _timeout_seconds(timeout_seconds)
+    return max(timeout * 0.9, timeout - 5.0)
+
+
+def _request_failure(payload: dict[str, Any], status: int) -> RelayRequestError:
+    code = str(payload.get("code") or "relay_http_error")
+    kind = RelayNetworkError if status in {502, 503, 504} and code != "relay_account_error" else RelayRequestError
+    return kind(str(payload.get("error") or f"egress relay HTTP {status}"), code=code, status=status)
 
 
 @dataclass(frozen=True)
@@ -58,6 +81,7 @@ def _request(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
     allow_redirects: bool = True,
+    timeout_seconds: float | None = None,
 ) -> urllib.request.Request:
     if not enabled():
         raise RuntimeError("egress relay is not configured")
@@ -86,7 +110,7 @@ def _request(
             "body_base64": base64.b64encode(body or b"").decode("ascii"),
             "headers": headers or {},
             "allow_redirects": allow_redirects,
-            "timeout_seconds": request_budget_seconds(),
+            "timeout_seconds": request_budget_seconds(timeout_seconds),
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -113,31 +137,28 @@ def _decode_response(result: dict[str, Any], url: str) -> RelayResponse:
 def fetch(method: str, url: str, **kwargs) -> RelayResponse:
     request = _request(method, url, **kwargs)
     try:
-        response = urllib.request.urlopen(request, timeout=RELAY_TIMEOUT)
+        response = urllib.request.urlopen(request, timeout=_timeout_seconds(kwargs.get("timeout_seconds")))
+        with response:
+            result = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         error = json.loads(exc.read() or b"{}")
-        raise RelayRequestError(
-            str(error.get("error") or f"egress relay HTTP {exc.code}"),
-            code=str(error.get("code") or "relay_http_error"),
-            status=exc.code,
-        ) from None
-    with response:
-        result = json.loads(response.read())
+        raise _request_failure(error, exc.code) from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError, IncompleteRead) as exc:
+        raise RelayNetworkError(f"Relay network request failed: {type(exc).__name__}") from None
     return _decode_response(result, url)
 
 
 async def fetch_async(method: str, url: str, **kwargs) -> RelayResponse:
-    """Native async HTTP closes the relay connection when a tool is cancelled."""
+    """Native async HTTP closes the Relay connection when a tool is cancelled."""
     request = _request(method, url, **kwargs)
-    async with httpx.AsyncClient(timeout=RELAY_TIMEOUT, follow_redirects=False) as client:
-        response = await client.post(
-            request.full_url, content=request.data, headers=dict(request.header_items()),
-        )
-        result = response.json()
-        if response.is_error:
-            raise RelayRequestError(
-                str(result.get("error") or f"egress relay HTTP {response.status_code}"),
-                code=str(result.get("code") or "relay_http_error"),
-                status=response.status_code,
+    try:
+        async with httpx.AsyncClient(timeout=_timeout_seconds(kwargs.get("timeout_seconds")), follow_redirects=False) as client:
+            response = await client.post(
+                request.full_url, content=request.data, headers=dict(request.header_items()),
             )
-        return _decode_response(result, url)
+    except httpx.TransportError as exc:
+        raise RelayNetworkError(f"Relay network request failed: {type(exc).__name__}") from None
+    result = response.json()
+    if response.is_error:
+        raise _request_failure(result, response.status_code)
+    return _decode_response(result, url)

@@ -20,16 +20,15 @@ ROOT = Path(__file__).resolve().parents[3]
 AGENT_ROOT = ROOT / "services" / "agent-environment"
 
 
-def test_osm_uses_unscoped_runtime_setting_with_legacy_fallback():
+def test_osm_uses_unscoped_runtime_setting_without_legacy_aliases():
     template = (ROOT / "env.template").read_text(encoding="utf-8")
     assert "\nOSM_OVERPASS_URLS=" in template
     assert "\nSYN_OSM_OVERPASS_URLS=" not in template
     source = (
         AGENT_ROOT / "src" / "agent_environment" / "osm_mcp_compat.py"
     ).read_text(encoding="utf-8")
-    assert source.index('os.getenv("OSM_OVERPASS_URLS")') < source.index(
-        'os.getenv("SYN_OSM_OVERPASS_URLS")'
-    )
+    assert 'os.getenv("OSM_OVERPASS_URLS")' in source
+    assert 'os.getenv("SYN_OSM_OVERPASS_URLS")' not in source
     servers = json.loads(
         (AGENT_ROOT / "src" / "agent_environment" / "mcp_server_template.json")
         .read_text(encoding="utf-8")
@@ -102,12 +101,14 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
     assert shared["osm-mcp-server"]["env"] == {
         "MCP_RELAY_URL": "${MCP_RELAY_URL}",
         "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
         "OSM_OVERPASS_URLS": "${OSM_OVERPASS_URLS}",
     }
     assert shared["arxiv"]["args"][-1].endswith("arxiv_mcp_compat.py")
     assert shared["arxiv"]["env"] == {
         "MCP_RELAY_URL": "${MCP_RELAY_URL}",
         "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
     }
     assert shared["met-museum"]["args"] == [
         "/agent-environment/src/agent_environment/run_node_mcp.cjs",
@@ -133,6 +134,7 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
         "NCBI_API_KEY": "${NCBI_API_KEY}",
         "NCBI_EMAIL": "${NCBI_EMAIL}",
         "NCBI_TOOL": "${NCBI_TOOL}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
     }
     assert shared["twelvedata"]["args"] == [
         "run",
@@ -278,6 +280,10 @@ def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
     assert response.content == b"<ok/>"
     assert calls[0][0].endswith("/v1/fetch")
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
+    assert calls[0][1]["timeout"] == pubmed.RELAY_TIMEOUT_SECONDS
+    assert calls[0][1]["json"]["timeout_seconds"] == max(
+        pubmed.RELAY_TIMEOUT_SECONDS * 0.9, pubmed.RELAY_TIMEOUT_SECONDS - 5.0
+    )
 
 
 def test_pubmed_relay_preserves_ipwo_auth_failure(monkeypatch):
@@ -459,6 +465,7 @@ def test_python_mcp_servers_pin_their_sdk():
         "env": {
             "MCP_RELAY_URL": "${MCP_RELAY_URL}",
             "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+            "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}",
         },
     }
     installer = (

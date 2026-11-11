@@ -6,6 +6,7 @@ import contextlib
 import base64
 import fcntl
 import json
+import math
 import os
 import tempfile
 import time
@@ -32,6 +33,8 @@ def _relay_settings() -> tuple[str, str, float] | None:
         timeout = float(os.getenv("MCP_RELAY_TIMEOUT_SECONDS") or "90")
     except ValueError:
         timeout = 90.0
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
     return url, token, timeout
 
 
@@ -41,7 +44,8 @@ def _relay_fetch(url: str, params: dict) -> tuple[int, dict, bytes, str]:
         raise RuntimeError("Wikipedia relay is not configured")
     relay_url, token, timeout = settings
     payload = json.dumps(
-        {"url": url, "params": params, "allow_redirects": False},
+        {"url": url, "params": params, "allow_redirects": False,
+         "timeout_seconds": max(timeout * 0.9, timeout - 5.0)},
         separators=(",", ":"),
     ).encode("utf-8")
     request = urllib.request.Request(
