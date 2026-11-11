@@ -43,8 +43,9 @@ test('quota wrapper shares a tool deadline and disables hidden HTTP retries',()=
 test('separate OS processes coordinate the same quota ledger',()=>fixture(async directory=>{
  const {spawn}=require('node:child_process');
  const modulePath=path.resolve(__dirname,'../src/agent_environment/gmail_quota_compat.cjs');
- const script=`const {GmailQuota}=require(${JSON.stringify(modulePath)});const q=new GmailQuota({directory:process.argv[1],scope:'cross-process',units:100,windowMs:100});Promise.all(Array.from({length:6},()=>q.call('get',async()=>Date.now(),Date.now()+5000))).then(x=>console.log(JSON.stringify(x))).catch(e=>{console.error(e);process.exit(1)});`;
+ const script=`const {GmailQuota}=require(${JSON.stringify(modulePath)});const q=new GmailQuota({directory:process.argv[1],scope:'cross-process',units:100,windowMs:100});const grants=[];const state=q.state.bind(q);q.state=(update,deadline)=>state(s=>{const last=s.events.at(-1);const result=update(s);if(s.events.length&&s.events.at(-1)!==last)grants.push(s.events.at(-1)[0]);return result;},deadline);Promise.all(Array.from({length:6},()=>q.call('get',async()=>{},Date.now()+5000))).then(()=>console.log(JSON.stringify(grants))).catch(e=>{console.error(e);process.exit(1)});`;
  async function run(){return new Promise((resolve,reject)=>{let out='';const p=spawn(process.execPath,['-e',script,directory]);p.stdout.on('data',x=>out+=x);p.on('error',reject);p.on('exit',code=>code?reject(new Error('child failed')):resolve(JSON.parse(out)));});}
+ // Quota applies to admission times; callback execution may be delayed by scheduling/I/O.
  const all=(await Promise.all([run(),run()])).flat().sort((a,b)=>a-b);
  assert.equal(all.length,12);assert(all.at(-1)-all[0]>=200);
  for(const t of all)assert(all.filter(x=>x>t-100&&x<=t).length<=5);

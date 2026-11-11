@@ -9,9 +9,9 @@ import httpx
 import requests
 
 try:
-    from .egress_relay_client import enabled, fetch
+    from .egress_relay_client import enabled, fetch, fetch_async
 except ImportError:  # Executed as the template's standalone script.
-    from egress_relay_client import enabled, fetch
+    from egress_relay_client import enabled, fetch, fetch_async
 
 
 ARXIV_HOSTS = frozenset({"arxiv.org", "www.arxiv.org", "export.arxiv.org"})
@@ -90,12 +90,10 @@ def install_httpx_relay() -> None:
     async def async_request(self, method, url, **kwargs):
         if not _uses_httpx_relay(self, method, url):
             return await original_async(self, method, url, **kwargs)
-        import asyncio
-
         request = _prepare_httpx_request(self, method, url, kwargs)
         await request.aread()
-        response = await asyncio.to_thread(
-            fetch, method, str(request.url), body=request.content,
+        response = await fetch_async(
+            method, str(request.url), body=request.content,
             headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("follow_redirects", True)),
         )
