@@ -26,4 +26,8 @@ def test_response_contradictions_and_exact_dates_are_not_approximate_coverage():
     assert 'NOT model response' in prompt
     assert 'Never attribute this helper text to the model' in prompt
     assert 'No explicitly labelled Unix timestamp found.' not in prompt
-    assert 'ISO dates plus a stated common UTC time' in prompt
+    assert 'ISO dates plus a common UTC time' in prompt
+
+    legacy = namespace[method.name](type('Legacy', (), {'context_isolation': False})(), 'Date', '2026-01-01')
+    assert 'No explicitly labelled Unix timestamp found.' in legacy
+    assert 'NOT model response' not in legacy

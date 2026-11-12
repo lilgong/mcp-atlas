@@ -695,7 +695,19 @@ class CoverageEvaluator:
                 conversions.append(f"{value} -> {datetime.fromtimestamp(float(value), timezone.utc).isoformat()}")
             except (ValueError, OverflowError, OSError):
                 continue
-        computed_context = '\n'.join(conversions) or 'No Unix conversion was computed. This says nothing about ISO timestamps or dates in the answer.'
+        isolated = getattr(self, 'context_isolation', True)
+        computed_context = '\n'.join(conversions) or (
+            'No Unix conversion was computed. This says nothing about ISO timestamps or dates in the answer.'
+            if isolated else 'No explicitly labelled Unix timestamp found.')
+        helper_header = (
+            'END MODEL RESPONSE TO ANALYZE\n'
+            'EVALUATOR UTC HELPER (NOT model response; NOT a new source). '
+            'Never attribute this helper text to the model. Absence of a Unix conversion '
+            'does not imply missing ISO timestamps. ISO dates plus a common UTC time '
+            'can express equivalent timestamps without full repetition. Actual study start '
+            'date in natural language need not repeat the literal field ACTUAL. '
+            'Preserve necessary implicit answer obligations.'
+            if isolated else 'CODE-COMPUTED UTC CONVERSIONS (derived context, not a new source):')
         criteria = getattr(self, "claim_criteria_override", None) or """SCORING CRITERIA:
 - fulfilled: Claim is completely and accurately addressed. The response covers all key details.
 - partially_fulfilled: Claim is partially addressed. The response covers some but not all key details.
@@ -742,13 +754,7 @@ CLAIM TO EVALUATE:
 {claim}
 MODEL RESPONSE TO ANALYZE:
 {response}
-END MODEL RESPONSE TO ANALYZE
-CODE-COMPUTED UTC CONVERSIONS (evaluator helper, NOT model response, NOT a new source):
-Never attribute this helper text to the model. Absence of a Unix conversion does not
-mean the answer lacks a timestamp. ISO dates plus a stated common UTC time may
-express the same timestamps without repeating a full ISO string for every row.
-Equivalent natural-language statements of actual start dates need not repeat the
-literal registry field name ACTUAL. Preserve necessary implicit answer obligations.
+{helper_header}
 {computed_context}
 INSTRUCTIONS:
 {instructions}

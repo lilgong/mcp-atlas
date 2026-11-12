@@ -109,6 +109,7 @@ def main() -> None:
     # "final" scores only the answer claims; "all" also scores anchor and
     # intermediate claims, as the MCP-Atlas release grades every GTFA claim.
     parser.add_argument("--claim-scope", choices=("final", "all"), default="final")
+    parser.add_argument('--context-policy', choices=('baseline-v3', 'isolated-v4'), default='isolated-v4')
     args = parser.parse_args()
     request = json.load(sys.stdin)
     inputs = request.get("inputs", {})
@@ -142,6 +143,7 @@ def main() -> None:
         joint = task.get("design_verified", {}).get("design", {}).get("authoring_mode") == "joint-author-v3"
         evaluator_type = task_context_evaluator_type(CoverageEvaluator, str(task.get("prompt") or "")) if joint else CoverageEvaluator
         evaluator = evaluator_type(AsyncLiteLLMClient(config), config)
+        evaluator.context_isolation = args.context_policy == "isolated-v4"
         try:
             scored = asyncio.run(evaluator.evaluate(
                 [str(item.get("text") or "") for item in claims], answer,
@@ -173,7 +175,7 @@ def main() -> None:
             {**item, "claim_id": str(claim.get("id") or "")}
             for claim, item in zip(claims, scored["per_claim"], strict=True)
         ]
-        policy_version = SCORING_POLICY_VERSION + ("-" + TASK_CONTEXT_POLICY if joint else "")
+        policy_version = (SCORING_POLICY_VERSION if args.context_policy == "isolated-v4" else "coverage-judge-v3-consistency") + ("-" + TASK_CONTEXT_POLICY if joint else "")
         scored["scoring_policy_version"] = policy_version
         print(json.dumps({
             "status": "success", "payload": scored,
