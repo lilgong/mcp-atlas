@@ -31,3 +31,21 @@ def test_response_contradictions_and_exact_dates_are_not_approximate_coverage():
     legacy = namespace[method.name](type('Legacy', (), {'context_isolation': False})(), 'Date', '2026-01-01')
     assert 'No explicitly labelled Unix timestamp found.' in legacy
     assert 'NOT model response' not in legacy
+
+
+def test_v5_keeps_implicit_obligations_and_accepts_alternative_complete_pages():
+    import json
+    path = Path(__file__).with_name('score_one.py')
+    tree = ast.parse(path.read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'task_context_evaluator_type')
+    scope = {'json': json}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
+    class Base:
+        def _get_single_claim_evaluation_prompt(self, claim, response):
+            return claim + response
+    cls = scope[node.name](Base, 'Task', [{'has_more': False}])
+    prompt = cls()._get_single_claim_evaluation_prompt('Claim', 'Answer')
+    assert '100+100+91' in prompt
+    assert 'date-precision and observation-period' in prompt
+    assert 'cannot supply a missing requested value' in prompt
+    assert 'Receipt metadata' in prompt
