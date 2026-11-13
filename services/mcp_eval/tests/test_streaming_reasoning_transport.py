@@ -16,9 +16,7 @@ from mcp_completion.schema import ToolCallOutputMessage, UserMessage
 
 @pytest.fixture(autouse=True)
 def isolate_reasoning_provider_state():
-    with patch("mcp_completion.llm.choose_key", return_value="offline-test"), patch(
-        "mcp_completion.llm.reserve_delay", return_value=0
-    ):
+    with patch("mcp_completion.llm.choose_key", return_value="offline-test"):
         yield
 
 

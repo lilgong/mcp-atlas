@@ -19,9 +19,7 @@ from mcp_completion.streaming import (
 def isolate_reasoning_provider_state():
     # The rollout fork has a shared credential governor absent in main.
     # Compatibility tests must never read real keys or their persisted state.
-    with patch("mcp_completion.llm.choose_key", return_value="offline-test"), patch(
-        "mcp_completion.llm.reserve_delay", return_value=0
-    ):
+    with patch("mcp_completion.llm.choose_key", return_value="offline-test"):
         yield
 
 

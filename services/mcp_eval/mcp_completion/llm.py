@@ -18,7 +18,6 @@ from .schema import Message, ToolCallSchema, AssistantMessage
 from .config import config
 from .runtime_log import jsonable, write_runtime_event
 from .account_guard import FatalAccountError, is_fatal_account_error, is_stopped_model_service
-from .model_rate_limit import reserve_delay
 from .streaming import collect_litellm_response, llm_streaming_enabled
 
 logger = logging.getLogger(__name__)
@@ -255,9 +254,6 @@ async def _create_openai_compatible_completion(
             key = await asyncio.to_thread(choose_key, config.LLM_BASE_URL, config.LLM_API_KEY, attempted_keys)
         provider_attempt += 1
         try:
-            delay = await asyncio.to_thread(reserve_delay, config.LLM_BASE_URL, key)
-            if delay:
-                await asyncio.sleep(delay)
             use_streaming = llm_streaming_enabled()
             provider_response = await litellm.acompletion(
                 model=model,

@@ -45,7 +45,6 @@ def test_empty_thinking_tool_turn_is_sent_back_on_next_request():
 
     with (patch('mcp_completion.llm.litellm.acompletion', provider),
           patch('mcp_completion.llm.choose_key', return_value='offline-key'),
-          patch('mcp_completion.llm.reserve_delay', return_value=0),
           patch('mcp_completion.llm.write_runtime_event'),
           patch('mcp_completion.llm._write_token_usage'),
           patch.dict('os.environ', {'LLM_STREAMING_ENABLED': 'false'})):

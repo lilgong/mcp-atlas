@@ -36,7 +36,7 @@ class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.settings = patch.object(config, "LLM_API_KEY", "test-key")
         self.settings.start()
-        self.environment = patch.dict(os.environ, {"LLM_API_KEYS": "", "LLM_MAX_RPM": "0"})
+        self.environment = patch.dict(os.environ, {"LLM_API_KEYS": ""})
         self.environment.start()
         self.addCleanup(self.settings.stop)
         self.addCleanup(self.environment.stop)
@@ -48,6 +48,18 @@ class UnifiedModelTransportTests(unittest.IsolatedAsyncioTestCase):
             tools=[],
             task_id="transport-test",
         )
+
+    async def test_obsolete_rpm_settings_do_not_queue_requests(self):
+        completion = AsyncMock(return_value=_response())
+        with (
+            patch.dict(os.environ, {"LLM_MAX_RPM": "1", "LLM_RATE_LIMIT_DB": "/not-used/limit.db"}),
+            patch("mcp_completion.llm.litellm.acompletion", completion),
+            patch("mcp_completion.llm.write_runtime_event"),
+        ):
+            for _ in range(3):
+                result = await self._run()
+                self.assertEqual(result.message.content, "ok")
+        self.assertEqual(completion.await_count, 3)
 
     async def test_only_429_500_502_503_are_retried(self):
         original_attempts = config.LLM_MAX_ATTEMPTS

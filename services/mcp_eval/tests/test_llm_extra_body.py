@@ -13,9 +13,7 @@ from mcp_completion.schema import UserMessage
 def isolate_offline_provider_state():
     # Request-shape tests stub the provider; never consult production key pools
     # or pacing state before reaching that stub.
-    with patch('mcp_completion.llm.choose_key', return_value='offline-test'), patch(
-        'mcp_completion.llm.reserve_delay', return_value=0
-    ):
+    with patch('mcp_completion.llm.choose_key', return_value='offline-test'):
         yield
 
 
