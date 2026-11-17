@@ -88,10 +88,11 @@ MAX_TIMEOUT_ATTEMPTS = int(os.getenv("MAX_TIMEOUT_ATTEMPTS", "2"))
 class TerminalTaskError(RuntimeError):
     """A task exhausted its retries and must be persisted as a failed result."""
 
-    def __init__(self, message: str, *, kind: str, attempts: int):
+    def __init__(self, message: str, *, kind: str, attempts: int, evaluation_id: str | None = None):
         super().__init__(message)
         self.kind = kind
         self.attempts = attempts
+        self.evaluation_id = evaluation_id
 
 
 def get_retry_delay(attempt: int) -> float:
@@ -137,6 +138,26 @@ async def cancel_remote_evaluation(evaluation_id: str) -> None:
                 raise RuntimeError("cancel endpoint returned invalid JSON") from exc
             if not result.get("cleanupCompleted"):
                 raise RuntimeError("cancel endpoint did not confirm cleanup")
+
+
+async def fetch_interrupted_trajectory(evaluation_id: str, task_id: str) -> Optional[str]:
+    """Read native analysis evidence after timeout cleanup, without a proxy."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{SERVER_URL}/v2/mcp_eval/trajectory/{evaluation_id}") as response:
+                if response.status != 200:
+                    raise ValueError(f"snapshot HTTP {response.status}")
+                result = await response.json()
+                if result.get("evaluation_id") != evaluation_id or result.get("task_id") != task_id:
+                    raise ValueError("snapshot attempt/task mismatch")
+                history = result.get("raw_conversation_history")
+                if not isinstance(history, list) or any(not isinstance(m, dict) for m in history):
+                    raise ValueError("invalid snapshot history")
+                return json.dumps(history, ensure_ascii=False) if history else None
+    except Exception as error:
+        logging.warning("Interrupted trajectory unavailable for task %s: %s", task_id, type(error).__name__)
+        return None
 
 
 # System prompt for the model (only used if USE_SYSTEM_PROMPT_IN_COMPLETION=true).
@@ -473,6 +494,7 @@ class AsyncMCPTrajectoryGenerator:
                             f"{type(cancel_error).__name__}: {cancel_error}",
                             kind="cancellation_failed",
                             attempts=attempt + 1,
+                            evaluation_id=evaluation_id,
                         ) from cancel_error
                     timeouts += 1
                     if timeouts >= MAX_TIMEOUT_ATTEMPTS:
@@ -482,6 +504,7 @@ class AsyncMCPTrajectoryGenerator:
                             "the same turns",
                             kind="task_timeout",
                             attempts=attempt + 1,
+                            evaluation_id=evaluation_id,
                         )
 
             if attempt < MAX_RETRY_ATTEMPTS - 1:
@@ -494,6 +517,7 @@ class AsyncMCPTrajectoryGenerator:
             f"{MAX_RETRY_ATTEMPTS} attempts; last failure: {last_failure}",
             kind=last_failure_kind,
             attempts=MAX_RETRY_ATTEMPTS,
+            evaluation_id=evaluation_id,
         )
 
     async def write_result_to_csv(self, result_dict: Dict[str, Any], output_file: str):
@@ -644,6 +668,10 @@ class AsyncMCPTrajectoryGenerator:
             failure_kind = getattr(e, "kind", type(e).__name__)
             num_attempts = max(num_attempts, getattr(e, "attempts", 0))
 
+            partial_history = None
+            if failure_kind == "task_timeout" and getattr(e, "evaluation_id", None):
+                partial_history = await fetch_interrupted_trajectory(e.evaluation_id, str(task_id))
+
             # Write a terminal task result. Unlike the old ambiguous None row,
             # the response and errors retain why this task earns no credit.
             error_result = {
@@ -655,9 +683,11 @@ class AsyncMCPTrajectoryGenerator:
                 "ENABLED_TOOLS": row_data.get("ENABLED_TOOLS", ""),
                 # Completion result columns (from script execution) - all lowercase
                 "script_model_response": f"ERROR [{failure_kind}]: {str(e)}",
-                "raw_conversation_history": None,
+                "raw_conversation_history": partial_history,
                 "trajectory": None,
-                "errors": [{"type": failure_kind, "message": str(e)}],
+                "errors": [{"type": failure_kind, "message": str(e),
+                            **({"evaluation_id": e.evaluation_id}
+                               if getattr(e, "evaluation_id", None) else {})}],
                 "trajectory_time": trajectory_time,
                 "num_retry": num_attempts,  # Use actual retry count even in error case
             }
