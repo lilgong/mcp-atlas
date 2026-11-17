@@ -37,8 +37,23 @@ class RelayNetworkError(RelayRequestError):
         super().__init__(message, code=code, status=status)
 
 
-def _timeout_seconds(timeout_seconds: float | None = None) -> float:
+def _timeout_seconds(timeout_seconds: float | None = None, *, url: str = "") -> float:
     timeout = RELAY_TIMEOUT
+    host = (urllib.parse.urlsplit(url).hostname or '').lower()
+    group = ('arxiv' if host in {'arxiv.org', 'www.arxiv.org', 'export.arxiv.org'}
+             else 'osm-overpass' if host in {'overpass-api.de', 'overpass.private.coffee', 'maps.mail.ru'}
+             else 'osm-nominatim' if host == 'nominatim.openstreetmap.org'
+             else 'wikipedia' if host == 'en.wikipedia.org' else None)
+    if group:
+        # The HTTP client must outlive the category's 140s Relay budget.
+        # Unrelated providers retain the shared legacy timeout.
+        policies = json.loads(os.getenv('MCP_RELAY_CLIENT_TIMEOUTS') or '{}')
+        if not isinstance(policies, dict):
+            raise ValueError('MCP_RELAY_CLIENT_TIMEOUTS must be an object')
+        value = policies.get(group, 145)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError('Relay category timeout must be numeric')
+        timeout = float(value)
     if timeout_seconds is not None:
         if isinstance(timeout_seconds, bool) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("Relay request timeout must be positive and finite")
@@ -48,8 +63,8 @@ def _timeout_seconds(timeout_seconds: float | None = None) -> float:
     return timeout
 
 
-def request_budget_seconds(timeout_seconds: float | None = None) -> float:
-    timeout = _timeout_seconds(timeout_seconds)
+def request_budget_seconds(timeout_seconds: float | None = None, *, url: str = "") -> float:
+    timeout = _timeout_seconds(timeout_seconds, url=url)
     return max(timeout * 0.9, timeout - 5.0)
 
 
@@ -110,7 +125,7 @@ def _request(
             "body_base64": base64.b64encode(body or b"").decode("ascii"),
             "headers": headers or {},
             "allow_redirects": allow_redirects,
-            "timeout_seconds": request_budget_seconds(timeout_seconds),
+            "timeout_seconds": request_budget_seconds(timeout_seconds, url=url),
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -137,7 +152,7 @@ def _decode_response(result: dict[str, Any], url: str) -> RelayResponse:
 def fetch(method: str, url: str, **kwargs) -> RelayResponse:
     request = _request(method, url, **kwargs)
     try:
-        response = urllib.request.urlopen(request, timeout=_timeout_seconds(kwargs.get("timeout_seconds")))
+        response = urllib.request.urlopen(request, timeout=_timeout_seconds(kwargs.get("timeout_seconds"), url=url))
         with response:
             result = json.loads(response.read())
     except urllib.error.HTTPError as exc:
@@ -152,7 +167,7 @@ async def fetch_async(method: str, url: str, **kwargs) -> RelayResponse:
     """Native async HTTP closes the Relay connection when a tool is cancelled."""
     request = _request(method, url, **kwargs)
     try:
-        async with httpx.AsyncClient(timeout=_timeout_seconds(kwargs.get("timeout_seconds")), follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=_timeout_seconds(kwargs.get("timeout_seconds"), url=url), follow_redirects=False) as client:
             response = await client.post(
                 request.full_url, content=request.data, headers=dict(request.header_items()),
             )
