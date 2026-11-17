@@ -16,7 +16,7 @@ from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
 from .config import validate_isolated_control_plane
-from .runtime_log import write_runtime_event
+from .runtime_log import evaluation_id_context, write_runtime_event
 from .account_guard import FatalAccountError, describe_fatal_account_error
 from .task_sandbox import (
     DEFAULT_RUNTIME_IMAGE,
@@ -148,13 +148,17 @@ async def _collect_agent_outputs(
     body: RunAgentAPIRequestBody,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
-    async for agent_output in handle_run_mcp_eval(body):
-        results.append(
-            {
-                "type": agent_output.type,
-                "data": agent_output.data,
-            }
-        )
+    token = evaluation_id_context.set(body.evaluation_id)
+    try:
+        async for agent_output in handle_run_mcp_eval(body):
+            results.append(
+                {
+                    "type": agent_output.type,
+                    "data": agent_output.data,
+                }
+            )
+    finally:
+        evaluation_id_context.reset(token)
     return results
 
 

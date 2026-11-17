@@ -88,10 +88,11 @@ MAX_TIMEOUT_ATTEMPTS = int(os.getenv("MAX_TIMEOUT_ATTEMPTS", "2"))
 class TerminalTaskError(RuntimeError):
     """A task exhausted its retries and must be persisted as a failed result."""
 
-    def __init__(self, message: str, *, kind: str, attempts: int):
+    def __init__(self, message: str, *, kind: str, attempts: int, evaluation_id: str | None = None):
         super().__init__(message)
         self.kind = kind
         self.attempts = attempts
+        self.evaluation_id = evaluation_id
 
 
 def get_retry_delay(attempt: int) -> float:
@@ -482,6 +483,7 @@ class AsyncMCPTrajectoryGenerator:
                             "the same turns",
                             kind="task_timeout",
                             attempts=attempt + 1,
+                            evaluation_id=evaluation_id,
                         )
 
             if attempt < MAX_RETRY_ATTEMPTS - 1:
@@ -494,6 +496,7 @@ class AsyncMCPTrajectoryGenerator:
             f"{MAX_RETRY_ATTEMPTS} attempts; last failure: {last_failure}",
             kind=last_failure_kind,
             attempts=MAX_RETRY_ATTEMPTS,
+            evaluation_id=evaluation_id,
         )
 
     async def write_result_to_csv(self, result_dict: Dict[str, Any], output_file: str):
@@ -657,7 +660,9 @@ class AsyncMCPTrajectoryGenerator:
                 "script_model_response": f"ERROR [{failure_kind}]: {str(e)}",
                 "raw_conversation_history": None,
                 "trajectory": None,
-                "errors": [{"type": failure_kind, "message": str(e)}],
+                "errors": [{"type": failure_kind, "message": str(e),
+                            **({"evaluation_id": e.evaluation_id}
+                               if getattr(e, "evaluation_id", None) else {})}],
                 "trajectory_time": trajectory_time,
                 "num_retry": num_attempts,  # Use actual retry count even in error case
             }

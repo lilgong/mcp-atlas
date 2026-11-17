@@ -6,11 +6,13 @@ import datetime as dt
 import json
 import os
 import threading
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 
 _LOCK = threading.Lock()
+evaluation_id_context: ContextVar[str | None] = ContextVar("atlas_evaluation_id", default=None)
 _SECRET_ENV_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH")
 
 
