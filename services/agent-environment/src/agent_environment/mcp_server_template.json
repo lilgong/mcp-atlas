@@ -68,12 +68,13 @@
       }
     },
     "clinicaltrialsgov-mcp-server": {
-      "command": "npx",
+      "command": "/opt/clinicaltrials-node/bin/node",
       "args": [
-        "clinicaltrialsgov-mcp-server@1.9.3"
+        "/opt/clinicaltrials-runtime/node_modules/clinicaltrialsgov-mcp-server/dist/index.js"
       ],
       "env": {
-        "MCP_LOG_LEVEL": "info"
+        "MCP_LOG_LEVEL": "info",
+        "MCP_TRANSPORT_TYPE": "stdio"
       }
     },
     "context7": {
