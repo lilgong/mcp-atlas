@@ -1696,3 +1696,18 @@ Met Museum 直连兼容修复：保持 `metmuseum-mcp@1.0.0` 及原工具 schema
 ### Interrupted task trajectories
 
 A terminal task timeout retains `ERROR [task_timeout]` as the answer and the existing zero-score behavior. The completion service saves the completed conversation and the interrupted assistant stream under `MCP_RUNTIME_LOG_DIR/interrupted/<evaluation_id>.json`. After cancelling the attempt, the native completion script retrieves its snapshot and writes `raw_conversation_history` directly into the completion CSV. The scored CSV retains this analysis field; the judge only receives the original answer field. Only the last attempt is included in the CSV. This works without a platform or conversation proxy. If a snapshot is unavailable, the timeout result is still recorded and a warning is logged.
+
+### Relay 请求预算
+
+直连模式也使用相同的 Relay 超时策略，无需 MCPHub。默认网络等待 / 总预算：
+Overpass 为 120 / 140 秒，arXiv 为 60 / 140 秒，Nominatim、Wikipedia 为
+45 / 140 秒；NCBI、路由及其他 HTTPS 保持 45 / 85 秒。总预算包含排队、
+重试和网络请求，调用方更短的超时仍优先。OSM 所有备用节点共享 140 秒工具
+截止时间，路由单次 20 秒不变，取消时关闭异步 Relay 请求。缓存仅由 Hub 提供，
+本项目的独立 Relay 不写入或读取 OSM 缓存。
+
+`/v1/limits` 的每个类别可配置 `networkTimeoutSeconds`、`requestTimeoutSeconds`，
+保存后对新请求生效。客户端默认为延长的四类预留 145 秒，其他类别维持 90 秒；
+可通过 `MCP_RELAY_CLIENT_TIMEOUTS` JSON 对象按类别覆盖客户端预算，例如
+`{"arxiv":145,"osm-overpass":145,"osm-nominatim":145,"wikipedia":145}`。
+客户端环境变量变更后需重新创建对应 MCP 进程；外层工具截止时间仍优先。
