@@ -177,7 +177,7 @@ def test_request_budget_leaves_delivery_margin_and_error_is_classified(monkeypat
     with pytest.raises(relay_client.RelayRequestError) as caught:
         relay_client.fetch('GET', 'https://export.arxiv.org/api/query')
     assert caught.value.code == 'queue_timeout' and caught.value.status == 504
-    assert len(calls) == 1 and calls[0]['timeout_seconds'] == 85
+    assert len(calls) == 1 and calls[0]['timeout_seconds'] == 140
     monkeypatch.setattr(relay_client, 'RELAY_TIMEOUT', float('nan'))
     with pytest.raises(ValueError):
         relay_client.request_budget_seconds()
@@ -209,3 +209,26 @@ def test_async_relay_call_cancellation_closes_client_operation(monkeypatch):
             await task
     asyncio.run(run())
     assert len(calls) == 1 and cancelled == ['closed']
+
+
+def test_category_client_budgets_and_explicit_shorter_deadlines(monkeypatch):
+    monkeypatch.delenv('MCP_RELAY_CLIENT_TIMEOUTS', raising=False)
+    monkeypatch.setattr(relay_client, 'RELAY_TIMEOUT', 90)
+    for url in ['https://export.arxiv.org/api/query', 'https://overpass-api.de/api/interpreter',
+                'https://nominatim.openstreetmap.org/search', 'https://en.wikipedia.org/w/api.php']:
+        assert relay_client.request_budget_seconds(url=url) == 140
+        assert relay_client._timeout_seconds(url=url) == 145
+        assert relay_client.request_budget_seconds(20, url=url) == 18
+    assert relay_client.request_budget_seconds(url='https://eutils.ncbi.nlm.nih.gov/') == 85
+    assert relay_client.request_budget_seconds(url='https://openlibrary.org/') == 85
+    monkeypatch.setenv('MCP_RELAY_CLIENT_TIMEOUTS', '{"arxiv":160}')
+    assert relay_client.request_budget_seconds(url='https://arxiv.org/pdf/1') == 155
+    assert relay_client.request_budget_seconds(url='https://overpass-api.de/') == 140
+
+
+def test_invalid_category_client_budget_is_rejected(monkeypatch):
+    import pytest
+    for payload in ['[]', '{"arxiv":true}', '{"arxiv":"bad"}', '{"arxiv":0}', '{"arxiv":NaN}']:
+        monkeypatch.setenv('MCP_RELAY_CLIENT_TIMEOUTS', payload)
+        with pytest.raises(ValueError):
+            relay_client.request_budget_seconds(url='https://arxiv.org/')

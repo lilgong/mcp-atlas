@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import inspect
 import math
 import os
@@ -14,9 +16,9 @@ from typing import Any
 import aiohttp
 from osm_mcp_server import server
 try:
-    from .egress_relay_client import enabled as relay_enabled, fetch as relay_fetch
+    from .egress_relay_client import RelayNetworkError, enabled as relay_enabled, fetch_async as relay_fetch_async
 except ImportError:  # Executed as the template's standalone script.
-    from egress_relay_client import enabled as relay_enabled, fetch as relay_fetch
+    from egress_relay_client import RelayNetworkError, enabled as relay_enabled, fetch_async as relay_fetch_async
 
 
 EXPECTED_VERSION = "0.1.1"
@@ -24,7 +26,9 @@ UPSTREAM_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"
 FALLBACK_OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 RETRYABLE_STATUSES = frozenset({406, 429, 500, 502, 503, 504})
-OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45
+OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 140
+TOOL_DEADLINE_SECONDS = 140
+_tool_deadline = contextvars.ContextVar('osm_tool_deadline', default=None)
 ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20
 EXPLORE_ATTEMPT_TIMEOUT_SECONDS = 25
 EXPLORE_REVERSE_TIMEOUT_SECONDS = 10
@@ -38,10 +42,7 @@ OVERPASS_HEADERS = {
     "Accept": "application/json",
 }
 
-OSM_RELAY_HOSTS = frozenset({
-    "nominatim.openstreetmap.org", "overpass-api.de", "maps.mail.ru",
-    "router.project-osrm.org", "routing.openstreetmap.de",
-})
+
 
 
 class _RelayResponse:
@@ -75,14 +76,23 @@ class _RelayRequestContext:
         if isinstance(body, dict):
             body = urllib.parse.urlencode(body, doseq=True).encode()
             headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
-        response = await asyncio.to_thread(
-            relay_fetch,
+        timeout = self.kwargs.get("timeout")
+        if isinstance(timeout, aiohttp.ClientTimeout):
+            timeout = timeout.total
+        deadline = _tool_deadline.get()
+        if deadline is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError('OSM tool total deadline exceeded')
+            timeout = min(timeout, remaining) if timeout is not None else remaining
+        response = await relay_fetch_async(
             self.method,
             self.url,
             params=self.kwargs.get("params"),
             body=body,
             headers=headers,
             allow_redirects=True,
+            timeout_seconds=timeout,
         )
         return _RelayResponse(response)
 
@@ -91,8 +101,7 @@ class _RelayRequestContext:
 
 
 def _relay_request(method: str, url: str, kwargs: dict[str, Any]):
-    host = urllib.parse.urlsplit(url).hostname or ""
-    if relay_enabled() and host in OSM_RELAY_HOSTS:
+    if relay_enabled() and urllib.parse.urlsplit(url).scheme == "https":
         return _RelayRequestContext(method, url, kwargs)
     return None
 
@@ -121,6 +130,9 @@ class _FallbackRequestContext:
 
     async def __aenter__(self):
         last_error = None
+        deadline = asyncio.get_running_loop().time() + TOOL_DEADLINE_SECONDS
+        if _tool_deadline.get() is not None:
+            deadline = min(deadline, _tool_deadline.get())
         for index, url in enumerate(self.urls):
             kwargs = dict(self.kwargs)
             kwargs["headers"] = {
@@ -131,10 +143,16 @@ class _FallbackRequestContext:
                 "timeout",
                 aiohttp.ClientTimeout(total=OVERPASS_ATTEMPT_TIMEOUT_SECONDS),
             )
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError('OSM tool total deadline exceeded during endpoint fallback')
+            original_timeout = kwargs.get('timeout')
+            seconds = original_timeout.total if isinstance(original_timeout, aiohttp.ClientTimeout) else original_timeout
+            kwargs['timeout'] = aiohttp.ClientTimeout(total=min(seconds, remaining) if seconds else remaining)
             context = self.request(self.session, url, *self.args, **kwargs)
             try:
                 response = await context.__aenter__()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, RelayNetworkError) as exc:
                 last_error = exc
                 continue
             if (
@@ -169,7 +187,6 @@ def install_overpass_redirect() -> None:
         )
     configured = (
         os.getenv("OSM_OVERPASS_URLS")
-        or os.getenv("SYN_OSM_OVERPASS_URLS")
         or (
             f"{UPSTREAM_OVERPASS_URL},{SECONDARY_OVERPASS_URL},"
             f"{FALLBACK_OVERPASS_URL}"
@@ -449,11 +466,32 @@ def install_explore_area_optimization() -> None:
     tool.fn = optimized_explore_area
 
 
+def install_tool_deadlines() -> None:
+    for tool in server.mcp._tool_manager._tools.values():
+        original = tool.fn
+        if getattr(original, '_osm_shared_deadline', False):
+            continue
+        def wrap(fn):
+            @functools.wraps(fn)
+            async def bounded(*args, **kwargs):
+                deadline = asyncio.get_running_loop().time() + TOOL_DEADLINE_SECONDS
+                token = _tool_deadline.set(deadline)
+                try:
+                    async with asyncio.timeout(TOOL_DEADLINE_SECONDS):
+                        return await fn(*args, **kwargs)
+                finally:
+                    _tool_deadline.reset(token)
+            bounded._osm_shared_deadline = True
+            return bounded
+        tool.fn = wrap(original)
+
+
 def main() -> None:
     install_overpass_redirect()
     install_route_fallback()
     install_neighborhood_optimization()
     install_explore_area_optimization()
+    install_tool_deadlines()
     server.mcp.run()
 
 
