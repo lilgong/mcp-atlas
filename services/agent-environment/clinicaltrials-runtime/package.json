@@ -1,0 +1,10 @@
+{
+  "name": "mcp-atlas-clinicaltrials-runtime",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "clinicaltrialsgov-mcp-server": "2.11.3"
+  }
+}

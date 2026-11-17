@@ -22,6 +22,8 @@ SOURCE_FILES = (
     "uv.lock",
     "package.json",
     "package-lock.json",
+    "clinicaltrials-runtime/package.json",
+    "clinicaltrials-runtime/package-lock.json",
     "dev_scripts/install_mcp_packages.sh",
     "src/agent_environment/__init__.py",
     "src/agent_environment/logger.py",

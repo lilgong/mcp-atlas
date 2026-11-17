@@ -355,10 +355,11 @@ def test_osm_has_ordered_fallbacks_inside_a_sufficient_router_budget():
         'SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"'
         in compat
     )
-    assert "OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 45" in compat
+    assert "OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 140" in compat
+    assert "TOOL_DEADLINE_SECONDS = 140" in compat
     assert '"User-Agent": "mcp-atlas/1.0' in compat
     assert "{406, 429, 500, 502, 503, 504}" in compat
-    assert DEFAULT_TOOL_CALL_TIMEOUT_SECONDS >= 3 * 45
+    assert DEFAULT_TOOL_CALL_TIMEOUT_SECONDS > 140
     assert "ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20" in compat
     assert "routing.openstreetmap.de/routed-car" in compat
     assert "routing.openstreetmap.de/routed-bike" in compat
@@ -399,11 +400,11 @@ def test_clinicaltrials_uses_fixed_upstream_release_without_wrapper():
         ).read_text(encoding="utf-8")
     )["mcpServers"]
     clinicaltrials = servers["clinicaltrialsgov-mcp-server"]
-    assert clinicaltrials["command"] == "npx"
+    assert clinicaltrials["command"] == "/opt/clinicaltrials-node/bin/node"
     assert clinicaltrials["args"] == [
-        "clinicaltrialsgov-mcp-server@1.9.3",
+        "/opt/clinicaltrials-runtime/node_modules/clinicaltrialsgov-mcp-server/dist/index.js",
     ]
-    assert not any("compat" in arg for arg in clinicaltrials["args"])
+    assert not any("clinicaltrials_compat" in arg for arg in clinicaltrials["args"])
 
 
 def test_github_uses_prebuilt_pinned_server_instead_of_runtime_npx():
