@@ -16,7 +16,7 @@ BENCHMARK_PATH = "services/mcp_eval/MCP-Atlas-origin.csv"
 # Details: services/mcp_eval/BENCHMARK_CORRECTIONS.md.
 # Original upstream SHA256: 065f423ffd1425185d23ed01a1d1ad8ed8c6355749868521a07faaa13ec4c0ad
 BASELINE_SHA256 = (
-    "267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d"
+    "6d70587c960c9f83239a66e9ea390f6c6ff7d450c50827f070953e13465d388d"
 )
 
 

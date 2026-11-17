@@ -192,7 +192,7 @@ services/mcp_eval/MCP-Atlas-origin.csv
 `GTFA_CLAIMS`、`TRAJECTORY`。当前已审核基准的 SHA256 是：
 
 ```text
-267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d
+6d70587c960c9f83239a66e9ea390f6c6ff7d450c50827f070953e13465d388d
 ```
 
 clone 后检查：
@@ -1777,3 +1777,6 @@ Overpass 为 120 / 140 秒，arXiv 为 60 / 140 秒，Nominatim、Wikipedia 为
 可通过 `MCP_RELAY_CLIENT_TIMEOUTS` JSON 对象按类别覆盖客户端预算，例如
 `{"arxiv":145,"osm-overpass":145,"osm-nominatim":145,"wikipedia":145}`。
 客户端环境变量变更后需重新创建对应 MCP 进程；外层工具截止时间仍优先。
+
+ClinicalTrials 原生 2.11.3 的运行时、工具迁移和候选验证见
+[升级说明](docs/clinicaltrials-2-migration.md)。
