@@ -380,7 +380,7 @@ def temporary_audit_path(monkeypatch, tmp_path):
 def test_live_limits_validate_and_persist(monkeypatch, tmp_path):
     old = relay.current_limits()
     values = {name: dict(value) for name, value in old.items()}
-    values["wikipedia"] = {"minIntervalMs": 500, "concurrency": 2}
+    values["wikipedia"] = {**old["wikipedia"], "minIntervalMs": 500, "concurrency": 2}
     try:
         relay.apply_limits(values)
         assert relay.current_limits()["wikipedia"] == values["wikipedia"]
@@ -1153,3 +1153,97 @@ def test_rotating_arxiv_deadline_still_prevents_additional_attempts(monkeypatch)
     with pytest.raises(relay.RelayRequestExpired):
         controller.fetch("https://export.arxiv.org/api/query", False)
     assert len(calls) == 1 and controller.blocked_until == 0
+
+
+def test_timeout_policy_defaults_leave_unrelated_providers_unchanged():
+    assert relay.timeout_policy('https://overpass.private.coffee/api/interpreter', 'osm-overpass') == {
+        'networkTimeoutSeconds': 120, 'requestTimeoutSeconds': 140}
+    assert relay.timeout_policy('https://export.arxiv.org/api/query', 'arxiv') == {
+        'networkTimeoutSeconds': 60, 'requestTimeoutSeconds': 140}
+    for group in ['osm-nominatim', 'wikipedia']:
+        assert relay.timeout_policy('https://test/', group) == {
+            'networkTimeoutSeconds': 45, 'requestTimeoutSeconds': 140}
+    for group in ['ncbi', 'ncbi-key', 'ncbi-pmc', 'osm-routing', 'https']:
+        assert relay.timeout_policy('https://eutils.ncbi.nlm.nih.gov/', group) == {
+            'networkTimeoutSeconds': relay.UPSTREAM_TIMEOUT, 'requestTimeoutSeconds': relay.REQUEST_TIMEOUT}
+
+
+def test_timeout_live_update_is_validated_atomic_and_does_not_mutate_inflight_budget():
+    old = relay.current_limits()
+    values = {name: dict(item) for name, item in old.items()}
+    budget = relay.RequestBudget(140, network_seconds=120)
+    values['osm-overpass'].update(networkTimeoutSeconds=100, requestTimeoutSeconds=130)
+    try:
+        relay.apply_limits(values, persist=False)
+        assert relay.timeout_policy('https://overpass-api.de/', 'osm-overpass')['networkTimeoutSeconds'] == 100
+        assert budget.network_seconds == 120 and budget.total_seconds == 140
+        for field, value in [('networkTimeoutSeconds', True), ('requestTimeoutSeconds', float('nan')),
+                             ('networkTimeoutSeconds', 0), ('requestTimeoutSeconds', 601),
+                             ('networkTimeoutSeconds', 131)]:
+            invalid = {name: dict(item) for name, item in values.items()}
+            invalid['osm-overpass'][field] = value
+            with pytest.raises(ValueError):
+                relay.apply_limits(invalid, persist=False)
+            assert relay.current_limits() == values
+    finally:
+        relay.apply_limits(old, persist=False)
+
+
+@pytest.mark.parametrize('caller_seconds,expected', [(None, 140), (20, 20), (500, 140)])
+def test_http_category_budget_and_shorter_caller_deadline(http_relay, monkeypatch, caller_seconds, expected):
+    import json
+    import urllib.request
+    seen = []
+    controller = relay.Controller(0)
+    monkeypatch.setattr(relay, 'controller_for_url', lambda *a: controller)
+    def fetch(url, *_args, budget, **_kwargs):
+        seen.append((budget.total_seconds, budget.network_seconds, budget.remaining('upstream')))
+        return 200, {}, b'ok', url
+    monkeypatch.setattr(relay, '_fetch_once', fetch)
+    payload = {'url': 'https://overpass-api.de/api/interpreter'}
+    if caller_seconds is not None:
+        payload['timeout_seconds'] = caller_seconds
+    req = urllib.request.Request('http://%s:%s/v1/fetch' % http_relay,
+        data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer test-relay-token'})
+    with urllib.request.urlopen(req, timeout=2) as response:
+        assert response.status == 200
+    assert len(seen) == 1
+    assert seen[0][:2] == (expected, 120)
+    assert 0 < seen[0][2] <= expected
+
+
+def test_network_timeout_retains_phase_in_response_and_attempt_log(http_relay, monkeypatch):
+    import json
+    import urllib.request
+    records = []
+    monkeypatch.setattr(relay, '_append_log', records.append)
+    monkeypatch.setattr(relay, 'controller_for_url', lambda *a: relay.Controller(0))
+    def fetch(*_args, **_kwargs):
+        raise relay.RelayUpstreamTimeout('TimeoutError', phase='response_read')
+    monkeypatch.setattr(relay, '_fetch_once', fetch)
+    req = urllib.request.Request('http://%s:%s/v1/fetch' % http_relay,
+        data=json.dumps({'url': 'https://overpass-api.de/api/interpreter'}).encode(),
+        headers={'Authorization': 'Bearer test-relay-token'})
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(req, timeout=2)
+    assert caught.value.code == 504
+    assert json.loads(caught.value.read())['code'] == 'network_wait_timeout'
+    for event in ['http_finished', 'http_completed']:
+        row = next(item for item in records if item['event'] == event)
+        assert row['timeout_phase'] == 'response_read'
+        assert row['network_timeout_seconds'] == 120
+
+
+@pytest.mark.parametrize('total,network,expected', [(140,120,120), (10,120,10), (85,45,45)])
+def test_network_open_uses_category_timeout_clamped_to_remaining_budget(monkeypatch, total, network, expected):
+    seen = []
+    class Opener:
+        def open(self, request, timeout):
+            seen.append(timeout)
+            raise relay.urllib.error.URLError(TimeoutError('sensitive-proxy-detail'))
+    monkeypatch.setattr(relay.urllib.request, 'build_opener', lambda *args: Opener())
+    budget = relay.RequestBudget(total, network_seconds=network)
+    with pytest.raises(relay.RelayUpstreamTimeout) as caught:
+        relay._fetch_once('https://overpass-api.de/api/interpreter', False, budget=budget)
+    assert len(seen) == 1 and expected - 0.5 < seen[0] <= expected
+    assert 'sensitive' not in str(caught.value)
