@@ -85,6 +85,10 @@ class RelayEndpointCooling(RelayUpstreamError):
 class RelayUpstreamTimeout(RelayUpstreamError):
     """One network attempt timed out while its total request budget remains."""
 
+    def __init__(self, message, phase="network_wait"):
+        self.phase = phase
+        super().__init__(message)
+
 
 class RelayRequestExpired(RuntimeError):
     """A request has exhausted its total queue/retry/network budget."""
@@ -99,10 +103,12 @@ class RelayRequestCancelled(RuntimeError):
 
 
 class RequestBudget:
-    def __init__(self, seconds: float, disconnected=None):
+    def __init__(self, seconds: float, disconnected=None, *, network_seconds=None):
         if not math.isfinite(seconds) or seconds <= 0:
             raise ValueError("timeout_seconds must be positive and finite")
         self.deadline = time.monotonic() + seconds
+        self.total_seconds = seconds
+        self.network_seconds = UPSTREAM_TIMEOUT if network_seconds is None else network_seconds
         self.disconnected = disconnected
         self.queued_ms = 0.0
         self.attempts = 0
@@ -332,6 +338,9 @@ class Controller:
                                 else "network_error")
                     _append_log({**metadata, "event": "http_finished", "request_id": request_id,
                                  "category": category, "error_type": type(exc).__name__,
+                                 "timeout_phase": getattr(exc, "phase", None),
+                                 "request_budget_seconds": budget.total_seconds,
+                                 "network_timeout_seconds": budget.network_seconds,
                                  "duration_ms": round((time.monotonic() - attempt_started) * 1000, 1)})
                     raise
                 status, response_headers, response_body, _ = final
@@ -446,6 +455,13 @@ DEFAULT_LIMITS = {
     "osm-overpass": {"minIntervalMs": 0},
     "osm-routing": {"minIntervalMs": 1000},
 }
+DEFAULT_TIMEOUTS = {
+    "osm-overpass": {"networkTimeoutSeconds": 120, "requestTimeoutSeconds": 140},
+    "osm-nominatim": {"networkTimeoutSeconds": 45, "requestTimeoutSeconds": 140},
+    "wikipedia": {"networkTimeoutSeconds": 45, "requestTimeoutSeconds": 140},
+    "arxiv": {"networkTimeoutSeconds": 60, "requestTimeoutSeconds": 140},
+}
+TIMEOUTS = {}
 CONTROLLERS = {name: Controller(0) for name in DEFAULT_LIMITS}
 HTTPS_CONTROLLERS: dict[tuple[str, int], Controller] = {}
 
@@ -455,7 +471,7 @@ def apply_limits(values: dict, *, persist: bool = True) -> None:
         raise ValueError("Supply limits for every supported upstream category")
     normalized = {}
     for name, item in values.items():
-        if not isinstance(item, dict) or set(item) - {"minIntervalMs", "concurrency"}:
+        if not isinstance(item, dict) or set(item) - {"minIntervalMs", "concurrency", "networkTimeoutSeconds", "requestTimeoutSeconds"}:
             raise ValueError("Invalid upstream limit")
         interval = item.get("minIntervalMs", 0)
         concurrency = item.get("concurrency")
@@ -466,6 +482,15 @@ def apply_limits(values: dict, *, persist: bool = True) -> None:
         normalized[name] = {"minIntervalMs": interval}
         if concurrency is not None:
             normalized[name]["concurrency"] = concurrency
+        fallback = TIMEOUTS.get(name) or DEFAULT_TIMEOUTS.get(name) or {
+            "networkTimeoutSeconds": UPSTREAM_TIMEOUT, "requestTimeoutSeconds": REQUEST_TIMEOUT}
+        for field in ["networkTimeoutSeconds", "requestTimeoutSeconds"]:
+            value = item.get(field, fallback[field])
+            if type(value) not in {int, float} or not math.isfinite(value) or not 1 <= value <= 600:
+                raise ValueError("Invalid upstream timeout")
+            normalized[name][field] = value
+        if normalized[name]["networkTimeoutSeconds"] > normalized[name]["requestTimeoutSeconds"]:
+            raise ValueError("Network timeout must not exceed total request timeout")
     with CONFIG_LOCK:
         if persist:
             LIMITS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -481,6 +506,7 @@ def apply_limits(values: dict, *, persist: bool = True) -> None:
             finally:
                 os.close(directory_fd)
         for name, item in normalized.items():
+            TIMEOUTS[name] = {field: item[field] for field in ["networkTimeoutSeconds", "requestTimeoutSeconds"]}
             controller = CONTROLLERS[name]
             with controller.slots:
                 controller.min_interval = item["minIntervalMs"] / 1000
@@ -490,7 +516,15 @@ def apply_limits(values: dict, *, persist: bool = True) -> None:
 
 def current_limits() -> dict:
     with CONFIG_LOCK:
-        return {name: {"minIntervalMs": round(controller.min_interval * 1000), **({"concurrency": controller.max_concurrency} if controller.max_concurrency is not None else {})} for name, controller in CONTROLLERS.items()}
+        return {name: {"minIntervalMs": round(controller.min_interval * 1000), **TIMEOUTS[name], **({"concurrency": controller.max_concurrency} if controller.max_concurrency is not None else {})} for name, controller in CONTROLLERS.items()}
+
+
+def timeout_policy(url, group):
+    if group == "ncbi":
+        parsed = urllib.parse.urlsplit(url)
+        group = "ncbi-pmc" if parsed.hostname != "eutils.ncbi.nlm.nih.gov" else "ncbi-key" if urllib.parse.parse_qs(parsed.query).get("api_key") else "ncbi"
+    with CONFIG_LOCK:
+        return dict(TIMEOUTS.get(group) or {"networkTimeoutSeconds": UPSTREAM_TIMEOUT, "requestTimeoutSeconds": REQUEST_TIMEOUT})
 
 
 def controller_for_url(url: str, group: str) -> Controller:
@@ -720,7 +754,7 @@ def _fetch_once(
         url, data=body or None, headers=forwarded, method=method,
     )
     try:
-        response = opener.open(request, timeout=min(UPSTREAM_TIMEOUT, budget.remaining("upstream")))
+        response = opener.open(request, timeout=min(budget.network_seconds, budget.remaining("upstream")))
     except urllib.error.HTTPError as exc:
         response = exc
     except RelayTargetError:
@@ -757,7 +791,7 @@ def _fetch_once(
                 raw = getattr(getattr(response, "fp", None), "raw", None)
                 upstream_socket = getattr(raw, "_sock", None)
                 if upstream_socket is not None:
-                    upstream_socket.settimeout(min(UPSTREAM_TIMEOUT, remaining))
+                    upstream_socket.settimeout(min(budget.network_seconds, remaining))
                 chunk = response.read1(min(65536, MAX_RESPONSE_BYTES + 1 - size))
                 if not chunk:
                     break
@@ -773,6 +807,8 @@ def _fetch_once(
     except (OSError, urllib.error.URLError) as exc:
         budget.remaining("upstream")
         failure = RelayUpstreamTimeout if isinstance(getattr(exc, "reason", exc), TimeoutError) else RelayUpstreamError
+        if failure is RelayUpstreamTimeout:
+            raise failure(type(exc).__name__, phase="response_read") from None
         raise failure(type(exc).__name__) from None
 
 
@@ -971,11 +1007,11 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > 65536:
                 raise ValueError("invalid request size")
             payload = json.loads(self.rfile.read(length))
-            seconds = payload.get("timeout_seconds", REQUEST_TIMEOUT)
+            seconds = payload.get("timeout_seconds", 600)
             if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
                     or not math.isfinite(seconds) or seconds <= 0):
                 raise ValueError("Invalid request deadline")
-            budget = RequestBudget(min(float(seconds), REQUEST_TIMEOUT), self._client_disconnected)
+            budget = RequestBudget(min(float(seconds), 600), self._client_disconnected)
             request_id = budget.request_id
             url = str(payload["url"])
             method = str(payload.get("method") or "GET").upper()
@@ -1000,6 +1036,10 @@ class Handler(BaseHTTPRequestHandler):
             if query:
                 separator = "&" if urllib.parse.urlsplit(url).query else "?"
                 url = f"{url}{separator}{query}"
+            policy = timeout_policy(url, target_group)
+            budget.total_seconds = min(float(seconds), policy["requestTimeoutSeconds"])
+            budget.deadline = min(budget.deadline, started + budget.total_seconds)
+            budget.network_seconds = policy["networkTimeoutSeconds"]
             status, headers, body, final_url, attempts, queued_ms = controller_for_url(url, target_group).fetch(
                 url, bool(payload.get("allow_redirects", False)),
                 budget=budget,
@@ -1028,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
                 "response_bytes": len(body),
                 "egress_backend": "ipwo",
                 "attempts": attempts,
+                "request_budget_seconds": budget.total_seconds,
+                "network_timeout_seconds": budget.network_seconds,
                 "queued_ms": round(queued_ms, 1),
                 "duration_ms": round((time.monotonic() - started) * 1000, 1),
                 "client_disconnected": not delivered,
@@ -1044,10 +1086,21 @@ class Handler(BaseHTTPRequestHandler):
                 "upstream_group": target_group, "status": status, "category": category,
                 "attempts": budget.attempts, "queued_ms": round(budget.queued_ms, 1),
                 "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "timeout_phase": exc.phase if isinstance(exc, RelayRequestExpired) else "cancelled",
+                "request_budget_seconds": budget.total_seconds,
+                "network_timeout_seconds": budget.network_seconds,
                 "client_disconnected": cancelled,
             })
             if not cancelled:
                 self._json(status, {"code": category, "error": str(exc)})
+        except RelayUpstreamTimeout as exc:
+            _append_log({"event": "http_completed", "request_id": budget.request_id,
+                         "host": urllib.parse.urlsplit(url).hostname, "upstream_group": target_group,
+                         "status": 504, "category": "network_wait_timeout", "timeout_phase": exc.phase,
+                         "request_budget_seconds": budget.total_seconds, "network_timeout_seconds": budget.network_seconds,
+                         "attempts": budget.attempts, "queued_ms": round(budget.queued_ms, 1),
+                         "duration_ms": round((time.monotonic()-started)*1000, 1)})
+            self._json(504, {"code": "network_wait_timeout", "error": f"Relay {exc.phase} wait exceeded ({budget.network_seconds:g}s maximum; remaining total budget also applies)"})
         except RelayAccountError as exc:
             parsed = urllib.parse.urlsplit(url)
             _append_log({
