@@ -670,3 +670,28 @@ class ServiceLifespanCleanupTests(unittest.IsolatedAsyncioTestCase):
             async with completion_main.lifespan(None):
                 pass
         cleanup.assert_not_awaited()
+
+
+def test_evaluation_context_isolated_between_concurrent_attempts():
+    from mcp_completion.partial_trajectory import capture_context
+
+    async def scenario():
+        barrier = asyncio.Event()
+        seen = []
+
+        async def fake_outputs(body):
+            seen.append(capture_context.get()["task_id"])
+            if len(seen) == 2:
+                barrier.set()
+            await barrier.wait()
+            yield SimpleNamespace(type='message', data={'evaluation_id': capture_context.get()['task_id']})
+
+        with patch.object(completion_main, 'handle_run_mcp_eval', fake_outputs):
+            outputs = await asyncio.gather(*[
+                completion_main._collect_agent_outputs(SimpleNamespace(evaluation_id=value, task_id=value))
+                for value in ('first', 'last')
+            ])
+        assert [result[0]['data']['evaluation_id'] for result in outputs] == ['first', 'last']
+        assert capture_context.get() is None
+
+    asyncio.run(scenario())
