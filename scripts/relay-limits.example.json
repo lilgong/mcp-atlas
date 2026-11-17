@@ -1,28 +1,44 @@
 {
   "ncbi": {
-    "minIntervalMs": 334
+    "minIntervalMs": 334,
+    "networkTimeoutSeconds": 45,
+    "requestTimeoutSeconds": 85
   },
   "ncbi-key": {
-    "minIntervalMs": 100
+    "minIntervalMs": 100,
+    "networkTimeoutSeconds": 45,
+    "requestTimeoutSeconds": 85
   },
   "ncbi-pmc": {
-    "minIntervalMs": 1000
+    "minIntervalMs": 1000,
+    "networkTimeoutSeconds": 45,
+    "requestTimeoutSeconds": 85
   },
   "wikipedia": {
     "minIntervalMs": 300,
-    "concurrency": 1
+    "concurrency": 1,
+    "networkTimeoutSeconds": 45,
+    "requestTimeoutSeconds": 140
   },
   "arxiv": {
-    "minIntervalMs": 0
+    "minIntervalMs": 0,
+    "networkTimeoutSeconds": 60,
+    "requestTimeoutSeconds": 140
   },
   "osm-nominatim": {
     "minIntervalMs": 1000,
-    "concurrency": 1
+    "concurrency": 1,
+    "networkTimeoutSeconds": 45,
+    "requestTimeoutSeconds": 140
   },
   "osm-overpass": {
-    "minIntervalMs": 0
+    "minIntervalMs": 0,
+    "networkTimeoutSeconds": 120,
+    "requestTimeoutSeconds": 140
   },
   "osm-routing": {
-    "minIntervalMs": 1000
+    "minIntervalMs": 1000,
+    "networkTimeoutSeconds": 45,
+    "requestTimeoutSeconds": 85
   }
 }

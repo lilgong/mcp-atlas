@@ -128,20 +128,72 @@ class RelayRequestBudgets(unittest.TestCase):
 class OsmRelayBudgets(unittest.IsolatedAsyncioTestCase):
     async def test_aiohttp_timeout_is_forwarded_and_fallback_can_continue(self):
         seen = []
-        def send(method, url, **kwargs):
+        async def send(method, url, **kwargs):
             seen.append((url, kwargs['timeout_seconds']))
             if len(seen) == 1:
                 raise relay.RelayNetworkError('first endpoint timed out')
             return relay.RelayResponse(200, {}, b'{}', url)
-        with patch.object(osm, 'relay_fetch', side_effect=send):
+        with patch.object(osm, 'relay_fetch_async', side_effect=send):
             context = osm._FallbackRequestContext(
                 None, lambda _session, url, **kwargs: osm._RelayRequestContext('POST', url, kwargs),
                 ('https://first.test', 'https://second.test'), (), {},
             )
             self.assertEqual((await context.__aenter__()).status, 200)
             await context.__aexit__(None, None, None)
-        self.assertEqual(seen, [('https://first.test', 45), ('https://second.test', 45)])
+        self.assertEqual([url for url, _ in seen], ['https://first.test', 'https://second.test'])
+        self.assertTrue(all(130 < seconds <= 140 for _, seconds in seen))
+        self.assertLessEqual(seen[1][1], seen[0][1])
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SharedToolDeadline(unittest.IsolatedAsyncioTestCase):
+    async def test_fallback_spends_remaining_budget_without_resetting(self):
+        seen = []
+        async def send(method, url, **kwargs):
+            seen.append(kwargs['timeout_seconds'])
+            if len(seen) == 1:
+                await asyncio.sleep(0.03)
+                raise relay.RelayNetworkError('first failed')
+            return relay.RelayResponse(200, {}, b'{}', url)
+        with patch.object(osm, 'relay_fetch_async', side_effect=send):
+            token = osm._tool_deadline.set(asyncio.get_running_loop().time() + 0.1)
+            try:
+                context = osm._FallbackRequestContext(None,
+                    lambda _session, url, **kwargs: osm._RelayRequestContext('POST', url, kwargs),
+                    ('https://first.test', 'https://second.test'), (), {})
+                await context.__aenter__()
+                await context.__aexit__(None, None, None)
+            finally:
+                osm._tool_deadline.reset(token)
+        self.assertEqual(len(seen), 2)
+        self.assertLess(seen[1], seen[0] - 0.02)
+        self.assertLessEqual(seen[0], 0.1)
+
+    async def test_tool_timeout_cancels_async_request_and_preserves_metadata(self):
+        cancelled = asyncio.Event()
+        async def send(*args, **kwargs):
+            try:
+                await asyncio.sleep(10)
+            finally:
+                cancelled.set()
+        async def original(query: str = 'test'):
+            async with osm._RelayRequestContext('POST', 'https://overpass-api.de/', {}):
+                return query
+        tool = types.SimpleNamespace(fn=original, schema={'query': 'string'})
+        manager = types.SimpleNamespace(_tools={'test': tool})
+        with patch.object(osm.server, 'mcp', types.SimpleNamespace(_tool_manager=manager), create=True), \
+             patch.object(osm, 'TOOL_DEADLINE_SECONDS', 0.03), \
+             patch.object(osm, 'relay_fetch_async', side_effect=send):
+            osm.install_tool_deadlines()
+            wrapped = tool.fn
+            osm.install_tool_deadlines()
+            self.assertIs(tool.fn, wrapped)
+            self.assertIs(wrapped.__wrapped__, original)
+            self.assertEqual(tool.schema, {'query': 'string'})
+            with self.assertRaises(TimeoutError):
+                await wrapped()
+            self.assertTrue(cancelled.is_set())
+            self.assertIsNone(osm._tool_deadline.get())
