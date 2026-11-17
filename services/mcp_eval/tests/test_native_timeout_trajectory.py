@@ -3,6 +3,8 @@ import asyncio
 import csv
 import json
 import socket
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +13,12 @@ import uvicorn
 from mcp_completion import main
 from mcp_completion.partial_trajectory import capture_context, snapshot_path
 from mcp_completion.streaming import collect_litellm_response
-import mcp_completion_script as runner
+_cwd = Path.cwd()
+try:
+    os.chdir(Path(__file__).resolve().parents[1])
+    import mcp_completion_script as runner
+finally:
+    os.chdir(_cwd)
 
 
 def test_timeout_native_http_keeps_last_attempt_and_judge_contract(tmp_path, monkeypatch):

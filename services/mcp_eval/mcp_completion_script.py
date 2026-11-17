@@ -494,6 +494,7 @@ class AsyncMCPTrajectoryGenerator:
                             f"{type(cancel_error).__name__}: {cancel_error}",
                             kind="cancellation_failed",
                             attempts=attempt + 1,
+                            evaluation_id=evaluation_id,
                         ) from cancel_error
                     timeouts += 1
                     if timeouts >= MAX_TIMEOUT_ATTEMPTS:
