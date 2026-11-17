@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import logging
 import os
 from typing import Any, Iterable
 
 import litellm
+
+from .partial_trajectory import capture_partial_response
 
 
 class IncompleteModelStream(RuntimeError):
@@ -103,7 +107,16 @@ async def collect_litellm_response(
         if hasattr(raw_stream, "__aiter__"):
             response.completion_stream = _normalize_raw_provider_chunks(raw_stream)
 
-    chunks = [_normalize_reasoning_alias(chunk) async for chunk in response]
+    chunks = []
+    try:
+        async for chunk in response:
+            chunks.append(_normalize_reasoning_alias(chunk))
+    except asyncio.CancelledError:
+        try:
+            capture_partial_response(chunks)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not capture partial model stream", exc_info=True)
+        raise
     if not chunks:
         raise IncompleteModelStream("model stream returned no chunks")
     if not any(_chunk_has_finish_reason(chunk) for chunk in chunks):
