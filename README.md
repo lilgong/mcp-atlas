@@ -1700,8 +1700,8 @@ MCPHUB_TOKEN=<Hub 中 atlas 用户组的调用 Key>
 MCPHUB_TARGET=official
 MCPHUB_SERVERS=airtable,alchemy,brave-search,calculator,clinicaltrialsgov-mcp-server,context7,ddg-search,e2b-server,exa,fetch,github,google-maps,google-workspace,lara-translate,met-museum,national-parks,notion,open-library,osm-mcp-server,oxylabs,slack,twelvedata,weather,weather-data,whois,wikipedia
 MCPHUB_NAME_SEPARATOR=-
-MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:mcphub-v2
-MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:mcphub-v2
+MCP_SHARED_AGENT_IMAGE=mcp-atlas-runtime:latest
+MCP_TASK_AGENT_IMAGE=mcp-atlas-runtime:latest
 ```
 
 只有 `MCPHUB_SERVERS` 中选定的共享服务转到 Hub，其余保持直连。工具名称保持一致。
@@ -1734,7 +1734,7 @@ Hub 模式的共享容器不再挂载用量日志目录。工具调用统计由 
 启动：
 
 ```bash
-make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:mcphub-v2
+make build-atlas-runtime ATLAS_RUNTIME_IMAGE=mcp-atlas-runtime:latest
 make run-docker-host
 # 另一终端启动测评服务，然后按原来的命令运行测评
 make run-mcp-completion
