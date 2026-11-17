@@ -390,7 +390,6 @@ class AsyncMCPTrajectoryGenerator:
             "messages": messages,
             "enabledTools": enabled_tools,
             "taskId": str(taskId) if taskId is not None else uuid14(),
-            "enableThinkingTokens": True,
             "retryThinkingContractViolations": (
                 self.retry_thinking_contract_violations
             ),
