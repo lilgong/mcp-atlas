@@ -1,3 +1,5 @@
+FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS clinicaltrials-node
+
 FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS slack-mcp-builder
 
 ARG TARGETOS
@@ -43,12 +45,17 @@ RUN apt-get update \
         bash curl gettext-base git nodejs npm procps \
     && rm -rf /var/lib/apt/lists/*
 
-# ClinicalTrials.gov 1.9.3 requires Node 22. The Debian package is only used
-# to bootstrap npm before NodeSource replaces it.
+# The shared MCP environment stays on Node 22. The Debian package only
+# bootstraps npm before NodeSource replaces it.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# ClinicalTrials 2.x has a separate Node 24 runtime; other MCPs keep Node 22.
+COPY --from=clinicaltrials-node /usr/local/bin/node /opt/clinicaltrials-node/bin/node
+COPY clinicaltrials-runtime/ /opt/clinicaltrials-runtime/
+RUN PATH="/opt/clinicaltrials-node/bin:$PATH" npm ci --prefix /opt/clinicaltrials-runtime --omit=dev
 
 WORKDIR /agent-environment
 COPY package.json package-lock.json ./

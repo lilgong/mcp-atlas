@@ -42,3 +42,15 @@ tracked baseline so direct baseline runs and Slack-derived runs use the same too
   `4850307c5597d22f2e3cc8e83b047500e519a1554a04f6ecaa96629daa8f9d22`.
 - Current reviewed SHA-256:
   `267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d`.
+
+## Native ClinicalTrials 2.11.3 catalog — 2026-11-18
+
+Fifty tasks replace retired detail/trend grants with native 2.x tools. All 63
+ClinicalTrials-enabled tasks gain native field-definition discovery. Only
+ENABLED_TOOLS changes; the 500 task IDs, prompts, claims and reference trajectories
+are unchanged and verified by a regression hash. Slack derivation passes through
+this catalog. No local aliases or compatibility schemas are introduced.
+
+- Previous SHA-256: `267250cf0d10b2b1222447db6d4a466e1623003f996a37552fc0206039d2b12d`.
+- Candidate SHA-256: `6d70587c960c9f83239a66e9ea390f6c6ff7d450c50827f070953e13465d388d`.
+- Runtime and upstream behavior changes: docs/clinicaltrials-2-migration.md.
