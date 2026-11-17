@@ -140,6 +140,26 @@ async def cancel_remote_evaluation(evaluation_id: str) -> None:
                 raise RuntimeError("cancel endpoint did not confirm cleanup")
 
 
+async def fetch_interrupted_trajectory(evaluation_id: str, task_id: str) -> Optional[str]:
+    """Read native analysis evidence after timeout cleanup, without a proxy."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{SERVER_URL}/v2/mcp_eval/trajectory/{evaluation_id}") as response:
+                if response.status != 200:
+                    raise ValueError(f"snapshot HTTP {response.status}")
+                result = await response.json()
+                if result.get("evaluation_id") != evaluation_id or result.get("task_id") != task_id:
+                    raise ValueError("snapshot attempt/task mismatch")
+                history = result.get("raw_conversation_history")
+                if not isinstance(history, list) or any(not isinstance(m, dict) for m in history):
+                    raise ValueError("invalid snapshot history")
+                return json.dumps(history, ensure_ascii=False) if history else None
+    except Exception as error:
+        logging.warning("Interrupted trajectory unavailable for task %s: %s", task_id, type(error).__name__)
+        return None
+
+
 # System prompt for the model (only used if USE_SYSTEM_PROMPT_IN_COMPLETION=true).
 DEFAULT_SYSTEM_PROMPT = "Role: You are a factual, tool-aware assistant connected to a variety of tools. Use the available tools to answer the user query. Do not ask the user for clarification; fully complete the task using the information provided in the prompt."
 USE_SYSTEM_PROMPT = os.getenv("USE_SYSTEM_PROMPT_IN_COMPLETION", "").lower() == "true"
@@ -647,6 +667,10 @@ class AsyncMCPTrajectoryGenerator:
             failure_kind = getattr(e, "kind", type(e).__name__)
             num_attempts = max(num_attempts, getattr(e, "attempts", 0))
 
+            partial_history = None
+            if failure_kind == "task_timeout" and getattr(e, "evaluation_id", None):
+                partial_history = await fetch_interrupted_trajectory(e.evaluation_id, str(task_id))
+
             # Write a terminal task result. Unlike the old ambiguous None row,
             # the response and errors retain why this task earns no credit.
             error_result = {
@@ -658,7 +682,7 @@ class AsyncMCPTrajectoryGenerator:
                 "ENABLED_TOOLS": row_data.get("ENABLED_TOOLS", ""),
                 # Completion result columns (from script execution) - all lowercase
                 "script_model_response": f"ERROR [{failure_kind}]: {str(e)}",
-                "raw_conversation_history": None,
+                "raw_conversation_history": partial_history,
                 "trajectory": None,
                 "errors": [{"type": failure_kind, "message": str(e),
                             **({"evaluation_id": e.evaluation_id}

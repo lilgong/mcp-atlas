@@ -16,7 +16,8 @@ from .schema import RunAgentAPIRequestBody
 from .errors import MCPClientToolExecutionError
 from .config import config
 from .config import validate_isolated_control_plane
-from .runtime_log import evaluation_id_context, write_runtime_event
+from .runtime_log import write_runtime_event
+from .partial_trajectory import capture_context, save_snapshot, snapshot_path
 from .account_guard import FatalAccountError, describe_fatal_account_error
 from .task_sandbox import (
     DEFAULT_RUNTIME_IMAGE,
@@ -148,7 +149,8 @@ async def _collect_agent_outputs(
     body: RunAgentAPIRequestBody,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
-    token = evaluation_id_context.set(body.evaluation_id)
+    state = {"task_id": body.task_id, "history": [], "partial": None}
+    token = capture_context.set(state)
     try:
         async for agent_output in handle_run_mcp_eval(body):
             results.append(
@@ -157,8 +159,15 @@ async def _collect_agent_outputs(
                     "data": agent_output.data,
                 }
             )
+            if agent_output.type == "message":
+                state["history"].append(agent_output.data)
+                state["partial"] = None
+    except asyncio.CancelledError:
+        if body.evaluation_id:
+            save_snapshot(body.evaluation_id, state)
+        raise
     finally:
-        evaluation_id_context.reset(token)
+        capture_context.reset(token)
     return results
 
 
@@ -290,6 +299,15 @@ async def run_agent(
                 "error": f"Unknown error during mcp_eval: {str(error)}",
             },
         )
+
+
+@app.get("/v2/mcp_eval/trajectory/{evaluation_id}")
+async def interrupted_trajectory(evaluation_id: str):
+    """Return the native snapshot of exactly one interrupted attempt."""
+    try:
+        return json.loads(snapshot_path(evaluation_id).read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="Interrupted trajectory unavailable")
 
 
 @app.post("/v2/mcp_eval/cancel/{evaluation_id}")

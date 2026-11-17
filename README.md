@@ -1763,3 +1763,8 @@ Met Museum 直连兼容修复：保持 `metmuseum-mcp@1.0.0` 及原工具 schema
 `make build-atlas-runtime` 会把适配文件打入运行镜像；已运行的旧容器不会自动更新。
 工具详情与部门接口保留原实现。测试：
 `node --test services/agent-environment/tests/test_met_museum_compat.cjs`（先安装 Node MCP 依赖）。
+
+
+### Interrupted task trajectories
+
+A terminal task timeout retains `ERROR [task_timeout]` as the answer and the existing zero-score behavior. The completion service saves the completed conversation and the interrupted assistant stream under `MCP_RUNTIME_LOG_DIR/interrupted/<evaluation_id>.json`. After cancelling the attempt, the native completion script retrieves its snapshot and writes `raw_conversation_history` directly into the completion CSV. The scored CSV retains this analysis field; the judge only receives the original answer field. Only the last attempt is included in the CSV. This works without a platform or conversation proxy. If a snapshot is unavailable, the timeout result is still recorded and a warning is logged.
