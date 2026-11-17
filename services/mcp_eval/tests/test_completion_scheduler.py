@@ -244,6 +244,7 @@ def test_timeout_cancels_exact_attempt_before_retry(monkeypatch):
         first_id = events[0][1]
         second_id = events[2][1]
         assert first_id != second_id
+        assert caught.value.evaluation_id == second_id
         assert events == [
             ("post", first_id),
             ("cancel", first_id),
