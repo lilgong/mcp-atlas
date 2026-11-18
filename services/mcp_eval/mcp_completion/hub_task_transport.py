@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from .mcp_client.base_client import MCPClient
 from .schema import CallToolResponse, ToolDefinition
 from .runtime_log import write_runtime_event
+from .config import config
 
 router = APIRouter()
 # Opaque route IDs bind one server to one task client, never a user-supplied URL.
@@ -263,6 +264,8 @@ class HubTaskClient(MCPClient):
                 "X-MCPHub-Target": self.target,
             },
             json=body,
+            **({"timeout": config.PUBMED_TOOL_CALL_TIMEOUT}
+               if server == "pubmed" and operation == "call-tool" else {}),
         )
         if response.status_code != 200:
             write_runtime_event(
