@@ -1163,7 +1163,10 @@ def test_timeout_policy_defaults_leave_unrelated_providers_unchanged():
     for group in ['osm-nominatim', 'wikipedia']:
         assert relay.timeout_policy('https://test/', group) == {
             'networkTimeoutSeconds': 45, 'requestTimeoutSeconds': 140}
-    for group in ['ncbi', 'ncbi-key', 'ncbi-pmc', 'osm-routing', 'https']:
+    for group in ['ncbi', 'ncbi-key', 'ncbi-pmc']:
+        assert relay.timeout_policy('https://eutils.ncbi.nlm.nih.gov/', group) == {
+            'networkTimeoutSeconds': 60, 'requestTimeoutSeconds': 210}
+    for group in ['osm-routing', 'https']:
         assert relay.timeout_policy('https://eutils.ncbi.nlm.nih.gov/', group) == {
             'networkTimeoutSeconds': relay.UPSTREAM_TIMEOUT, 'requestTimeoutSeconds': relay.REQUEST_TIMEOUT}
 
@@ -1247,3 +1250,82 @@ def test_network_open_uses_category_timeout_clamped_to_remaining_budget(monkeypa
         relay._fetch_once('https://overpass-api.de/api/interpreter', False, budget=budget)
     assert len(seen) == 1 and expected - 0.5 < seen[0] <= expected
     assert 'sensitive' not in str(caught.value)
+
+
+def test_ncbi_attempt_deadlines_leave_room_for_three_rotating_attempts(monkeypatch):
+    clock = [0.0]
+    sessions = []
+    monkeypatch.setattr(relay.time, 'monotonic', lambda: clock[0])
+    controller = relay.Controller(0)
+    monkeypatch.setattr(controller, '_set_cooldown', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(relay, '_append_log', lambda record: None)
+
+    def fetch(url, allow_redirects, *, session_id=None, budget=None):
+        sessions.append(session_id)
+        assert budget.remaining('upstream') == pytest.approx(60)
+        if len(sessions) < 3:
+            clock[0] += 60.01
+            budget.remaining('upstream')
+        return 200, {}, b'ok', url
+
+    monkeypatch.setattr(relay, '_fetch_once', fetch)
+    budget = relay.RequestBudget(210, network_seconds=60)
+    result = controller.fetch('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi', False, budget=budget)
+    assert result[0] == 200 and result[4] == 3
+    assert len(set(sessions)) == 3
+    assert clock[0] < 210
+    assert budget.attempt_deadline is None
+
+
+def test_ncbi_stops_after_three_attempt_timeouts(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(relay.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(relay, '_append_log', lambda record: None)
+    controller = relay.Controller(0)
+    monkeypatch.setattr(controller, '_set_cooldown', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def fetch(url, allow_redirects, *, session_id=None, budget=None):
+        clock[0] += 60.01
+        budget.remaining('upstream')
+
+    monkeypatch.setattr(relay, '_fetch_once', fetch)
+    budget = relay.RequestBudget(210, network_seconds=60)
+    with pytest.raises(relay.RelayUpstreamTimeout):
+        controller.fetch('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi', False, budget=budget)
+    assert budget.attempts == 3
+    assert clock[0] < 210
+    assert budget.attempt_deadline is None
+
+
+def test_ncbi_attempt_does_not_extend_a_shorter_total_budget(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(relay.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(relay, '_append_log', lambda record: None)
+    controller = relay.Controller(0)
+    monkeypatch.setattr(controller, '_set_cooldown', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def fetch(url, allow_redirects, *, session_id=None, budget=None):
+        clock[0] += budget.remaining('upstream') + .01
+        budget.remaining('upstream')
+
+    monkeypatch.setattr(relay, '_fetch_once', fetch)
+    budget = relay.RequestBudget(85, network_seconds=60)
+    with pytest.raises(relay.RelayRequestExpired):
+        controller.fetch('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi', False, budget=budget)
+    assert budget.attempts == 2
+
+
+def test_attempt_deadline_interrupts_a_trickling_socket():
+    import socket
+    import time
+    reader, writer = socket.socketpair()
+    budget = relay.RequestBudget(2, network_seconds=.05)
+    budget.attempt_deadline = time.monotonic() + .05
+    try:
+        with relay._watch_socket(reader, budget):
+            assert reader.recv(1) == b''
+        with pytest.raises(relay.RelayUpstreamTimeout):
+            budget.remaining('upstream')
+    finally:
+        reader.close()
+        writer.close()

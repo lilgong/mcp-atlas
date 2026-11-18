@@ -115,6 +115,7 @@ class RequestBudget:
         self.public_targets: dict[tuple[str, int], tuple[str, ...]] = {}
         self.request_id = uuid.uuid4().hex
         self.cooldown_origin: tuple[str, int] | None = None
+        self.attempt_deadline: float | None = None
 
     def remaining(self, phase="queue") -> float:
         if self.disconnected and self.disconnected():
@@ -122,6 +123,11 @@ class RequestBudget:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise RelayRequestExpired(phase)
+        if self.attempt_deadline is not None:
+            attempt_remaining = self.attempt_deadline - time.monotonic()
+            if attempt_remaining <= 0:
+                raise RelayUpstreamTimeout("Relay attempt deadline exceeded", phase="upstream")
+            remaining = min(remaining, attempt_remaining)
         return remaining
 
 
@@ -320,6 +326,9 @@ class Controller:
             _append_log({**metadata, "event": "request_queued", "attempt": attempt + 1})
             self._wait_for_slot(budget)
             budget.attempts = attempt + 1
+            if group == "ncbi":
+                # One deadline spans CONNECT, headers and all body reads.
+                budget.attempt_deadline = time.monotonic() + budget.network_seconds
             try:
                 budget.remaining("upstream")
                 request_options = {"session_id": self._current_session_id(), "budget": budget}
@@ -385,6 +394,7 @@ class Controller:
                 else:
                     cooldown(5.0 * (2**attempt))
             finally:
+                budget.attempt_deadline = None
                 # Publish any cooldown before releasing capacity. A retry joins
                 # behind already queued requests rather than holding the slot.
                 with self.slots:
@@ -456,6 +466,9 @@ DEFAULT_LIMITS = {
     "osm-routing": {"minIntervalMs": 1000},
 }
 DEFAULT_TIMEOUTS = {
+    "ncbi": {"networkTimeoutSeconds": 60, "requestTimeoutSeconds": 210},
+    "ncbi-key": {"networkTimeoutSeconds": 60, "requestTimeoutSeconds": 210},
+    "ncbi-pmc": {"networkTimeoutSeconds": 60, "requestTimeoutSeconds": 210},
     "osm-overpass": {"networkTimeoutSeconds": 120, "requestTimeoutSeconds": 140},
     "osm-nominatim": {"networkTimeoutSeconds": 45, "requestTimeoutSeconds": 140},
     "wikipedia": {"networkTimeoutSeconds": 45, "requestTimeoutSeconds": 140},
@@ -643,7 +656,7 @@ def _watch_socket(upstream_socket, budget: RequestBudget):
         while not finished.wait(0.1):
             try:
                 budget.remaining("upstream")
-            except (RelayRequestExpired, RelayRequestCancelled):
+            except (RelayRequestExpired, RelayRequestCancelled, RelayUpstreamTimeout):
                 try:
                     current = upstream_socket() if callable(upstream_socket) else upstream_socket
                     if current is not None:
