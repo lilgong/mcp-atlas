@@ -10,7 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "pubmed_relay_server",
-    ROOT / "scripts" / "pubmed_relay_server.py",
+    ROOT / "scripts" / "egress_relay.py",
 )
 assert SPEC and SPEC.loader
 relay = importlib.util.module_from_spec(SPEC)

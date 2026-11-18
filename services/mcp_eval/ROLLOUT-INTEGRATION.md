@@ -71,3 +71,23 @@ Keep the local joint-author session lifecycle, evidence labels, readable Notion
 projection, evaluator task context and measured/unknown cache accounting.
 The remote stopped-service handling is retained without disabling model keys.
 Rebuild the image and recreate the runtime before using the new Hub transport.
+
+### 2026-11-18: synchronize origin/rollout b13aa74
+
+Merged upstream rollout into the synthesis adaptation branch. Preserve local
+bounded author sessions and their close endpoint, usage/cache accounting,
+explicit evaluator context policies, and removal of model RPM scheduling.
+Upstream adds runtime compatibility for E2B cleanup/quota handling, Gmail quota
+handling, Open Library relay routing, Twelve Data market-state results, and
+Slack month-boundary date preparation. ClinicalTrials 2.11.3, PubMed budgets and
+Overpass stream budgets already had equivalent local patches.
+
+Offline validation: completion tests initially 667 passed / 4 failed (new empty
+reasoning test omitted the local key-pool mock); after adding that mock all 18
+empty-reasoning tests passed. 45 subtests also passed in the full run. Runtime
+compatibility tests: 22 passed. E2B/Gmail Node tests: 11 passed. Google Workspace
+patch and Open Library Node tests could not run without their pinned npm
+packages; Twelve Data market-state tests require the deployment-only
+mcp_server_twelve_data package, absent from the local test venv. No live calls,
+image build, runtime reload, or production/configuration changes were performed.
+A rebuild/restart is required before new image-side compatibility takes effect.
