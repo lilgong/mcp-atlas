@@ -262,9 +262,9 @@ def test_pubmed_relay_reconstructs_upstream_response(monkeypatch):
     assert response.content == b"<ok/>"
     assert calls[0][0].endswith("/v1/fetch")
     assert calls[0][1]["headers"] == {"Authorization": "Bearer secret"}
-    assert calls[0][1]["timeout"] == pubmed.RELAY_TIMEOUT_SECONDS
+    assert calls[0][1]["timeout"] == max(pubmed.RELAY_TIMEOUT_SECONDS, 225.0)
     assert calls[0][1]["json"]["timeout_seconds"] == max(
-        pubmed.RELAY_TIMEOUT_SECONDS * 0.9, pubmed.RELAY_TIMEOUT_SECONDS - 5.0
+        max(pubmed.RELAY_TIMEOUT_SECONDS, 225.0) * 0.9, max(pubmed.RELAY_TIMEOUT_SECONDS, 225.0) - 5.0
     )
 
 
