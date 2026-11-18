@@ -464,3 +464,18 @@ def test_pubmed_router_allows_two_retried_http_calls_without_extending_other_too
             await router.close()
 
     asyncio.run(check())
+
+
+def test_osm_router_has_room_for_three_120_second_nodes():
+    from unittest.mock import AsyncMock
+    async def check():
+        factory = FakeFactory({'osm-mcp-server': FakeBackend([make_tool('find_nearby_places')])})
+        router = DirectMCPRouter({'mcpServers': {'osm-mcp-server': {}}}, factory)
+        result = mcp.types.CallToolResult(content=[], isError=False)
+        try:
+            with patch.object(FakeClient, 'call_tool_mcp', new=AsyncMock(return_value=result)) as call:
+                await router.call_tool('osm-mcp-server_find_nearby_places', {})
+                assert call.await_args.kwargs['timeout'] == 399
+        finally:
+            await router.close()
+    asyncio.run(check())

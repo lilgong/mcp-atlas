@@ -283,3 +283,15 @@ class PubMedTimeoutTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(post.await_args.kwargs['timeout'], 500)
             await client.call_tool('calculator_calculate', {})
             self.assertEqual(post.await_args.kwargs['timeout'], 180)
+
+
+class OsmTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_osm_client_reserves_time_for_all_three_nodes(self):
+        client = SandboxMCPClient('http://task', container_name='task')
+        client.tool_call_timeout = 180
+        with patch('mcp_completion.mcp_client.sandbox_client.docker_post_json',
+                   new=AsyncMock(return_value=(200, '[]'))) as post:
+            await client.call_tool('osm-mcp-server_find_nearby_places', {})
+            self.assertEqual(post.await_args.kwargs['timeout'], 420)
+            await client.call_tool('calculator_calculate', {})
+            self.assertEqual(post.await_args.kwargs['timeout'], 180)
