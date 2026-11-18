@@ -1760,7 +1760,7 @@ A terminal task timeout retains `ERROR [task_timeout]` as the answer and the exi
 
 直连模式也使用相同的 Relay 超时策略，无需 MCPHub。默认网络等待 / 总预算：
 Overpass 为 120 / 140 秒，arXiv 为 60 / 140 秒，Nominatim、Wikipedia 为
-45 / 140 秒；NCBI、路由及其他 HTTPS 保持 45 / 85 秒。总预算包含排队、
+45 / 140 秒；NCBI 为每次尝试 60 秒、整个请求 210 秒；路由及其他 HTTPS 保持 45 / 85 秒。总预算包含排队、
 重试和网络请求，调用方更短的超时仍优先。OSM 所有备用节点共享 140 秒工具
 截止时间，路由单次 20 秒不变，取消时关闭异步 Relay 请求。缓存仅由 Hub 提供，
 本项目的独立 Relay 不写入或读取 OSM 缓存。
@@ -1773,3 +1773,13 @@ Overpass 为 120 / 140 秒，arXiv 为 60 / 140 秒，Nominatim、Wikipedia 为
 
 ClinicalTrials 原生 2.11.3 的运行时、工具迁移和候选验证见
 [升级说明](docs/clinicaltrials-2-migration.md)。
+
+### PubMed Relay 重试预算
+
+NCBI 请求最多尝试三次（含首次），单次 60 秒硬期限覆盖连接、响应头及
+响应体读取；失败后换出口，三次尝试、退避及排队共享 210 秒总预算。
+PubMed 的 Relay HTTP 客户端至少预留 225 秒；搜索和 PDF 工具可顺序发出
+两次 HTTP 请求，因此 MCP 工具层预留 480 秒、评测客户端至少 500 秒。
+这些是上限，正常请求成功即返回；题目原有总时间限制仍生效。其他 MCP
+超时不随此项调整。已有 Relay limits.json 的自定义值会保留，升级后将
+NCBI、NCBI-key、NCBI-PMC 三行更新为 network=60、request=210。

@@ -70,7 +70,10 @@ def _request_via_relay(
         )
     if not math.isfinite(RELAY_TIMEOUT_SECONDS) or RELAY_TIMEOUT_SECONDS <= 0:
         raise PubMedUpstreamError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
-    budget = max(RELAY_TIMEOUT_SECONDS * 0.9, RELAY_TIMEOUT_SECONDS - 5.0)
+    # Three 60-second attempts plus backoff/queueing. The outer tool budget
+    # also covers search/PDF tools that make two sequential HTTP requests.
+    client_timeout = max(RELAY_TIMEOUT_SECONDS, 225.0)
+    budget = max(client_timeout * 0.9, client_timeout - 5.0)
     try:
         relay_response = _SESSION.post(
             f"{RELAY_URL}/v1/fetch",
@@ -81,7 +84,7 @@ def _request_via_relay(
                 "allow_redirects": allow_redirects,
                 "timeout_seconds": budget,
             },
-            timeout=RELAY_TIMEOUT_SECONDS,
+            timeout=client_timeout,
         )
         if relay_response.status_code == 402:
             try:
