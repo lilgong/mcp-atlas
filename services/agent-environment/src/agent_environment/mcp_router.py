@@ -21,6 +21,7 @@ DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 50.0
 # without weakening the outer evaluator's 180-second deadline.
 DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 150.0
 PUBMED_TOOL_CALL_TIMEOUT_SECONDS = 480.0
+OSM_TOOL_CALL_TIMEOUT_SECONDS = 400.0
 DEFAULT_CLOSE_TIMEOUT_SECONDS = 5.0
 DEFAULT_STARTUP_CONCURRENCY = 12
 DEFAULT_REFRESH_MIN_INTERVAL_SECONDS = 60.0
@@ -346,7 +347,9 @@ class DirectMCPRouter:
         generation = await self._acquire_generation(state)
         tool_call_timeout = (
             max(self._tool_call_timeout, PUBMED_TOOL_CALL_TIMEOUT_SECONDS)
-            if server_name == "pubmed" else self._tool_call_timeout
+            if server_name == "pubmed" else
+            max(self._tool_call_timeout, OSM_TOOL_CALL_TIMEOUT_SECONDS)
+            if server_name == "osm-mcp-server" else self._tool_call_timeout
         )
         request_timeout = max(
             0.001,
