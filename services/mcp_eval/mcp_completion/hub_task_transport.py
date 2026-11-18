@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from .mcp_client.base_client import MCPClient
 from .schema import CallToolResponse, ToolDefinition
 from .runtime_log import write_runtime_event
+from .config import config
 from .hub_config import hub_catalog, _TRANSIENT_STATUSES
 
 router = APIRouter()
@@ -339,6 +340,8 @@ class HubTaskClient(MCPClient):
                 "Authorization": f"Bearer {data['token']}",
             },
             json=body,
+            **({"timeout": config.PUBMED_TOOL_CALL_TIMEOUT}
+               if server == "pubmed" and operation == "call-tool" else {}),
         )
         if response.status_code != 200:
             write_runtime_event(
