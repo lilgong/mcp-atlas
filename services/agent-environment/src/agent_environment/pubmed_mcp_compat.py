@@ -20,6 +20,7 @@ from typing import Any
 
 import requests
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -351,7 +352,7 @@ def search_pubmed_key_words(
     try:
         return search_key_words(key_words, num_results)
     except Exception as exc:
-        return [{"error": f"An error occurred while searching: {exc}"}]
+        raise ToolError(f"An error occurred while searching: {exc}") from exc
 
 
 @mcp.tool()
@@ -369,7 +370,7 @@ def search_pubmed_advanced(
             term, title, author, journal, start_date, end_date, num_results
         )
     except Exception as exc:
-        return [{"error": f"An error occurred while performing advanced search: {exc}"}]
+        raise ToolError(f"An error occurred while performing advanced search: {exc}") from exc
 
 
 @mcp.tool()
@@ -377,7 +378,7 @@ def get_pubmed_article_metadata(pmid: str | int) -> dict[str, str]:
     try:
         return get_metadata(pmid) or {"error": f"No metadata found for PMID: {pmid}"}
     except Exception as exc:
-        return {"error": f"An error occurred while fetching metadata: {exc}"}
+        raise ToolError(f"An error occurred while fetching metadata: {exc}") from exc
 
 
 @mcp.tool()
@@ -385,7 +386,7 @@ def download_pubmed_pdf(pmid: str | int) -> str:
     try:
         return download_pdf(pmid)
     except Exception as exc:
-        return f"An error occurred while attempting to download the PDF: {exc}"
+        raise ToolError(f"An error occurred while attempting to download the PDF: {exc}") from exc
 
 
 def main() -> None:
