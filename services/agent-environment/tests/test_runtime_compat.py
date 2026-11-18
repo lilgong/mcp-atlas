@@ -13,7 +13,7 @@ from agent_environment.twelvedata_mcp_compat import (
     daily_credit_error,
     safe_upstream_error,
 )
-from agent_environment.mcp_router import DEFAULT_TOOL_CALL_TIMEOUT_SECONDS
+from agent_environment.mcp_router import DEFAULT_TOOL_CALL_TIMEOUT_SECONDS, OSM_TOOL_CALL_TIMEOUT_SECONDS
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -337,11 +337,11 @@ def test_osm_has_ordered_fallbacks_inside_a_sufficient_router_budget():
         'SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"'
         in compat
     )
-    assert "OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 140" in compat
-    assert "TOOL_DEADLINE_SECONDS = 140" in compat
+    assert "OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 120" in compat
+    assert "TOOL_DEADLINE_SECONDS = 380" in compat
     assert '"User-Agent": "mcp-atlas/1.0' in compat
     assert "{406, 429, 500, 502, 503, 504}" in compat
-    assert DEFAULT_TOOL_CALL_TIMEOUT_SECONDS > 140
+    assert OSM_TOOL_CALL_TIMEOUT_SECONDS > 380
     assert "ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20" in compat
     assert "routing.openstreetmap.de/routed-car" in compat
     assert "routing.openstreetmap.de/routed-bike" in compat
