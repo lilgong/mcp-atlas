@@ -26,8 +26,8 @@ UPSTREAM_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 SECONDARY_OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"
 FALLBACK_OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 RETRYABLE_STATUSES = frozenset({406, 429, 500, 502, 503, 504})
-OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 140
-TOOL_DEADLINE_SECONDS = 140
+OVERPASS_ATTEMPT_TIMEOUT_SECONDS = 120
+TOOL_DEADLINE_SECONDS = 380
 _tool_deadline = contextvars.ContextVar('osm_tool_deadline', default=None)
 ROUTE_ATTEMPT_TIMEOUT_SECONDS = 20
 EXPLORE_ATTEMPT_TIMEOUT_SECONDS = 25
@@ -69,6 +69,7 @@ class _RelayRequestContext:
         self.method = method
         self.url = url
         self.kwargs = kwargs
+        self.overpass_attempt = False
 
     async def __aenter__(self):
         body = self.kwargs.get("data")
@@ -79,6 +80,10 @@ class _RelayRequestContext:
         timeout = self.kwargs.get("timeout")
         if isinstance(timeout, aiohttp.ClientTimeout):
             timeout = timeout.total
+        if self.overpass_attempt and timeout is not None:
+            # Relay subtracts five seconds for delivery. Grant the upstream
+            # node its full 120 seconds without spending another node's budget.
+            timeout += 5
         deadline = _tool_deadline.get()
         if deadline is not None:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -139,17 +144,15 @@ class _FallbackRequestContext:
                 **OVERPASS_HEADERS,
                 **dict(kwargs.get("headers") or {}),
             }
-            kwargs.setdefault(
-                "timeout",
-                aiohttp.ClientTimeout(total=OVERPASS_ATTEMPT_TIMEOUT_SECONDS),
-            )
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise TimeoutError('OSM tool total deadline exceeded during endpoint fallback')
-            original_timeout = kwargs.get('timeout')
-            seconds = original_timeout.total if isinstance(original_timeout, aiohttp.ClientTimeout) else original_timeout
-            kwargs['timeout'] = aiohttp.ClientTimeout(total=min(seconds, remaining) if seconds else remaining)
+            kwargs['timeout'] = aiohttp.ClientTimeout(
+                total=min(OVERPASS_ATTEMPT_TIMEOUT_SECONDS, remaining)
+            )
             context = self.request(self.session, url, *self.args, **kwargs)
+            if isinstance(context, _RelayRequestContext):
+                context.overpass_attempt = True
             try:
                 response = await context.__aenter__()
             except (aiohttp.ClientError, asyncio.TimeoutError, RelayNetworkError) as exc:
