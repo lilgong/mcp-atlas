@@ -111,7 +111,9 @@ class SandboxMCPClient(MCPClient):
             )
             call_timeout = (
                 max(self.tool_call_timeout, config.PUBMED_TOOL_CALL_TIMEOUT)
-                if tool_name.startswith("pubmed_") else self.tool_call_timeout
+                if tool_name.startswith("pubmed_") else
+                max(self.tool_call_timeout, config.OSM_TOOL_CALL_TIMEOUT)
+                if tool_name.startswith("osm-mcp-server_") else self.tool_call_timeout
             )
             body = {
                 "tool_name": backend_tool_name,
