@@ -111,6 +111,10 @@ class SandboxMCPClient(MCPClient):
             backend_tool_name = self._canonical_to_backend.get(
                 tool_name, tool_name
             )
+            call_timeout = (
+                max(self.tool_call_timeout, config.PUBMED_TOOL_CALL_TIMEOUT)
+                if tool_name.startswith("pubmed_") else self.tool_call_timeout
+            )
             body = {
                 "tool_name": backend_tool_name,
                 "tool_args": args,
@@ -122,7 +126,7 @@ class SandboxMCPClient(MCPClient):
                     self.container_name,
                     "/call-tool",
                     body,
-                    timeout=self.tool_call_timeout,
+                    timeout=call_timeout,
                 )
                 if status_code != 200:
                     return CallToolResponse(
@@ -132,7 +136,7 @@ class SandboxMCPClient(MCPClient):
                 response_data = json.loads(response_text)
             else:
                 async with httpx.AsyncClient(
-                    timeout=self.tool_call_timeout
+                    timeout=call_timeout
                 ) as client:
                     response = await client.post(
                         f"{self.sandbox_url}/call-tool",
@@ -153,9 +157,9 @@ class SandboxMCPClient(MCPClient):
             )
 
         except httpx.ReadTimeout:
-            logger.error(f"Tool {tool_name} timed out after {self.tool_call_timeout}s")
+            logger.error(f"Tool {tool_name} timed out after {call_timeout}s")
             raise MCPClientToolExecutionError(
-                f"Tool {tool_name} timed out after {self.tool_call_timeout}s"
+                f"Tool {tool_name} timed out after {call_timeout}s"
             )
         except Exception as error:
             logger.error(f"Failed to call tool {tool_name} in sandbox: {error}")

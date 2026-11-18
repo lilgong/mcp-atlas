@@ -442,3 +442,25 @@ class DirectMCPRouterTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_pubmed_router_allows_two_retried_http_calls_without_extending_other_tools():
+    from unittest.mock import AsyncMock
+
+    async def check():
+        factory = FakeFactory({
+            'pubmed': FakeBackend([make_tool('search_pubmed_advanced')]),
+            'calculator': FakeBackend([make_tool('calculate')]),
+        })
+        router = DirectMCPRouter({'mcpServers': {'pubmed': {}, 'calculator': {}}}, factory)
+        result = mcp.types.CallToolResult(content=[], isError=False)
+        try:
+            with patch.object(FakeClient, 'call_tool_mcp', new=AsyncMock(return_value=result)) as call:
+                await router.call_tool('pubmed_search_pubmed_advanced', {})
+                assert call.await_args.kwargs['timeout'] == 479
+                await router.call_tool('calculator_calculate', {})
+                assert call.await_args.kwargs['timeout'] == 149
+        finally:
+            await router.close()
+
+    asyncio.run(check())
