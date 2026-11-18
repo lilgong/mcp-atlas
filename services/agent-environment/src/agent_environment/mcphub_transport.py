@@ -69,7 +69,7 @@ def hub_server_configs(
         name: {
             "url": f"{base}/mcp/{quote(name, safe='')}",
             "transport": "streamable-http",
-            "sse_read_timeout": timeout,
+            "sse_read_timeout": max(timeout, 420) if name == "osm-mcp-server" else timeout,
             "headers": dict(headers),
             "atlas_hub_prefix": f"{name}{separator}",
         }
