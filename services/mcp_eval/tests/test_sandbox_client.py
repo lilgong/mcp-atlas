@@ -271,3 +271,15 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PubMedTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_pubmed_gets_the_extended_call_budget(self):
+        client = SandboxMCPClient('http://task', container_name='task')
+        client.tool_call_timeout = 180
+        with patch('mcp_completion.mcp_client.sandbox_client.docker_post_json',
+                   new=AsyncMock(return_value=(200, '[]'))) as post:
+            await client.call_tool('pubmed_search_pubmed_advanced', {})
+            self.assertEqual(post.await_args.kwargs['timeout'], 500)
+            await client.call_tool('calculator_calculate', {})
+            self.assertEqual(post.await_args.kwargs['timeout'], 180)

@@ -20,6 +20,7 @@ DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 50.0
 # attempt before succeeding or falling back. Keep enough room for all three
 # without weakening the outer evaluator's 180-second deadline.
 DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 150.0
+PUBMED_TOOL_CALL_TIMEOUT_SECONDS = 480.0
 DEFAULT_CLOSE_TIMEOUT_SECONDS = 5.0
 DEFAULT_STARTUP_CONCURRENCY = 12
 DEFAULT_REFRESH_MIN_INTERVAL_SECONDS = 60.0
@@ -343,12 +344,16 @@ class DirectMCPRouter:
         server_name, raw_name = route
         state = self._states[server_name]
         generation = await self._acquire_generation(state)
+        tool_call_timeout = (
+            max(self._tool_call_timeout, PUBMED_TOOL_CALL_TIMEOUT_SECONDS)
+            if server_name == "pubmed" else self._tool_call_timeout
+        )
         request_timeout = max(
             0.001,
-            self._tool_call_timeout - min(1.0, self._tool_call_timeout * 0.1),
+            tool_call_timeout - min(1.0, tool_call_timeout * 0.1),
         )
         try:
-            async with asyncio.timeout(self._tool_call_timeout):
+            async with asyncio.timeout(tool_call_timeout):
                 async with generation.client:
                     result = await generation.client.call_tool_mcp(
                         raw_name,
@@ -358,7 +363,7 @@ class DirectMCPRouter:
         except TimeoutError as exc:
             message = (
                 f"Tool '{public_name}' timed out after "
-                f"{self._tool_call_timeout:g}s"
+                f"{tool_call_timeout:g}s"
             )
             await self._mark_failure_and_retire(
                 state,
@@ -376,7 +381,7 @@ class DirectMCPRouter:
             if exc.error.code == 408:
                 message = (
                     f"Tool '{public_name}' timed out after "
-                    f"{self._tool_call_timeout:g}s"
+                    f"{tool_call_timeout:g}s"
                 )
                 await self._mark_failure_and_retire(
                     state,
