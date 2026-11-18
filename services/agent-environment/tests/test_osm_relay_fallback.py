@@ -141,7 +141,7 @@ class OsmRelayBudgets(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await context.__aenter__()).status, 200)
             await context.__aexit__(None, None, None)
         self.assertEqual([url for url, _ in seen], ['https://first.test', 'https://second.test'])
-        self.assertTrue(all(130 < seconds <= 140 for _, seconds in seen))
+        self.assertTrue(all(seconds == 125 for _, seconds in seen))
         self.assertLessEqual(seen[1][1], seen[0][1])
 
 
@@ -197,3 +197,42 @@ class SharedToolDeadline(unittest.IsolatedAsyncioTestCase):
                 await wrapped()
             self.assertTrue(cancelled.is_set())
             self.assertIsNone(osm._tool_deadline.get())
+
+
+class PerNodeBudget(unittest.IsolatedAsyncioTestCase):
+    async def test_third_node_retains_120_seconds_after_two_slow_failures(self):
+        now = [0.0]
+        budgets = []
+        class Request:
+            async def __aenter__(self):
+                if len(budgets) < 3:
+                    now[0] += 120
+                    raise relay.RelayNetworkError('node timed out')
+                now[0] += 100
+                return types.SimpleNamespace(status=200)
+            async def __aexit__(self, *_):
+                return False
+        def request(_session, _target, **kwargs):
+            budgets.append(kwargs['timeout'].total)
+            return Request()
+        with patch.object(osm.asyncio, 'get_running_loop', return_value=types.SimpleNamespace(time=lambda: now[0])):
+            context = osm._FallbackRequestContext(None, request,
+                ('first', 'second', 'third'), (), {'timeout': osm.aiohttp.ClientTimeout(total=25)})
+            self.assertEqual((await context.__aenter__()).status, 200)
+            await context.__aexit__(None, None, None)
+        self.assertEqual(budgets, [120, 120, 120])
+        self.assertEqual(now[0], 340)
+        self.assertLess(now[0], osm.TOOL_DEADLINE_SECONDS)
+
+    async def test_relay_payload_grants_the_node_full_120_seconds(self):
+        seen = []
+        async def send(method, url, **kwargs):
+            seen.append(relay.request_budget_seconds(kwargs['timeout_seconds'], url=url))
+            return relay.RelayResponse(200, {}, b'{}', url)
+        with patch.object(osm, 'relay_fetch_async', side_effect=send):
+            context = osm._FallbackRequestContext(None,
+                lambda _session, target, **kwargs: osm._RelayRequestContext('POST', target, kwargs),
+                ('https://overpass-api.de/api/interpreter',), (), {})
+            await context.__aenter__()
+            await context.__aexit__(None, None, None)
+        self.assertEqual(seen, [120])
