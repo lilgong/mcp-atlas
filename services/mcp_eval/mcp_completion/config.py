@@ -46,6 +46,7 @@ class Config:
     LLM_MAX_ATTEMPTS: int = max(1, int(os.getenv("LLM_MAX_ATTEMPTS", "3")))
     LLM_RETRY_DELAY: float = max(0.0, float(os.getenv("LLM_RETRY_DELAY", "3")))
     TOOL_CALL_TIMEOUT: float = float(os.getenv("TOOL_CALL_TIMEOUT", "180.0"))
+    PUBMED_TOOL_CALL_TIMEOUT: float = max(TOOL_CALL_TIMEOUT, 500.0)
     LIST_TOOLS_TIMEOUT: float = float(os.getenv("LIST_TOOLS_TIMEOUT", "180.0"))
 
     # Logging configuration
