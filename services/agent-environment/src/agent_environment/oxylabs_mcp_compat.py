@@ -26,6 +26,8 @@ def normalize_scraper_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def install_compatibility_patch() -> None:
     """Patch the pinned package once, failing clearly if upstream drifted."""
     from oxylabs_mcp import utils
+    from oxylabs_mcp.exceptions import MCPServerError
+    from mcp.server.fastmcp.exceptions import ToolError
 
     actual_version = version("oxylabs-mcp")
     if actual_version != EXPECTED_OXYLABS_MCP_VERSION:
@@ -34,6 +36,15 @@ def install_compatibility_patch() -> None:
             f"oxylabs-mcp=={EXPECTED_OXYLABS_MCP_VERSION}, "
             f"found {actual_version}"
         )
+    # Upstream returns exception text as a successful str tool result. Raising
+    # FastMCP's ToolError preserves the message and emits isError=true for every
+    # scraper, including recoverable HTTP 429 responses (not account breakers).
+    async def process_error(self, ctx):
+        message = str(self)
+        await ctx.error(message)
+        raise ToolError(message) from None
+
+    MCPServerError.process = process_error
     wrapper = getattr(utils, "_OxylabsClientWrapper", None)
     if wrapper is None or not hasattr(wrapper, "scrape"):
         raise RuntimeError(
