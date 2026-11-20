@@ -79,6 +79,9 @@ def is_fatal_mcp_account_error(server: str, result: Any) -> bool:
         if "team is blocked: missing payment method" in serialized:
             return True
 
+    if server == "oxylabs" and _is_oxylabs_plan_exhausted(result):
+        return True
+
     return is_fatal_tool_result(result)
 
 
@@ -296,3 +299,29 @@ def _serialize_tool_result(result: Any) -> str:
     else:
         return str(result or "")
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _is_oxylabs_plan_exhausted(result: Any) -> bool:
+    """Match the provider's explicit exhausted-plan error, never generic 429s.
+
+    Accept the pinned MCP's legacy successful text envelope as well as its
+    corrected error envelope. Ordinary scraped content mentioning quotas must
+    not stop a run.
+    """
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    elif isinstance(result, dict):
+        payload = result
+    else:
+        return False
+    marker = "your current plan's quota has been reached. upgrade your plan to continue scraping."
+    for item in payload.get("content", []):
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        text = item["text"].strip().casefold()
+        # The error must be an HTTP failure from the scraper, rather than a
+        # matching sentence found in a scraped page or an arbitrary MCP result.
+        if (re.match(r"(?:error executing tool [^:]+:\s*)?http error during post request:\s*429\s*-", text)
+                and marker in text):
+            return True
+    return False

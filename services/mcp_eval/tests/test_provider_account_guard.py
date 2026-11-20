@@ -365,3 +365,35 @@ def test_all_permanent_markers_override_time_window_quota(marker):
     assert not is_time_based_quota_error(text)
     assert is_fatal_account_error(text)
     assert is_fatal_mcp_account_error("google-workspace", result)
+
+
+_OXYLABS_PLAN_ERROR = (
+    "HTTP error during POST request: 429 - "
+    '{"error":{"message":"oxylabs error (status 429): '
+    "Your current plan's quota has been reached. Upgrade your plan to continue scraping."
+    '"}}'
+)
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+@pytest.mark.parametrize("prefix", ["", "Error executing tool universal_scraper: "])
+def test_oxylabs_exhausted_plan_stops_legacy_and_corrected_results(is_error, prefix):
+    result = {"isError": is_error, "content": [{"type": "text", "text": prefix + _OXYLABS_PLAN_ERROR}]}
+    assert is_fatal_mcp_account_error("oxylabs", result)
+    assert not is_fatal_mcp_account_error("exa", result)
+
+
+@pytest.mark.parametrize("text", [
+    "HTTP error during POST request: 429 - Too many requests",
+    "HTTP error during POST request: 429 - Requests per minute exceeded; retry later",
+    "HTTP error during POST request: 429 - Concurrent request limit reached",
+    "HTTP error during POST request: 429 - Rate limit exceeded",
+    "HTTP error during POST request: 504 - Gateway timeout",
+    "Article: Your current plan's quota has been reached. Upgrade your plan to continue scraping.",
+    "HTTP error during POST request: 429 - Your current plan's quota has been reached. Retry in 60 seconds.",
+])
+@pytest.mark.parametrize("is_error", [False, True])
+def test_oxylabs_transient_failures_and_scraped_text_are_not_fatal(text, is_error):
+    assert not is_fatal_mcp_account_error("oxylabs", {
+        "isError": is_error, "content": [{"type": "text", "text": text}],
+    })
