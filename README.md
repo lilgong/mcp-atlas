@@ -55,6 +55,13 @@ completion 服务（PORT）
 - `mcp-code-executor_install_dependencies` 可用，与官方工具面一致。
 - 模型请求、工具调用、容器生命周期和容器日志写入 `MCP_RUNTIME_LOG_DIR`。
 
+评测默认启用答案来源访问限制：在工具执行前拒绝访问 MCP-Atlas 公开题库、
+答案仓库及已知本地题库副本；工具结果返回模型前，过滤搜索摘要中的受保护来源。
+正常任务数据和其他仓库仍可访问。被拒绝的调用返回明确的工具错误，不修改题目或评分。
+策略 `atlas-answer-access-v2` 的命中记录在运行日志 `answer_material_blocked` 事件中，
+适用于直连及 MCPHub 模式，无需 Hub 改动。该规则不提供网络隔离，不能阻止任意代码
+拼接隐藏目标地址、外部 E2B 执行环境内部联网或访问未知的答案镜像。
+
 运行时镜像只包含程序和依赖，不包含评测 `/data`。文件 fixture 和 Mongo fixture
 都在部署时显式指定。
 
