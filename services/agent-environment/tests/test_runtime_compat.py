@@ -95,7 +95,9 @@ def test_runtime_templates_use_only_required_compatibility_entrypoints():
         "-m",
         "agent_environment.oxylabs_mcp_compat",
     ]
-    assert shared["ddg-search"]["args"][-1] == "duckduckgo-mcp-server"
+    assert shared["ddg-search"]["args"][-1].endswith("ddg_mcp_compat.py")
+    assert shared["ddg-search"]["args"][-2] == "python"
+    assert shared["ddg-search"]["env"]["MCP_RELAY_URL"] == "${MCP_RELAY_URL}"
     assert "duckduckgo-mcp-server[browser]==0.6.1" in shared["ddg-search"]["args"]
     assert shared["osm-mcp-server"]["args"][-1].endswith("osm_mcp_compat.py")
     assert shared["osm-mcp-server"]["env"] == {

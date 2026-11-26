@@ -333,7 +333,7 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "src/agent_environment/oxylabs_mcp_compat.py",
                 paths,
             )
-            self.assertNotIn("src/agent_environment/ddg_mcp_compat.py", paths)
+            self.assertIn("src/agent_environment/ddg_mcp_compat.py", paths)
             self.assertIn(
                 "src/agent_environment/osm_mcp_compat.py",
                 paths,

@@ -74,6 +74,7 @@ COPY src/agent_environment/__init__.py src/agent_environment/logger.py \
      src/agent_environment/mcphub_transport.py \
      src/agent_environment/usage_audit.py \
      src/agent_environment/arxiv_mcp_compat.py \
+     src/agent_environment/ddg_mcp_compat.py \
      src/agent_environment/egress_relay_client.py \
      src/agent_environment/osm_mcp_compat.py \
      src/agent_environment/oxylabs_mcp_compat.py \
