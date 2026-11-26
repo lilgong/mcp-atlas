@@ -1024,6 +1024,11 @@ class Handler(BaseHTTPRequestHandler):
             if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
                     or not math.isfinite(seconds) or seconds <= 0):
                 raise ValueError("Invalid request deadline")
+            caller_network = payload.get("network_timeout_seconds")
+            if caller_network is not None and (
+                    isinstance(caller_network, bool) or not isinstance(caller_network, (int, float))
+                    or not math.isfinite(caller_network) or caller_network <= 0):
+                raise ValueError("Invalid upstream network timeout")
             budget = RequestBudget(min(float(seconds), 600), self._client_disconnected)
             request_id = budget.request_id
             url = str(payload["url"])
@@ -1052,7 +1057,10 @@ class Handler(BaseHTTPRequestHandler):
             policy = timeout_policy(url, target_group)
             budget.total_seconds = min(float(seconds), policy["requestTimeoutSeconds"])
             budget.deadline = min(budget.deadline, started + budget.total_seconds)
-            budget.network_seconds = policy["networkTimeoutSeconds"]
+            budget.network_seconds = (
+                min(policy["networkTimeoutSeconds"], float(caller_network))
+                if caller_network is not None else policy["networkTimeoutSeconds"]
+            )
             status, headers, body, final_url, attempts, queued_ms = controller_for_url(url, target_group).fetch(
                 url, bool(payload.get("allow_redirects", False)),
                 budget=budget,

@@ -1329,3 +1329,31 @@ def test_attempt_deadline_interrupts_a_trickling_socket():
     finally:
         reader.close()
         writer.close()
+
+
+@pytest.mark.parametrize('network,expected', [(5, 5), (500, 120), (None, 120)])
+def test_caller_network_budget_starts_after_admission_and_cannot_raise_operator_limit(http_relay, monkeypatch, network, expected):
+    import json
+    import urllib.request
+    seen = []
+    monkeypatch.setattr(relay, 'controller_for_url', lambda *a: relay.Controller(0))
+    def fetch(url, *_args, budget, **_kwargs):
+        seen.append((budget.total_seconds, budget.network_seconds))
+        return 200, {}, b'ok', url
+    monkeypatch.setattr(relay, '_fetch_once', fetch)
+    payload = {'url': 'https://overpass-api.de/api/interpreter', 'timeout_seconds': 600}
+    if network is not None: payload['network_timeout_seconds'] = network
+    request = urllib.request.Request('http://%s:%s/v1/fetch' % http_relay,
+        data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer test-relay-token'})
+    with urllib.request.urlopen(request, timeout=2) as response: assert response.status == 200
+    assert seen == [(140, expected)]
+
+@pytest.mark.parametrize('network', [0, -1, True, '10'])
+def test_invalid_caller_network_budget_is_rejected_before_fetch(http_relay, network):
+    import json
+    import urllib.request
+    request = urllib.request.Request('http://%s:%s/v1/fetch' % http_relay,
+        data=json.dumps({'url': 'https://export.arxiv.org/api/query', 'network_timeout_seconds': network}).encode(),
+        headers={'Authorization': 'Bearer test-relay-token'})
+    with pytest.raises(urllib.error.HTTPError) as error: urllib.request.urlopen(request, timeout=2)
+    assert error.value.code == 400
