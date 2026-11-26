@@ -119,6 +119,38 @@ function logUsage(service, key, url, status, durationMs, errorName) {
   }
 }
 
+function normalizeLaraErrorResponse(response, secret = '') {
+  const status = response.statusCode;
+  if (!(status >= 400)) return response;
+  let body = response.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { /* Plain-text upstream error. */ }
+  }
+  function message(value, depth = 0) {
+    if (depth > 4 || value == null) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value !== 'object') return '';
+    for (const key of ['message', 'error', 'detail', 'msg', 'description']) {
+      const text = message(value[key], depth + 1);
+      if (text) return text;
+    }
+    return '';
+  }
+  let text = message(body).slice(0, 4096);
+  if (secret) text = text.split(secret).join('[REDACTED]');
+  text = text.replace(/Bearer\s+[^\s"'<>]+/gi, 'Bearer [REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]+/g, '[REDACTED]')
+    .replace(/([?&](?:key|api_key|token|access_token)=)[^&\s"'<>]+/gi, '$1[REDACTED]')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  if (/<(?:!doctype|html|body)\b/i.test(text)) text = 'Gateway returned an HTML error response';
+  if (!text) text = 'Upstream rejected the request without a readable error message';
+  return { ...response, body: {
+    ...(body && typeof body === 'object' && !Array.isArray(body) ? body : {}),
+    type: typeof body?.type === 'string' ? body.type : 'YibuUpstreamError',
+    message: `Lara upstream HTTP ${status}: ${text}`,
+  } };
+}
+
 function installLaraNodeTransport(key) {
   const metadata = require("@translated/lara/package.json");
   if (metadata.version !== "1.13.0") {
@@ -126,6 +158,10 @@ function installLaraNodeTransport(key) {
   }
   const { LaraClient } = require("@translated/lara/lib/net/lara/client.js");
   const { NodeLaraClient } = require("@translated/lara/lib/net/lara/node-client.js");
+  const originalCreateApiError = LaraClient.prototype.createApiError;
+  LaraClient.prototype.createApiError = function createYibuApiError(response) {
+    return originalCreateApiError.call(this, normalizeLaraErrorResponse(response, key));
+  };
   const originalSend = NodeLaraClient.prototype.send;
   const originalStream = NodeLaraClient.prototype.sendAndGetStream;
 
@@ -255,6 +291,7 @@ function install(service) {
 
 module.exports = {
   install,
+  normalizeLaraErrorResponse,
   isUpstreamRequest,
   laraSessionToken,
   rewriteHeaders,
