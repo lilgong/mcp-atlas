@@ -20,7 +20,13 @@ from ..account_guard import (
     is_fatal_mcp_account_error,
     is_time_based_quota_error,
 )
-from ..schema import CallToolResponse, ToolDefinition
+from ..answer_material_policy import (
+    DENIED,
+    POLICY_VERSION,
+    filter_response,
+    request_is_protected,
+)
+from ..schema import CallToolResponse, TextContent, ToolDefinition
 from ..shared_rate_gate import SharedRateGate, SharedRateLease
 from ..task_sandbox import TaskSandbox
 from ..tool_policy import (
@@ -433,6 +439,13 @@ class IsolatedMCPClient(MCPClient):
             # implies that a correctly enabled tool is unavailable.
             raise ToolPolicyError(f"Unknown tool: {tool_name}")
 
+        if request_is_protected(tool_name, args):
+            write_runtime_event(
+                "tools", "answer_material_blocked", task_id=self.task_id,
+                tool_name=tool_name, stage="request", policy_version=POLICY_VERSION,
+            )
+            return CallToolResponse(content=[TextContent(type="text", text=DENIED)], is_error=True)
+
         route = route_for_tool(tool_name)
         client = self._clients.get(route)
         if client is None:
@@ -500,7 +513,6 @@ class IsolatedMCPClient(MCPClient):
                 shared_cooldown_seconds,
             )
 
-        serialized = jsonable(response)
         server = server_for_tool(tool_name) or tool_name
         credential_envs = credential_envs_for_mcp_server(server)
         if is_fatal_mcp_account_error(server, response):
@@ -521,6 +533,16 @@ class IsolatedMCPClient(MCPClient):
                 source_name=server,
                 credential_envs=credential_envs,
             )
+        if sum(len(block.text) for block in response.content if isinstance(block, TextContent)) > 128 * 1024:
+            response, filtered = await asyncio.to_thread(filter_response, response)
+        else:
+            response, filtered = filter_response(response)
+        if filtered:
+            write_runtime_event(
+                "tools", "answer_material_blocked", task_id=self.task_id,
+                call_id=call_id, tool_name=tool_name, stage="response",
+                policy_version=POLICY_VERSION,
+            )
         write_runtime_event(
             "tools",
             "tool_call_completed",
@@ -532,6 +554,6 @@ class IsolatedMCPClient(MCPClient):
             is_error=response.is_error,
             rate_limited=rate_limited,
             rate_limit_cooldown_seconds=rate_limit_cooldown_seconds,
-            result_chars=len(str(serialized)),
+            result_chars=len(str(jsonable(response))),
         )
         return response

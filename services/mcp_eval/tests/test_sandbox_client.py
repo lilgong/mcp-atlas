@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from mcp_completion.errors import MCPClientToolExecutionError
+from mcp_completion.schema import CallToolResponse
 from mcp_completion.mcp_client import isolated_client
 from mcp_completion.mcp_client.isolated_client import (
     IsolatedMCPClient,
@@ -163,7 +164,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
             enabled_tools=["mongodb_find"],
         )
         backend = AsyncMock()
-        backend.call_tool.return_value = SimpleNamespace(is_error=False)
+        backend.call_tool.return_value = CallToolResponse()
         client._entered = True
         client.allowed_tools = {"mongodb_find"}
         client._clients[ToolRoute.TASK_LOCAL] = backend
@@ -184,7 +185,7 @@ class SandboxClientAllowlistTests(unittest.IsolatedAsyncioTestCase):
 
         async def record_call(*_args):
             starts.append(time.monotonic())
-            return SimpleNamespace(is_error=False)
+            return CallToolResponse()
 
         clients = []
         for index in range(2):
