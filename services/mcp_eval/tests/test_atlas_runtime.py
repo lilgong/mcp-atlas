@@ -378,7 +378,7 @@ class AtlasRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/opt/mcp-code-venv", template)
             self.assertNotIn("filesystem_server_compat.mjs", template)
             self.assertIn("oxylabs_mcp_compat", template)
-            self.assertNotIn("ddg_mcp_compat", template)
+            self.assertIn("ddg_mcp_compat", template)
             self.assertIn("osm_mcp_compat", template)
             self.assertIn("pubmed_mcp_compat", template)
             self.assertNotIn("metmuseum_mcp_compat", template)
