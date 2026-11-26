@@ -99,8 +99,14 @@
         "mcp==1.28.1",
         "--with",
         "duckduckgo-mcp-server[browser]==0.6.1",
-        "duckduckgo-mcp-server"
-      ]
+        "python",
+        "/agent-environment/src/agent_environment/ddg_mcp_compat.py"
+      ],
+      "env": {
+        "MCP_RELAY_URL": "${MCP_RELAY_URL}",
+        "MCP_RELAY_TOKEN": "${MCP_RELAY_TOKEN}",
+        "MCP_RELAY_TIMEOUT_SECONDS": "${MCP_RELAY_TIMEOUT_SECONDS}"
+      }
     },
     "desktop-commander": {
       "command": "npx",
